@@ -1,7 +1,6 @@
 import * as path from "node:path";
 import {
   anyExists,
-  asRecord,
   contextFrom,
   exitTwoOnStderr,
   failed,
@@ -14,24 +13,26 @@ import {
 import type { AgentAdapter, CheckResult, HookContext, HookOutput, InstallResult } from "./types.js";
 
 /**
- * Claude Code's Stop hook. Verified against docs.claude.com/en/docs/claude-code/hooks.md
- * on 2026-09-19: exit code 2 on Stop "Prevents Claude from stopping, continues the
- * conversation", and `asyncRewake: true` "runs in the background and wakes Claude on exit
- * code 2. The hook's stderr ... is shown to Claude as a system reminder". Exit 1 is a non
- * blocking error Claude Code shows to the user and not to the agent. `timeout` is seconds.
+ * Factory Droid's Stop hook. Verified against the Factory hooks documentation on
+ * 2026-09-19: project config is `.factory/hooks.json`, keyed directly by event name, so
+ * `{ "Stop": [ { hooks: [ { type: "command", command, timeout } ] } ] }`; the input carries
+ * `session_id`, `cwd` and `stop_hook_active`; "Exit code `2` ... `PostToolUse` and `Stop`
+ * feed stderr back to Droid"; and "Any other non-zero exit | Non-blocking error. Droid
+ * records stderr and continues". The docs tell hooks to resolve project paths through
+ * `"$FACTORY_PROJECT_DIR"` because hooks run from Droid's own working directory.
  */
-export const claudeCodeAdapter: AgentAdapter = {
-  name: "claude-code",
-  title: "Claude Code",
+export const droidAdapter: AgentAdapter = {
+  name: "droid",
+  title: "Factory Droid",
   feedback: "continues-agent",
-  effect: "will be woken in the background and told to fix violations",
+  effect: "will be told to fix violations before it finishes responding",
 
   detect(repoRoot: string): boolean {
-    return anyExists(repoRoot, [".claude", "CLAUDE.md"]);
+    return anyExists(repoRoot, [".factory"]);
   },
 
   command(bundlePath: string): string {
-    return `node "\${CLAUDE_PROJECT_DIR}/${bundlePath}" hook --agent claude-code`;
+    return `node "$FACTORY_PROJECT_DIR"/${bundlePath} hook --agent droid`;
   },
 
   parseInput(stdinText: string): HookContext {
@@ -51,19 +52,13 @@ export const claudeCodeAdapter: AgentAdapter = {
   },
 
   install(repoRoot: string, command: string): InstallResult {
-    const file = path.join(repoRoot, ".claude", "settings.json");
+    const file = path.join(repoRoot, ".factory", "hooks.json");
     const shown = relative(repoRoot, file);
     const read = readJsonFile(file, shown);
     if (!read.ok) return failed(shown, read.reason);
 
-    const settings = read.value;
-    const hooks = asRecord(settings["hooks"]);
-    const added = mergeHookGroup(hooks, "Stop", {
-      type: "command",
-      command,
-      asyncRewake: true,
-      timeout: 120,
-    });
+    const config = read.value;
+    const added = mergeHookGroup(config, "Stop", { type: "command", command, timeout: 120 });
     if (!added) {
       return {
         ok: true,
@@ -72,8 +67,7 @@ export const claudeCodeAdapter: AgentAdapter = {
         notes: [`left ${shown} alone: it already has a stop-rules Stop hook`],
       };
     }
-    settings["hooks"] = hooks;
-    writeJsonFile(file, settings);
+    writeJsonFile(file, config);
     return {
       ok: true,
       files: [shown],

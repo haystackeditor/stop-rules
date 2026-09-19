@@ -14,15 +14,21 @@ export interface AddedLine {
   text: string;
 }
 
+export interface ViolationLine {
+  /** Line number in the new version of the file. */
+  line: number;
+  /** Trimmed text of that line. */
+  text: string;
+}
+
 export interface Violation {
   file: string;
-  line: number;
-  /** True when the line could not be localised confidently. */
+  /** The localised lines for this (file, rule), at most 3, ascending. */
+  lines: ViolationLine[];
+  /** True when the lines could not be localised confidently. */
   approximate: boolean;
   ruleId: string;
   rule: string;
-  /** Trimmed text of the reported line. */
-  lineText: string;
   /** Stage 1 score for this (chunk, rule). */
   confidence: number;
 }
@@ -34,9 +40,16 @@ export interface NotChecked {
   reason: string;
 }
 
+/** A file left out on purpose: generated content or data, not code. Not a failure. */
+export interface SkippedFile {
+  file: string;
+  reason: string;
+}
+
 export interface RunStats {
   files: number;
   chunks: number;
+  skipped: number;
   calls: number;
   cacheHits: number;
   violations: number;
@@ -49,5 +62,6 @@ export interface RunStats {
 export interface CheckReport {
   violations: Violation[];
   notChecked: NotChecked[];
+  skipped: SkippedFile[];
   stats: RunStats;
 }

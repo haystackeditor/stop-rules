@@ -1,27 +1,32 @@
 #!/usr/bin/env node
-import { promises as fs } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { DEFAULT_AGENT, agentNames, getAdapter } from "./adapters/index.js";
-import type { HookInput, HookOutcome } from "./adapters/index.js";
+import type { AgentAdapter, HookContext, HookOutput } from "./adapters/index.js";
 import { run, type RunOutcome } from "./check.js";
-import { init } from "./init.js";
+import { init, renderInit } from "./init.js";
+import { version } from "./version.js";
 
 const USAGE = `stop-rules: check the code your agent just wrote against your team's rules.
 
 Usage:
-  stop-rules hook [options]            run as a Stop hook, reading the hook JSON on stdin
+  stop-rules hook [options]            run as a stop hook, reading the agent's JSON on stdin
   stop-rules check [options]           run the same check in a terminal, pre-commit or CI
-  stop-rules init                      write .stop-rules.md and the Stop hook entry
+  stop-rules init [options]            vendor the checker and wire it into your agents
 
 Options:
+  --agent <name>       hook mode only: which agent's protocol to speak (default ${DEFAULT_AGENT})
+  --agents <a,b,c>     init mode only: which agents to wire up (default: the ones detected)
+  --dir <path>         init mode only: the repository to install into (default: this one)
   --rules <path>       rules file (default <repo root>/.stop-rules.md)
   --threshold <0..1>   score at or above which a rule counts as violated (default 0.5)
   --max-calls <n>      hard ceiling on requests to Jev in one run (default 60)
   --base <rev>         check mode only: diff this revision against the working tree
-  --json               check mode only: print the findings as JSON
-  --agent <name>       hook mode only: ${agentNames().join(", ")} (default ${DEFAULT_AGENT})
+  --json               print the findings, or the init result, as JSON
+  --                   stop reading options: anything after it is ignored
   --help               print this text
   --version            print the version
+
+Agents: ${agentNames().join(", ")}
 
 Environment:
   TYPESAFE_API_KEY         your Jev API key
@@ -29,7 +34,8 @@ Environment:
   STOP_RULES_JEV_ENDPOINT  override the Jev endpoint
   STOP_RULES_JEV_MODEL     override the Jev model
 
-Exit codes: 0 clean, 2 violations, 1 could not run.
+Exit codes: 0 clean, 2 violations, 1 could not run. Some agents need a different code to
+carry the report, so the hook exit code is whatever that agent documents.
 `;
 
 interface ParsedArgs {
@@ -40,6 +46,8 @@ interface ParsedArgs {
   base?: string;
   json: boolean;
   agent: string;
+  agents?: string[];
+  dir?: string;
   help: boolean;
   version: boolean;
 }
@@ -66,6 +74,10 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i] ?? "";
     switch (arg) {
+      case "--":
+        // Everything after this belongs to whoever wrapped us, such as the file names
+        // aider appends to its lint command. Not ours to read.
+        return parsed;
       case "--help":
       case "-h":
         parsed.help = true;
@@ -88,6 +100,20 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
       case "--agent":
         i += 1;
         parsed.agent = take(i, "--agent");
+        break;
+      case "--agents": {
+        i += 1;
+        const names = take(i, "--agents")
+          .split(",")
+          .map((name) => name.trim())
+          .filter((name) => name.length > 0);
+        if (names.length === 0) throw new UsageError("--agents needs at least one agent name");
+        parsed.agents = names;
+        break;
+      }
+      case "--dir":
+        i += 1;
+        parsed.dir = take(i, "--dir");
         break;
       case "--threshold": {
         i += 1;
@@ -123,23 +149,22 @@ async function readStdin(): Promise<string> {
   return Buffer.concat(parts).toString("utf8");
 }
 
-async function version(): Promise<string> {
-  const pkgPath = fileURLToPath(new URL("../package.json", import.meta.url));
-  const raw: unknown = JSON.parse(await fs.readFile(pkgPath, "utf8"));
-  const value = (raw as { version?: unknown }).version;
-  return typeof value === "string" ? value : "unknown";
+function emit(delivery: HookOutput): number {
+  if (delivery.stdout.length > 0) process.stdout.write(delivery.stdout);
+  if (delivery.stderr.length > 0) process.stderr.write(delivery.stderr);
+  return delivery.exitCode;
 }
 
-function toHookOutcome(outcome: RunOutcome): HookOutcome {
+function deliverOutcome(adapter: AgentAdapter, outcome: RunOutcome): HookOutput {
   switch (outcome.kind) {
     case "cannot-run":
-      return { kind: "cannot-run", reason: outcome.reason };
-    case "clean":
-      return { kind: "clean" };
-    case "violations":
-      return { kind: "violations", report: outcome.text };
+      return adapter.deliverError(`stop-rules: ${outcome.reason}`);
     case "handoff":
-      return { kind: "handoff", report: outcome.text };
+      // Too many rounds on the same violations. This one is for the user, not the agent.
+      return adapter.deliverError(outcome.text);
+    case "clean":
+    case "violations":
+      return adapter.deliver(outcome.report, outcome.text);
   }
 }
 
@@ -151,13 +176,12 @@ async function runHook(args: ParsedArgs): Promise<number> {
     );
     return 1;
   }
-  let input: HookInput;
+  let input: HookContext;
   try {
-    input = adapter.parseInput(await readStdin());
+    const payload = adapter.stdin === "none" ? "" : await readStdin();
+    input = adapter.parseInput(payload);
   } catch (error) {
-    process.stderr.write(
-      `stop-rules: ${error instanceof Error ? error.message : String(error)}\n`,
-    );
+    process.stderr.write(`stop-rules: ${error instanceof Error ? error.message : String(error)}\n`);
     return 1;
   }
   const outcome = await run({
@@ -166,13 +190,11 @@ async function runHook(args: ParsedArgs): Promise<number> {
     threshold: args.threshold,
     maxCalls: args.maxCalls,
     sessionId: input.sessionId,
-    stopHookActive: input.stopHookActive,
+    stopHookActive: input.stopHookActive === true,
+    ...(input.loopCount !== undefined ? { loopCount: input.loopCount } : {}),
     ...(args.rules !== undefined ? { rulesPath: args.rules } : {}),
   });
-  const delivery = adapter.deliver(toHookOutcome(outcome));
-  if (delivery.stdout.length > 0) process.stdout.write(delivery.stdout);
-  if (delivery.stderr.length > 0) process.stderr.write(delivery.stderr);
-  return delivery.exitCode;
+  return emit(deliverOutcome(adapter, outcome));
 }
 
 async function runCheckCommand(args: ParsedArgs): Promise<number> {
@@ -191,6 +213,23 @@ async function runCheckCommand(args: ParsedArgs): Promise<number> {
   if (args.json) process.stdout.write(`${JSON.stringify(outcome.report, null, 2)}\n`);
   else process.stdout.write(`${outcome.text}\n`);
   return outcome.kind === "violations" ? 2 : 0;
+}
+
+async function runInitCommand(args: ParsedArgs): Promise<number> {
+  const report = await init({
+    dir: args.dir ?? process.cwd(),
+    selfPath: fileURLToPath(import.meta.url),
+    ...(args.agents !== undefined ? { agents: args.agents } : {}),
+  });
+  if (args.json) {
+    const stream = report.ok ? process.stdout : process.stderr;
+    stream.write(`${JSON.stringify(report, null, 2)}\n`);
+    return report.ok ? 0 : 1;
+  }
+  const lines = renderInit(report);
+  const stream = report.ok ? process.stdout : process.stderr;
+  stream.write(`${lines.join("\n")}\n`);
+  return report.ok ? 0 : 1;
 }
 
 async function main(): Promise<number> {
@@ -217,12 +256,8 @@ async function main(): Promise<number> {
       return runHook(args);
     case "check":
       return runCheckCommand(args);
-    case "init": {
-      const result = await init(process.cwd(), fileURLToPath(import.meta.url));
-      const stream = result.ok ? process.stdout : process.stderr;
-      stream.write(`${result.lines.join("\n")}\n`);
-      return result.ok ? 0 : 1;
-    }
+    case "init":
+      return runInitCommand(args);
     default:
       process.stderr.write(`stop-rules: unknown command ${args.command}\n`);
       process.stderr.write(USAGE);

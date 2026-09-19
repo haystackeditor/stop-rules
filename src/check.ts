@@ -45,6 +45,8 @@ export interface RunOptions {
   base?: string;
   sessionId?: string;
   stopHookActive?: boolean;
+  /** Rounds the agent itself reports having already looped, when it tracks that. */
+  loopCount?: number;
   env?: NodeJS.ProcessEnv;
   fetchImpl?: FetchLike;
   /** Verification hook so retry waits do not slow a scripted run down. */
@@ -151,7 +153,8 @@ async function runLocked(args: LockedArgs): Promise<RunOutcome> {
   }
 
   const rulesRelative = path.relative(repo.root, rulesPath).split(path.sep).join("/");
-  const files = parseDiff(await diffTrees(repo.root, baseline, snapshot), [rulesRelative]);
+  const parsed = parseDiff(await diffTrees(repo.root, baseline, snapshot), [rulesRelative]);
+  const files = parsed.files;
   const chunks = files.flatMap(chunkFile);
 
   const alreadyReported = state.reported;
@@ -183,6 +186,7 @@ async function runLocked(args: LockedArgs): Promise<RunOutcome> {
   const stats: RunStats = {
     files: files.length,
     chunks: chunks.length,
+    skipped: parsed.skipped.length,
     calls: engineResult.calls,
     cacheHits: engineResult.cacheHits,
     violations: engineResult.violations.length,
@@ -194,6 +198,7 @@ async function runLocked(args: LockedArgs): Promise<RunOutcome> {
   const report: CheckReport = {
     violations: engineResult.violations,
     notChecked: engineResult.notChecked,
+    skipped: parsed.skipped,
     stats,
   };
 
@@ -205,6 +210,7 @@ async function runLocked(args: LockedArgs): Promise<RunOutcome> {
     mode: options.mode + (options.stopHookActive === true ? " (stop_hook_active)" : ""),
     files: stats.files,
     chunks: stats.chunks,
+    skipped: stats.skipped,
     calls: stats.calls,
     cacheHits: stats.cacheHits,
     violations: stats.violations,
@@ -240,8 +246,10 @@ function decide(
   let handoff = false;
 
   if (hasViolations) {
-    if (session.violationRuns >= LOOP_GUARD_ROUNDS) handoff = true;
-    else session.violationRuns += 1;
+    // Some agents count their own automatic follow-ups. Take whichever count is higher.
+    const rounds = Math.max(session.violationRuns, options.loopCount ?? 0);
+    if (rounds >= LOOP_GUARD_ROUNDS) handoff = true;
+    else session.violationRuns = rounds + 1;
   } else {
     session.violationRuns = 0;
   }

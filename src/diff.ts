@@ -1,6 +1,23 @@
-import type { AddedLine } from "./types.js";
+import type { AddedLine, SkippedFile } from "./types.js";
 
 export const CHUNK_MAX_BYTES = 12_000;
+
+/**
+ * A diff line longer than this is data, not code: a minified bundle, a log record, a
+ * base64 blob. Sending it costs a fortune in tokens and teaches Jev nothing, so the text
+ * is replaced by a marker and the line never becomes a localisation claim.
+ */
+export const LONG_LINE_LIMIT = 1000;
+
+export function longLineMarker(chars: number): string {
+  return `<stop-rules left out a ${chars} character line here: data, not code>`;
+}
+
+const LONG_LINE_MARKER_RE = /^<stop-rules left out a \d+ character line here: data, not code>$/;
+
+export function isLongLineMarker(text: string): boolean {
+  return LONG_LINE_MARKER_RE.test(text);
+}
 
 const encoder = new TextEncoder();
 
@@ -28,9 +45,29 @@ const SKIP_BASENAMES = new Set([
   ".stop-rules.md",
 ]);
 
-const SKIP_SUFFIXES = [".min.js", ".min.css", ".map", ".snap"];
+/** Generated code, and data or log formats that carry no coding rules. */
+const SKIP_SUFFIXES = [
+  ".min.js",
+  ".min.css",
+  ".map",
+  ".snap",
+  ".log",
+  ".jsonl",
+  ".ndjson",
+  ".csv",
+  ".tsv",
+  ".svg",
+  ".lock",
+];
+
+/** Our own vendored single file bundle and its state. Generated, and large. */
+const OWN_DIR = ".stop-rules/";
+
+/** Plugin files stop-rules generates itself. No rule of the team's is about them. */
+const OWN_FILES = new Set([".opencode/plugins/stop-rules.ts", ".amp/plugins/stop-rules.ts"]);
 
 export function isSkippedPath(filePath: string, extraSkip: readonly string[] = []): boolean {
+  if (filePath.startsWith(OWN_DIR) || OWN_FILES.has(filePath)) return true;
   const base = baseName(filePath);
   if (SKIP_BASENAMES.has(base)) return true;
   if (SKIP_SUFFIXES.some((suffix) => base.endsWith(suffix))) return true;
@@ -90,6 +127,14 @@ export function chunkText(chunk: Chunk): string {
   return `${chunk.header.join("\n")}\n${chunk.hunks.map(hunkText).join("")}`;
 }
 
+/** One diff body line, with an over-long payload replaced by its marker. */
+function shortenBodyLine(body: string): string {
+  const marker = body[0] ?? " ";
+  const text = body.slice(1);
+  if (text.length <= LONG_LINE_LIMIT) return body;
+  return `${marker}${longLineMarker(text.length)}`;
+}
+
 /** Added lines of a chunk with their line number in the new file. */
 export function addedLines(chunk: Chunk): AddedLine[] {
   const out: AddedLine[] = [];
@@ -141,10 +186,17 @@ function stripPrefix(raw: string): string {
 
 const HUNK_RE = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)$/;
 
+export interface ParsedDiff {
+  files: FileDiff[];
+  /** Files left out on purpose, with the reason. Not failures. */
+  skipped: SkippedFile[];
+}
+
 /** Parses `git diff -U8` output into per-file diffs, dropping what no rule is about. */
-export function parseDiff(diff: string, extraSkip: readonly string[] = []): FileDiff[] {
+export function parseDiff(diff: string, extraSkip: readonly string[] = []): ParsedDiff {
   const lines = diff.split("\n");
   const files: FileDiff[] = [];
+  const skipped: SkippedFile[] = [];
   let i = 0;
 
   while (i < lines.length) {
@@ -202,7 +254,7 @@ export function parseDiff(diff: string, extraSkip: readonly string[] = []): File
           body.startsWith("-") ||
           body.startsWith("\\")
         ) {
-          hunk.lines.push(body);
+          hunk.lines.push(shortenBodyLine(body));
           i += 1;
           continue;
         }
@@ -222,14 +274,33 @@ export function parseDiff(diff: string, extraSkip: readonly string[] = []): File
       hunks.push(hunk);
     }
 
-    if (binary || deleted || newPath === null) continue;
-    if (isSkippedPath(newPath, extraSkip)) continue;
-    const hasAdded = hunks.some((h) => h.lines.some((l) => l.startsWith("+")));
-    if (!hasAdded) continue;
+    if (binary) {
+      skipped.push({ file: newPath ?? pathFromDiffHeader(line), reason: "binary file" });
+      continue;
+    }
+    if (deleted || newPath === null) continue;
+    if (isSkippedPath(newPath, extraSkip)) {
+      skipped.push({ file: newPath, reason: "generated or data file" });
+      continue;
+    }
+    const added = hunks.flatMap((hunk) => hunk.lines.filter((l) => l.startsWith("+")));
+    if (added.length === 0) continue;
+    if (added.every((l) => isLongLineMarker(l.slice(1)))) {
+      skipped.push({ file: newPath, reason: "every added line is data, not code" });
+      continue;
+    }
     files.push({ file: newPath, header, hunks });
   }
 
-  return files;
+  return { files, skipped };
+}
+
+/** Best effort path for a file we never reached a "+++" line for, such as a binary one. */
+function pathFromDiffHeader(headerLine: string): string {
+  const rest = headerLine.slice("diff --git ".length);
+  const cut = rest.lastIndexOf(" b/");
+  if (cut === -1) return rest;
+  return stripPrefix(rest.slice(cut + 1));
 }
 
 /** Splits one hunk between lines, repeating an adjusted hunk header for each piece. */

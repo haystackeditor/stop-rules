@@ -203,6 +203,7 @@ export interface RunLogLine {
   mode: string;
   files: number;
   chunks: number;
+  skipped: number;
   calls: number;
   cacheHits: number;
   violations: number;

@@ -1,7 +1,15 @@
 import type { CheckReport, NotChecked, Violation } from "./types.js";
 
+/** A quoted line is a pointer, not the payload. Past this it is noise for the agent. */
+export const MAX_QUOTED_LINE = 160;
+
 function confidence(score: number): string {
   return score.toFixed(2);
+}
+
+export function trimQuoted(text: string): string {
+  if (text.length <= MAX_QUOTED_LINE) return text;
+  return `${text.slice(0, MAX_QUOTED_LINE)}...`;
 }
 
 function notCheckedLine(entry: NotChecked): string {
@@ -13,11 +21,16 @@ function notCheckedLine(entry: NotChecked): string {
 }
 
 function violationBlock(violation: Violation, index: number): string {
-  const approximate = violation.approximate ? " (approximate line)" : "";
+  const where = violation.lines.map((line) => line.line).join(", ");
+  const approximate = violation.approximate
+    ? violation.lines.length > 1
+      ? " (approximate lines)"
+      : " (approximate line)"
+    : "";
   return [
-    `${index}. ${violation.file}:${violation.line}${approximate}`,
+    `${index}. ${violation.file}:${where}${approximate}`,
     `   Rule: ${violation.rule}`,
-    `   Line: ${violation.lineText}`,
+    ...violation.lines.map((line) => `   Line: ${trimQuoted(line.text)}`),
     `   Confidence: ${confidence(violation.confidence)}`,
   ].join("\n");
 }

@@ -14,24 +14,26 @@ import {
 import type { AgentAdapter, CheckResult, HookContext, HookOutput, InstallResult } from "./types.js";
 
 /**
- * Claude Code's Stop hook. Verified against docs.claude.com/en/docs/claude-code/hooks.md
- * on 2026-09-19: exit code 2 on Stop "Prevents Claude from stopping, continues the
- * conversation", and `asyncRewake: true` "runs in the background and wakes Claude on exit
- * code 2. The hook's stderr ... is shown to Claude as a system reminder". Exit 1 is a non
- * blocking error Claude Code shows to the user and not to the agent. `timeout` is seconds.
+ * Codex's Stop hook. Verified against developers.openai.com/codex/hooks on 2026-09-19:
+ * config lives in `.codex/hooks.json` under `hooks.Stop[].hooks[]` with `timeout` in
+ * seconds; the Stop input carries `session_id`, `cwd` and `stop_hook_active`; "You can
+ * also use exit code `2` and write the continuation reason to `stderr`"; and "Exit `0`
+ * with no output is treated as success and Codex continues", which is why a clean run
+ * prints nothing rather than `{}`. The docs also say to resolve repo-local hook paths from
+ * the git root rather than a relative path, because Codex may start in a subdirectory.
  */
-export const claudeCodeAdapter: AgentAdapter = {
-  name: "claude-code",
-  title: "Claude Code",
+export const codexAdapter: AgentAdapter = {
+  name: "codex",
+  title: "Codex",
   feedback: "continues-agent",
-  effect: "will be woken in the background and told to fix violations",
+  effect: "will be told to fix violations before the turn ends",
 
   detect(repoRoot: string): boolean {
-    return anyExists(repoRoot, [".claude", "CLAUDE.md"]);
+    return anyExists(repoRoot, [".codex"]);
   },
 
   command(bundlePath: string): string {
-    return `node "\${CLAUDE_PROJECT_DIR}/${bundlePath}" hook --agent claude-code`;
+    return `node "$(git rev-parse --show-toplevel)/${bundlePath}" hook --agent codex`;
   },
 
   parseInput(stdinText: string): HookContext {
@@ -47,23 +49,19 @@ export const claudeCodeAdapter: AgentAdapter = {
   },
 
   deliverError(message: string): HookOutput {
+    // Not exit 2: that is the "keep going" signal. Codex records a failed hook run.
     return out(1, "", `${message}\n`);
   },
 
   install(repoRoot: string, command: string): InstallResult {
-    const file = path.join(repoRoot, ".claude", "settings.json");
+    const file = path.join(repoRoot, ".codex", "hooks.json");
     const shown = relative(repoRoot, file);
     const read = readJsonFile(file, shown);
     if (!read.ok) return failed(shown, read.reason);
 
-    const settings = read.value;
-    const hooks = asRecord(settings["hooks"]);
-    const added = mergeHookGroup(hooks, "Stop", {
-      type: "command",
-      command,
-      asyncRewake: true,
-      timeout: 120,
-    });
+    const config = read.value;
+    const hooks = asRecord(config["hooks"]);
+    const added = mergeHookGroup(hooks, "Stop", { type: "command", command, timeout: 120 });
     if (!added) {
       return {
         ok: true,
@@ -72,8 +70,8 @@ export const claudeCodeAdapter: AgentAdapter = {
         notes: [`left ${shown} alone: it already has a stop-rules Stop hook`],
       };
     }
-    settings["hooks"] = hooks;
-    writeJsonFile(file, settings);
+    config["hooks"] = hooks;
+    writeJsonFile(file, config);
     return {
       ok: true,
       files: [shown],

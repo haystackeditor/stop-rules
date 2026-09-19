@@ -1,124 +1,203 @@
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
+import { ADAPTERS, agentNames, getAdapter } from "./adapters/index.js";
+import type { AgentAdapter, InstallResult } from "./adapters/index.js";
 import { findRepo } from "./git.js";
 import { parseRules, STARTER_RULES } from "./rules.js";
 
-export interface InitResult {
-  ok: boolean;
-  /** Lines to print, whether or not it worked. */
-  lines: string[];
-}
+/** Where the vendored single file lands inside the target repository. */
+export const BUNDLE_PATH = ".stop-rules/stop-rules.mjs";
+const BUNDLE_NAME = "stop-rules.mjs";
 
-interface HookCommandEntry {
-  type: string;
+export interface InitAgentReport {
+  name: string;
+  title: string;
+  feedback: string;
+  effect: string;
   command: string;
-  asyncRewake?: boolean;
-  timeout?: number;
+  files: string[];
+  changed: boolean;
+  ok: boolean;
+  notes: string[];
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
+export interface InitReport {
+  ok: boolean;
+  repo: string;
+  bundle: { path: string; written: boolean };
+  rules: { path: string; created: boolean };
+  agents: InitAgentReport[];
+  todo: string[];
+  /** Reasons the whole run could not proceed. */
+  errors: string[];
 }
 
-function hasStopRulesHook(stopEntries: unknown): boolean {
-  if (!Array.isArray(stopEntries)) return false;
-  for (const group of stopEntries) {
-    if (!isRecord(group)) continue;
-    const hooks = group["hooks"];
-    if (!Array.isArray(hooks)) continue;
-    for (const hook of hooks) {
-      if (!isRecord(hook)) continue;
-      const command = hook["command"];
-      if (typeof command === "string" && command.includes("stop-rules")) return true;
+export interface InitOptions {
+  /** Directory to resolve the repository from. */
+  dir: string;
+  /** Explicit agent names, or undefined to use detection. */
+  agents?: string[];
+  /** Absolute path of the running module, used to find the bundle to copy. */
+  selfPath: string;
+}
+
+function failure(repo: string, reason: string): InitReport {
+  return {
+    ok: false,
+    repo,
+    bundle: { path: BUNDLE_PATH, written: false },
+    rules: { path: ".stop-rules.md", created: false },
+    agents: [],
+    todo: [],
+    errors: [reason],
+  };
+}
+
+/**
+ * Where the single file bundle lives right now: either next to the running CLI in `dist/`,
+ * or the running file itself when init is re-run from a repository's vendored copy.
+ */
+function bundleSource(selfPath: string): string {
+  if (path.basename(selfPath) === BUNDLE_NAME) return selfPath;
+  return path.join(path.dirname(selfPath), BUNDLE_NAME);
+}
+
+export async function init(options: InitOptions): Promise<InitReport> {
+  const repo = await findRepo(options.dir);
+  if (repo === null) {
+    return failure(options.dir, `${options.dir} is not inside a git repository.`);
+  }
+  const root = repo.root;
+
+  let chosen: AgentAdapter[];
+  if (options.agents !== undefined) {
+    const unknown = options.agents.filter((name) => getAdapter(name) === null);
+    if (unknown.length > 0) {
+      return failure(
+        root,
+        `unknown agent ${unknown.join(", ")}. Known agents: ${agentNames().join(", ")}`,
+      );
+    }
+    const wanted = new Set(options.agents);
+    chosen = ADAPTERS.filter((adapter) => wanted.has(adapter.name));
+  } else {
+    chosen = ADAPTERS.filter((adapter) => adapter.detect(root));
+    if (chosen.length === 0) {
+      return failure(
+        root,
+        `no coding agent detected in ${root}. Name one with --agents: ${agentNames().join(", ")}`,
+      );
     }
   }
-  return false;
-}
 
-/** Writes the starter rules file and merges a Stop hook into .claude/settings.json. */
-export async function init(cwd: string, cliPath: string): Promise<InitResult> {
-  const lines: string[] = [];
-  const repo = await findRepo(cwd);
-  if (repo === null) {
-    return { ok: false, lines: [`stop-rules: ${cwd} is not inside a git repository.`] };
+  const report: InitReport = {
+    ok: true,
+    repo: root,
+    bundle: { path: BUNDLE_PATH, written: false },
+    rules: { path: ".stop-rules.md", created: false },
+    agents: [],
+    todo: [],
+    errors: [],
+  };
+
+  // 3. The vendored single file. Re-running init updates it.
+  const source = bundleSource(options.selfPath);
+  const target = path.join(root, BUNDLE_PATH);
+  if (path.resolve(source) !== path.resolve(target)) {
+    try {
+      await fs.mkdir(path.dirname(target), { recursive: true });
+      await fs.copyFile(source, target);
+      report.bundle.written = true;
+    } catch (error) {
+      const err = error as NodeJS.ErrnoException;
+      return failure(
+        root,
+        err.code === "ENOENT"
+          ? `no bundle at ${source}. Run "npm run build" in the stop-rules clone first.`
+          : `could not copy the bundle to ${target}: ${err.message}`,
+      );
+    }
   }
 
-  const rulesPath = path.join(repo.root, ".stop-rules.md");
+  // 4. The rules file, only when it is absent.
+  const rulesPath = path.join(root, ".stop-rules.md");
   try {
     await fs.writeFile(rulesPath, STARTER_RULES, { encoding: "utf8", flag: "wx" });
-    lines.push(`wrote ${rulesPath} with ${parseRules(STARTER_RULES).length} starter rules`);
+    report.rules.created = true;
   } catch (error) {
     const err = error as NodeJS.ErrnoException;
     if (err.code !== "EEXIST") {
-      return { ok: false, lines: [`stop-rules: could not write ${rulesPath}: ${err.message}`] };
+      return failure(root, `could not write ${rulesPath}: ${err.message}`);
     }
-    lines.push(`kept the rules file that is already at ${rulesPath}`);
   }
 
-  const settingsPath = path.join(repo.root, ".claude", "settings.json");
-  let settings: Record<string, unknown> = {};
-  let existed = false;
-  try {
-    const raw = await fs.readFile(settingsPath, "utf8");
-    existed = true;
-    let parsed: unknown;
+  // 5. One config per agent.
+  for (const adapter of chosen) {
+    const command = adapter.command(BUNDLE_PATH);
+    let result: InstallResult;
     try {
-      parsed = JSON.parse(raw);
+      result = adapter.install(root, command);
     } catch (error) {
-      return {
+      result = {
         ok: false,
-        lines: [
-          `stop-rules: ${settingsPath} is not valid JSON (${error instanceof Error ? error.message : String(error)}).`,
-          "Nothing was changed. Fix the file and run init again.",
-        ],
+        files: [],
+        changed: false,
+        notes: [`could not install ${adapter.name}: ${error instanceof Error ? error.message : String(error)}`],
       };
     }
-    if (!isRecord(parsed)) {
-      return {
-        ok: false,
-        lines: [
-          `stop-rules: ${settingsPath} does not hold a JSON object.`,
-          "Nothing was changed. Fix the file and run init again.",
-        ],
-      };
-    }
-    settings = parsed;
-  } catch (error) {
-    const err = error as NodeJS.ErrnoException;
-    if (err.code !== "ENOENT") {
-      return { ok: false, lines: [`stop-rules: could not read ${settingsPath}: ${err.message}`] };
-    }
+    if (!result.ok) report.ok = false;
+    report.agents.push({
+      name: adapter.name,
+      title: adapter.title,
+      feedback: adapter.feedback,
+      effect: adapter.effect,
+      command,
+      files: result.files,
+      changed: result.changed,
+      ok: result.ok,
+      notes: result.notes,
+    });
   }
 
-  const hooks = isRecord(settings["hooks"]) ? settings["hooks"] : {};
-  const stop = Array.isArray(hooks["Stop"]) ? [...(hooks["Stop"] as unknown[])] : [];
+  report.todo.push("Set TYPESAFE_API_KEY to your Jev API key from TypeSafe.");
+  report.todo.push(
+    `Edit ${report.rules.path} so it says what your team actually cares about.`,
+  );
+  report.todo.push(
+    `Commit ${BUNDLE_PATH} and the config files, so teammates and cloud agents get the check too.`,
+  );
+  return report;
+}
 
-  if (hasStopRulesHook(stop)) {
-    lines.push(`left ${settingsPath} alone: it already has a stop-rules Stop hook`);
-  } else {
-    const entry: HookCommandEntry = {
-      type: "command",
-      command: `node "${cliPath}" hook`,
-      asyncRewake: true,
-      timeout: 120,
-    };
-    stop.push({ hooks: [entry] });
-    hooks["Stop"] = stop;
-    settings["hooks"] = hooks;
-    await fs.mkdir(path.dirname(settingsPath), { recursive: true });
-    await fs.writeFile(settingsPath, `${JSON.stringify(settings, null, 2)}\n`, "utf8");
-    lines.push(
-      existed
-        ? `merged a Stop hook into ${settingsPath}, keeping everything that was already there`
-        : `created ${settingsPath} with a Stop hook`,
-    );
-    lines.push(`  command: node "${cliPath}" hook`);
-    lines.push("  asyncRewake: true, timeout: 120");
+/** The human form of an init report. */
+export function renderInit(report: InitReport): string[] {
+  const lines: string[] = [];
+  if (report.errors.length > 0) {
+    for (const error of report.errors) lines.push(`stop-rules: ${error}`);
+    return lines;
   }
 
+  lines.push(`stop-rules in ${report.repo}`);
+  lines.push(
+    report.bundle.written
+      ? `  wrote ${report.bundle.path}`
+      : `  kept ${report.bundle.path} (it is the file running now)`,
+  );
+  lines.push(
+    report.rules.created
+      ? `  wrote ${report.rules.path} with ${parseRules(STARTER_RULES).length} starter rules`
+      : `  kept the rules file already at ${report.rules.path}`,
+  );
   lines.push("");
-  lines.push("Two things left for you:");
-  lines.push("  1. Set TYPESAFE_API_KEY to your Jev API key from TypeSafe.");
-  lines.push(`  2. Edit ${rulesPath} so it says what your team actually cares about.`);
-  return { ok: true, lines };
+  for (const agent of report.agents) {
+    lines.push(`${agent.title}: ${agent.effect}`);
+    for (const note of agent.notes) lines.push(`  ${note}`);
+    if (agent.changed) lines.push(`  command: ${agent.command}`);
+  }
+  lines.push("");
+  lines.push("Left for you:");
+  report.todo.forEach((item, index) => {
+    lines.push(`  ${index + 1}. ${item}`);
+  });
+  return lines;
 }
