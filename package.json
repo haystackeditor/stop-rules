@@ -5,9 +5,10 @@
   "license": "MIT",
   "type": "module",
   "bin": {
-    "stop-rules": "dist/cli.js"
+    "stop-rules": "bin/stop-rules.mjs"
   },
   "files": [
+    "bin",
     "dist",
     "README.md",
     "LICENSE"
@@ -17,10 +18,11 @@
   },
   "scripts": {
     "start": "node dist/server/start.js",
-    "build": "tsc -p tsconfig.json && node scripts/check-server-version.mjs && node scripts/bundle.mjs && node deploy/aws/generate-template.ts --check",
+    "build": "tsc -p tsconfig.json && node scripts/check-server-version.mjs && node scripts/bundle.mjs && node scripts/bin.mjs && node deploy/aws/generate-template.ts --check",
     "build:aws": "node deploy/aws/generate-template.ts",
     "build:server": "tsc -p tsconfig.json",
     "bundle": "node scripts/bundle.mjs",
+    "verify:bin": "node scripts/bin.mjs --check",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "devDependencies": {
