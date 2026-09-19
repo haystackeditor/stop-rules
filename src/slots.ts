@@ -2,11 +2,12 @@
  * The machine wide slot gate.
  *
  * Jev's rate limit is per account, so every stop-rules process on this machine shares it. A
- * run holds a slot for the time of one HTTP attempt and there are eight slots, kept as
- * exclusively created files in the user's cache folder. A slot whose owning process is gone,
- * or whose timestamp is older than 120 seconds, is taken over.
+ * run holds a slot for the time of one HTTP attempt and there are eight slots, kept as files
+ * in the user's cache folder that only one process can create. A slot whose owning process is
+ * gone, or whose timestamp is older than 120 seconds, is taken over.
  */
 
+import { randomBytes } from "node:crypto";
 import { promises as fs } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -60,7 +61,7 @@ function readSlot(text: string): SlotFile | null {
   try {
     parsed = JSON.parse(text);
   } catch {
-    // A half written slot file is not something to trust. Treat it as free.
+    // Content this did not write. The caller then goes by the file's age alone.
     return null;
   }
   if (typeof parsed !== "object" || parsed === null) return null;
@@ -70,51 +71,62 @@ function readSlot(text: string): SlotFile | null {
   return { pid, at };
 }
 
-/** Takes one of the slots, or says the machine is busy after the wait ran out. */
+/**
+ * Takes one of the slots, or says the machine is busy after the wait ran out.
+ *
+ * A slot is claimed by hard linking a file that already holds this process id, not by
+ * creating an empty file and then filling it: a slot file that existed for a moment with
+ * nothing in it read as free to everyone else, and two runs then held the same slot.
+ */
 export async function acquireSlot(dir: string, waitMs: number = SLOT_WAIT_MS): Promise<SlotOutcome> {
   await fs.mkdir(dir, { recursive: true });
   const deadline = Date.now() + waitMs;
   for (;;) {
-    for (let index = 0; index < MACHINE_SLOTS; index += 1) {
-      const file = path.join(dir, `slot-${index}`);
-      try {
-        const handle = await fs.open(file, "wx");
+    const claim = path.join(dir, `claim-${process.pid}-${randomBytes(4).toString("hex")}`);
+    await fs.writeFile(claim, JSON.stringify({ pid: process.pid, at: Date.now() }), "utf8");
+    try {
+      for (let index = 0; index < MACHINE_SLOTS; index += 1) {
+        const file = path.join(dir, `slot-${index}`);
         try {
-          await handle.writeFile(JSON.stringify({ pid: process.pid, at: Date.now() }), "utf8");
-        } finally {
-          await handle.close();
-        }
-        return {
-          ok: true,
-          release: async () => {
-            try {
-              const owner = readSlot(await fs.readFile(file, "utf8"));
-              if (owner !== null && owner.pid === process.pid) await fs.rm(file, { force: true });
-            } catch (error) {
-              const err = error as NodeJS.ErrnoException;
-              if (err.code !== "ENOENT") {
-                process.stderr.write(`stop-rules: could not free a Jev slot: ${err.message}\n`);
+          await fs.link(claim, file);
+          return {
+            ok: true,
+            release: async () => {
+              try {
+                const owner = readSlot(await fs.readFile(file, "utf8"));
+                if (owner !== null && owner.pid === process.pid) await fs.rm(file, { force: true });
+              } catch (error) {
+                const err = error as NodeJS.ErrnoException;
+                if (err.code !== "ENOENT") {
+                  process.stderr.write(`stop-rules: could not free a Jev slot: ${err.message}\n`);
+                }
               }
-            }
-          },
-        };
-      } catch (error) {
-        const err = error as NodeJS.ErrnoException;
-        if (err.code !== "EEXIST") throw err;
-      }
+            },
+          };
+        } catch (error) {
+          const err = error as NodeJS.ErrnoException;
+          if (err.code !== "EEXIST") throw err;
+        }
 
-      // Taken. Take it over when the owner is gone or has been holding it too long.
-      let owner: SlotFile | null = null;
-      try {
-        owner = readSlot(await fs.readFile(file, "utf8"));
-      } catch (error) {
-        const err = error as NodeJS.ErrnoException;
-        if (err.code !== "ENOENT") throw err;
-        continue;
+        // Taken. Take it over when the owner is gone or has been holding it too long.
+        let owner: SlotFile | null = null;
+        let writtenAt = 0;
+        try {
+          owner = readSlot(await fs.readFile(file, "utf8"));
+          writtenAt = owner === null ? (await fs.stat(file)).mtimeMs : owner.at;
+        } catch (error) {
+          const err = error as NodeJS.ErrnoException;
+          if (err.code !== "ENOENT") throw err;
+          continue;
+        }
+        const tooOld = Date.now() - writtenAt > SLOT_STALE_MS;
+        if (tooOld || (owner !== null && !pidAlive(owner.pid))) {
+          await fs.rm(file, { force: true });
+        }
       }
-      if (owner === null || !pidAlive(owner.pid) || Date.now() - owner.at > SLOT_STALE_MS) {
-        await fs.rm(file, { force: true });
-      }
+    } finally {
+      // The slot file is a second link to this content, so it lives on without the claim.
+      await fs.rm(claim, { force: true });
     }
     if (Date.now() >= deadline) return { ok: false, reason: MACHINE_BUSY };
     await delay(POLL_MS);

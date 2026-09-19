@@ -319,7 +319,8 @@ export class JevClient {
         this.slowDown();
         const wait = parseRetryAfter(sent.retryAfter) ?? backoff;
         if (attempt < MAX_ATTEMPTS) {
-          this.options.note(`rate limited, waiting ${wait} ms, ${this.limit} calls in flight from now on`);
+          const room = this.limit === 1 ? "1 call" : `${this.limit} calls`;
+          this.options.note(`rate limited, waiting ${wait} ms, ${room} in flight from now on`);
           await this.sleep(wait);
           backoff = Math.min(backoff * 2, BACKOFF_CAP_MS);
           continue;

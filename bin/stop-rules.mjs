@@ -1405,7 +1405,8 @@ var JevClient = class {
         this.slowDown();
         const wait = parseRetryAfter(sent.retryAfter) ?? backoff;
         if (attempt < MAX_ATTEMPTS) {
-          this.options.note(`rate limited, waiting ${wait} ms, ${this.limit} calls in flight from now on`);
+          const room = this.limit === 1 ? "1 call" : `${this.limit} calls`;
+          this.options.note(`rate limited, waiting ${wait} ms, ${room} in flight from now on`);
           await this.sleep(wait);
           backoff = Math.min(backoff * 2, BACKOFF_CAP_MS);
           continue;
@@ -7651,6 +7652,7 @@ seeing the rest of the codebase.
 `;
 
 // src/slots.ts
+import { randomBytes as randomBytes2 } from "node:crypto";
 import { promises as fs12 } from "node:fs";
 import * as os from "node:os";
 import * as path17 from "node:path";
@@ -7699,45 +7701,49 @@ async function acquireSlot(dir, waitMs = SLOT_WAIT_MS) {
   await fs12.mkdir(dir, { recursive: true });
   const deadline = Date.now() + waitMs;
   for (; ; ) {
-    for (let index = 0; index < MACHINE_SLOTS; index += 1) {
-      const file = path17.join(dir, `slot-${index}`);
-      try {
-        const handle3 = await fs12.open(file, "wx");
+    const claim = path17.join(dir, `claim-${process.pid}-${randomBytes2(4).toString("hex")}`);
+    await fs12.writeFile(claim, JSON.stringify({ pid: process.pid, at: Date.now() }), "utf8");
+    try {
+      for (let index = 0; index < MACHINE_SLOTS; index += 1) {
+        const file = path17.join(dir, `slot-${index}`);
         try {
-          await handle3.writeFile(JSON.stringify({ pid: process.pid, at: Date.now() }), "utf8");
-        } finally {
-          await handle3.close();
-        }
-        return {
-          ok: true,
-          release: async () => {
-            try {
-              const owner2 = readSlot(await fs12.readFile(file, "utf8"));
-              if (owner2 !== null && owner2.pid === process.pid) await fs12.rm(file, { force: true });
-            } catch (error) {
-              const err2 = error;
-              if (err2.code !== "ENOENT") {
-                process.stderr.write(`stop-rules: could not free a Jev slot: ${err2.message}
+          await fs12.link(claim, file);
+          return {
+            ok: true,
+            release: async () => {
+              try {
+                const owner2 = readSlot(await fs12.readFile(file, "utf8"));
+                if (owner2 !== null && owner2.pid === process.pid) await fs12.rm(file, { force: true });
+              } catch (error) {
+                const err2 = error;
+                if (err2.code !== "ENOENT") {
+                  process.stderr.write(`stop-rules: could not free a Jev slot: ${err2.message}
 `);
+                }
               }
             }
-          }
-        };
-      } catch (error) {
-        const err2 = error;
-        if (err2.code !== "EEXIST") throw err2;
+          };
+        } catch (error) {
+          const err2 = error;
+          if (err2.code !== "EEXIST") throw err2;
+        }
+        let owner = null;
+        let writtenAt = 0;
+        try {
+          owner = readSlot(await fs12.readFile(file, "utf8"));
+          writtenAt = owner === null ? (await fs12.stat(file)).mtimeMs : owner.at;
+        } catch (error) {
+          const err2 = error;
+          if (err2.code !== "ENOENT") throw err2;
+          continue;
+        }
+        const tooOld = Date.now() - writtenAt > SLOT_STALE_MS;
+        if (tooOld || owner !== null && !pidAlive(owner.pid)) {
+          await fs12.rm(file, { force: true });
+        }
       }
-      let owner = null;
-      try {
-        owner = readSlot(await fs12.readFile(file, "utf8"));
-      } catch (error) {
-        const err2 = error;
-        if (err2.code !== "ENOENT") throw err2;
-        continue;
-      }
-      if (owner === null || !pidAlive(owner.pid) || Date.now() - owner.at > SLOT_STALE_MS) {
-        await fs12.rm(file, { force: true });
-      }
+    } finally {
+      await fs12.rm(claim, { force: true });
     }
     if (Date.now() >= deadline) return { ok: false, reason: MACHINE_BUSY };
     await delay(POLL_MS);
@@ -7745,7 +7751,7 @@ async function acquireSlot(dir, waitMs = SLOT_WAIT_MS) {
 }
 
 // src/state.ts
-import { createHash as createHash2, randomBytes as randomBytes2 } from "node:crypto";
+import { createHash as createHash2, randomBytes as randomBytes3 } from "node:crypto";
 import { promises as fs13 } from "node:fs";
 import * as path18 from "node:path";
 import { setTimeout as delay2 } from "node:timers/promises";
@@ -7780,7 +7786,7 @@ async function readJson(file) {
   }
 }
 async function writeJsonAtomic(file, value2) {
-  const temp = `${file}.tmp-${process.pid}-${randomBytes2(4).toString("hex")}`;
+  const temp = `${file}.tmp-${process.pid}-${randomBytes3(4).toString("hex")}`;
   await fs13.mkdir(path18.dirname(file), { recursive: true });
   await fs13.writeFile(temp, `${JSON.stringify(value2)}
 `, "utf8");
@@ -7905,7 +7911,7 @@ async function appendRunLog(stateDir, line) {
   const contents = await fs13.readFile(logPath, "utf8");
   const lines = contents.split("\n").filter((entry) => entry.length > 0);
   const kept = lines.slice(Math.floor(lines.length / 2));
-  const temp = `${logPath}.tmp-${process.pid}-${randomBytes2(4).toString("hex")}`;
+  const temp = `${logPath}.tmp-${process.pid}-${randomBytes3(4).toString("hex")}`;
   await fs13.writeFile(temp, `${kept.join("\n")}
 `, "utf8");
   await fs13.rename(temp, logPath);
@@ -8313,6 +8319,7 @@ async function languagesInRepo(root) {
   const keys = /* @__PURE__ */ new Set();
   for (const line of listed.stdout.split("\n")) {
     if (line.length === 0) continue;
+    if (isSkippedPath(line)) continue;
     const key = EXTENSIONS[extensionOf(line)];
     if (key !== void 0) keys.add(key);
   }

@@ -3,6 +3,7 @@ import * as path from "node:path";
 import { ADAPTERS, agentNames, getAdapter } from "./adapters/index.js";
 import type { AgentAdapter, InstallResult } from "./adapters/index.js";
 import { readTeamEndpoint, TEAM_CONFIG_FILE, writeTeamConfig } from "./credentials.js";
+import { isSkippedPath } from "./diff.js";
 import { findRepo, runGit } from "./git.js";
 import {
   EXTENSIONS,
@@ -245,7 +246,10 @@ export async function init(options: InitOptions): Promise<InitReport> {
   return report;
 }
 
-/** Which grammars this repository needs, from the extensions of its tracked files. */
+/**
+ * Which grammars this repository needs, from the extensions of its tracked files. Files the
+ * check skips anyway, including our own vendored bundle, do not earn a grammar.
+ */
 async function languagesInRepo(root: string): Promise<GrammarKey[]> {
   const listed = await runGit(root, ["ls-files"]);
   if (listed.code !== 0) {
@@ -254,6 +258,7 @@ async function languagesInRepo(root: string): Promise<GrammarKey[]> {
   const keys = new Set<GrammarKey>();
   for (const line of listed.stdout.split("\n")) {
     if (line.length === 0) continue;
+    if (isSkippedPath(line)) continue;
     const key = EXTENSIONS[extensionOf(line)];
     if (key !== undefined) keys.add(key);
   }
