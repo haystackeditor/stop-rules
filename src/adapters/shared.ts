@@ -28,13 +28,16 @@ export function parseJsonPayload(stdinText: string): Record<string, unknown> {
   return parsed;
 }
 
-/** First key that holds a non-empty string, or "". */
-export function pickString(payload: Record<string, unknown>, keys: readonly string[]): string {
+/** First key that holds a non-empty string, or null when the payload has none of them. */
+export function pickString(
+  payload: Record<string, unknown>,
+  keys: readonly string[],
+): string | null {
   for (const key of keys) {
     const value = payload[key];
     if (typeof value === "string" && value.length > 0) return value;
   }
-  return "";
+  return null;
 }
 
 export function pickNumber(
@@ -48,41 +51,64 @@ export function pickNumber(
   return undefined;
 }
 
-/** First key that holds an array whose first entry is a non-empty string, or "". */
+/** First key that holds an array whose first entry is a non-empty string, else null. */
 export function pickFirstOfArray(
   payload: Record<string, unknown>,
   keys: readonly string[],
-): string {
+): string | null {
   for (const key of keys) {
     const value = payload[key];
     if (!Array.isArray(value)) continue;
     const first = value[0];
     if (typeof first === "string" && first.length > 0) return first;
   }
-  return "";
+  return null;
 }
 
 /** The context every JSON-on-stdin agent shares, with each agent's own field names. */
 export interface FieldNames {
+  /** How to name this agent in an error message. */
+  agent: string;
+  /** Field the agent's docs use for the conversation id. One of these must be present. */
   session: readonly string[];
+  /** Field holding the directory. Leave both out only when the docs have neither. */
   cwd?: readonly string[];
   cwdArray?: readonly string[];
   loopCount?: readonly string[];
   stopHookActive?: readonly string[];
 }
 
+/**
+ * Reads the payload the agent sent. A field its own documentation says is always there and
+ * is missing anyway is an error: nothing is guessed, because checking the wrong directory or
+ * merging two conversations into one session id would both be wrong quietly.
+ */
 export function contextFrom(stdinText: string, fields: FieldNames): HookContext {
   const payload = parseJsonPayload(stdinText);
-  const cwd =
-    (fields.cwd ? pickString(payload, fields.cwd) : "") ||
-    (fields.cwdArray ? pickFirstOfArray(payload, fields.cwdArray) : "");
+  const missing = (names: readonly string[]): Error =>
+    new Error(`the ${fields.agent} hook input has no ${names.join(" or ")}`);
+
+  const sessionId = pickString(payload, fields.session);
+  if (sessionId === null) throw missing(fields.session);
+
+  let cwd: string | undefined;
+  if (fields.cwd !== undefined) {
+    const found = pickString(payload, fields.cwd);
+    if (found === null) throw missing(fields.cwd);
+    cwd = found;
+  } else if (fields.cwdArray !== undefined) {
+    const found = pickFirstOfArray(payload, fields.cwdArray);
+    if (found === null) throw missing(fields.cwdArray);
+    cwd = found;
+  }
+
   const loopCount = fields.loopCount ? pickNumber(payload, fields.loopCount) : undefined;
   const active = fields.stopHookActive
     ? fields.stopHookActive.some((key) => payload[key] === true)
     : false;
   return {
-    sessionId: pickString(payload, fields.session) || "unknown",
-    cwd,
+    sessionId,
+    ...(cwd !== undefined ? { cwd } : {}),
     ...(loopCount !== undefined ? { loopCount } : {}),
     stopHookActive: active,
   };
@@ -167,12 +193,28 @@ export function mentionsStopRules(value: unknown): boolean {
   return false;
 }
 
-export function asArray(value: unknown): unknown[] {
-  return Array.isArray(value) ? [...value] : [];
+/**
+ * The array under `key`, or an empty one when the key is absent. Null when the key holds
+ * something else: the user's file is then left alone rather than overwritten.
+ */
+export function arrayAt(container: Record<string, unknown>, key: string): unknown[] | null {
+  const value = container[key];
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) return null;
+  return [...value];
 }
 
-export function asRecord(value: unknown): Record<string, unknown> {
-  return isRecord(value) ? value : {};
+/** The object under `key`, or an empty one when absent. Null when it holds something else. */
+export function recordAt(container: Record<string, unknown>, key: string): Record<string, unknown> | null {
+  const value = container[key];
+  if (value === undefined) return {};
+  if (!isRecord(value)) return null;
+  return value;
+}
+
+/** What install says when a config file holds an unexpected shape under one key. */
+export function wrongShape(shown: string, key: string, expected: string): string {
+  return `in ${shown}, "${key}" is not ${expected}. Nothing was changed: fix the file and run init again.`;
 }
 
 /** True when any of these paths exists under the repo root. */
@@ -185,15 +227,19 @@ export function anyExists(repoRoot: string, names: readonly string[]): boolean {
  * Claude Code, Codex, Gemini and Droid all share. `container` is the object that holds the
  * event keys: the file itself for Droid, or the file's `hooks` object for the others.
  */
+export type MergeResult = { ok: true; changed: boolean } | { ok: false; reason: string };
+
 export function mergeHookGroup(
   container: Record<string, unknown>,
+  shown: string,
   event: string,
   entry: Record<string, unknown>,
   group: Record<string, unknown> = {},
-): boolean {
-  const list = asArray(container[event]);
-  if (list.some(mentionsStopRules)) return false;
+): MergeResult {
+  const list = arrayAt(container, event);
+  if (list === null) return { ok: false, reason: wrongShape(shown, event, "a list") };
+  if (list.some(mentionsStopRules)) return { ok: true, changed: false };
   list.push({ ...group, hooks: [entry] });
   container[event] = list;
-  return true;
+  return { ok: true, changed: true };
 }

@@ -12,7 +12,6 @@ export const BIN_OUT = path.join(repoRoot, "bin", "stop-rules.mjs");
 
 /** Bundles src/cli.ts into one file. Throws when esbuild reports an error. */
 export async function buildBundle(outfile = BUNDLE_OUT) {
-  const pkg = JSON.parse(await readFile(path.join(repoRoot, "package.json"), "utf8"));
   const result = await build({
     entryPoints: [path.join(repoRoot, "src", "cli.ts")],
     outfile,
@@ -21,7 +20,8 @@ export async function buildBundle(outfile = BUNDLE_OUT) {
     target: "node20",
     format: "esm",
     // No banner: esbuild keeps the shebang that src/cli.ts already starts with.
-    define: { __STOP_RULES_VERSION__: JSON.stringify(pkg.version) },
+    // The version is a source constant; this only tells the code it is running bundled.
+    define: { __STOP_RULES_BUNDLED__: "true" },
     legalComments: "none",
     logLevel: "warning",
   });

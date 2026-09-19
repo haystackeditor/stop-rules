@@ -45,14 +45,27 @@ export function emptyCache(): Cache {
   return { version: 1, entries: {} };
 }
 
+/**
+ * Reads one of our JSON files. Null means the file is not there yet, which is the defined
+ * start of a first run. Anything else is an error the caller reports: a file that is there
+ * but unreadable is never quietly treated as an empty one.
+ */
 async function readJson(file: string): Promise<unknown | null> {
+  let text: string;
   try {
-    return JSON.parse(await fs.readFile(file, "utf8")) as unknown;
+    text = await fs.readFile(file, "utf8");
   } catch (error) {
     const err = error as NodeJS.ErrnoException;
     if (err.code === "ENOENT") return null;
-    // A corrupt state or cache file must not stop a run; the caller notes it.
-    throw new Error(`could not read ${path.basename(file)}: ${err.message}`);
+    throw new Error(`could not read ${file}: ${err.code ?? err.message}`);
+  }
+  try {
+    return JSON.parse(text) as unknown;
+  } catch (error) {
+    throw new Error(
+      `${file} is not valid JSON (${error instanceof Error ? error.message : String(error)}). ` +
+        "Run stop-rules baseline --reset to start again.",
+    );
   }
 }
 
@@ -63,28 +76,31 @@ export async function writeJsonAtomic(file: string, value: unknown): Promise<voi
   await fs.rename(temp, file);
 }
 
-export async function loadState(
-  stateDir: string,
-  note: (message: string) => void,
-): Promise<StopRulesState> {
-  let raw: unknown | null;
-  try {
-    raw = await readJson(path.join(stateDir, "state.json"));
-  } catch (error) {
-    note(`${(error as Error).message}; starting from empty state`);
-    return emptyState();
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** Throws when state.json is there but not the shape we wrote. Never starts over quietly. */
+export async function loadState(stateDir: string): Promise<StopRulesState> {
+  const file = path.join(stateDir, "state.json");
+  const raw = await readJson(file);
+  if (raw === null) return emptyState();
+  if (!isRecord(raw)) {
+    throw new Error(`${file} does not hold a JSON object. Run stop-rules baseline --reset.`);
   }
-  if (raw === null || typeof raw !== "object") return emptyState();
-  const candidate = raw as Partial<StopRulesState>;
+  const lastTree = raw["lastTree"];
+  const reported = raw["reported"];
+  const sessions = raw["sessions"];
+  const wrong = (field: string): Error =>
+    new Error(`${file} has a ${field} that stop-rules did not write. Run stop-rules baseline --reset.`);
+  if (lastTree !== undefined && typeof lastTree !== "string") throw wrong("lastTree");
+  if (reported !== undefined && !isRecord(reported)) throw wrong("reported");
+  if (sessions !== undefined && !isRecord(sessions)) throw wrong("sessions");
   return {
     version: 1,
-    ...(typeof candidate.lastTree === "string" ? { lastTree: candidate.lastTree } : {}),
-    reported: typeof candidate.reported === "object" && candidate.reported !== null
-      ? (candidate.reported as Record<string, number>)
-      : {},
-    sessions: typeof candidate.sessions === "object" && candidate.sessions !== null
-      ? (candidate.sessions as Record<string, SessionState>)
-      : {},
+    ...(typeof lastTree === "string" ? { lastTree } : {}),
+    reported: isRecord(reported) ? (reported as Record<string, number>) : {},
+    sessions: isRecord(sessions) ? (sessions as Record<string, SessionState>) : {},
   };
 }
 
@@ -104,21 +120,23 @@ export async function saveState(stateDir: string, state: StopRulesState): Promis
   await writeJsonAtomic(path.join(stateDir, "state.json"), state);
 }
 
-export async function loadCache(
-  stateDir: string,
-  note: (message: string) => void,
-): Promise<Cache> {
-  let raw: unknown | null;
-  try {
-    raw = await readJson(path.join(stateDir, "cache.json"));
-  } catch (error) {
-    note(`${(error as Error).message}; starting from an empty cache`);
-    return emptyCache();
+/** Throws when cache.json is there but not the shape we wrote. Deleting it is the cure. */
+export async function loadCache(stateDir: string): Promise<Cache> {
+  const file = path.join(stateDir, "cache.json");
+  const raw = await readJson(file);
+  if (raw === null) return emptyCache();
+  if (!isRecord(raw) || !isRecord(raw["entries"])) {
+    throw new Error(`${file} is not a stop-rules cache. Delete it and run again.`);
   }
-  if (raw === null || typeof raw !== "object") return emptyCache();
-  const entries = (raw as { entries?: unknown }).entries;
-  if (typeof entries !== "object" || entries === null) return emptyCache();
-  return { version: 1, entries: entries as Record<string, CacheEntry> };
+  return { version: 1, entries: raw["entries"] as Record<string, CacheEntry> };
+}
+
+/**
+ * Forgets the baseline and everything reported, so the next run starts from HEAD. Writes a
+ * fresh file without reading the old one, which is what makes it the cure for a broken one.
+ */
+export async function resetState(stateDir: string): Promise<void> {
+  await writeJsonAtomic(path.join(stateDir, "state.json"), emptyState());
 }
 
 export async function saveCache(stateDir: string, cache: Cache): Promise<void> {

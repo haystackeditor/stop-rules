@@ -25,14 +25,32 @@ export interface FunctionUrlResult {
   isBase64Encoded: boolean;
 }
 
+/** A payload that is not the documented one, answered plainly instead of half read. */
+function badEvent(field: string): FunctionUrlResult {
+  return {
+    statusCode: 400,
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      error: "bad_event",
+      message: `this Lambda event has no ${field}, so it is not a Function URL request`,
+    }),
+    isBase64Encoded: false,
+  };
+}
+
 export async function lambdaHandler(event: FunctionUrlEvent): Promise<FunctionUrlResult> {
-  const method = event.requestContext?.http?.method ?? "GET";
-  const query = event.rawQueryString ?? "";
+  // Payload format 2.0 always carries these. Reading a POST as a GET because the method was
+  // missing would answer the health route instead of saying what is wrong.
+  const method = event.requestContext?.http?.method;
+  if (method === undefined) return badEvent("requestContext.http.method");
+  if (event.rawPath === undefined) return badEvent("rawPath");
+  const query = event.rawQueryString === undefined ? "" : event.rawQueryString;
   const headers = new Headers();
-  for (const [name, headerValue] of Object.entries(event.headers ?? {})) {
+  for (const [name, headerValue] of Object.entries(event.headers === undefined ? {} : event.headers)) {
     if (headerValue !== undefined) headers.set(name, headerValue);
   }
-  const host = headers.get("host") ?? "lambda.invalid";
+  const host = headers.get("host");
+  if (host === null) return badEvent("host header");
   // node:http and undici own these two; the URL and the body length carry the same facts.
   headers.delete("host");
   headers.delete("content-length");
@@ -42,7 +60,7 @@ export async function lambdaHandler(event: FunctionUrlEvent): Promise<FunctionUr
     init.body =
       event.isBase64Encoded === true ? Buffer.from(event.body, "base64") : Buffer.from(event.body);
   }
-  const url = `https://${host}${event.rawPath ?? "/"}${query.length > 0 ? `?${query}` : ""}`;
+  const url = `https://${host}${event.rawPath}${query.length > 0 ? `?${query}` : ""}`;
   const response = await handle(new Request(url, init), process.env);
 
   const out: Record<string, string> = {};

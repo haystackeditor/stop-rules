@@ -86,11 +86,7 @@ export function parseRules(markdown: string): Rule[] {
   return rules;
 }
 
-export interface RulesLoad {
-  ok: boolean;
-  rules: Rule[];
-  reason?: string;
-}
+export type RulesLoad = { ok: true; rules: Rule[] } | { ok: false; reason: string };
 
 export async function loadRules(rulesPath: string): Promise<RulesLoad> {
   let source: string;
@@ -101,17 +97,15 @@ export async function loadRules(rulesPath: string): Promise<RulesLoad> {
     if (err.code === "ENOENT") {
       return {
         ok: false,
-        rules: [],
         reason: `no rules file at ${rulesPath}. Run "stop-rules init" to create one.`,
       };
     }
-    return { ok: false, rules: [], reason: `could not read ${rulesPath}: ${err.message}` };
+    return { ok: false, reason: `could not read ${rulesPath}: ${err.message}` };
   }
   const rules = parseRules(source);
   if (rules.length === 0) {
     return {
       ok: false,
-      rules: [],
       reason: `no rules found in ${rulesPath}. Each top-level list item is one rule.`,
     };
   }
@@ -123,11 +117,15 @@ export const STARTER_RULES = `# Coding rules checked by stop-rules
 Each top-level bullet is one rule. Write rules as plain sentences a reviewer could apply
 to a diff. Headings and paragraphs are ignored.
 
-- Do not silently swallow errors. Every catch block must rethrow, return the failure to the caller, or log it with enough context to debug.
+If a linter can check it, use the linter. These rules are for things that need judgment.
+A rule must also be something a reviewer could judge from one piece of a change, without
+seeing the rest of the codebase.
+
+- Do not silently swallow errors. When code catches or receives an error it must rethrow it, return it to the caller, or log it with enough context to debug.
 - Do not add fallback values or default branches that hide a failure the caller needs to know about.
-- Do not write comments that only restate what the code does, or that narrate the change being made ("now we also handle X", "fixed the bug where").
-- Do not leave debugging output (console.log, print, dbg!) in non-test code.
-- Do not weaken type safety to make an error go away: no \`any\`, no \`as unknown as\`, no \`@ts-ignore\` or \`# type: ignore\` without a reason on the same line.
-- Do not add configuration options, parameters or abstractions that nothing in this change uses.
+- Do not write comments that only restate what the code does, or that narrate the change being made ("now we also handle X", "fixed the bug where"). A comment that explains why the code must be this way is fine.
 - Do not delete, skip or loosen an existing test to make it pass.
+- Do not hardcode a value or special-case a specific input just to make a test or check pass.
+- Do not leave stubs, placeholders, TODO implementations or fake data in code that is presented as finished.
+- An error message must say what failed and include the value or identifier that caused it.
 `;

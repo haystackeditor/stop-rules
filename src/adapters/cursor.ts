@@ -1,8 +1,7 @@
 import * as path from "node:path";
 import {
   anyExists,
-  asArray,
-  asRecord,
+  arrayAt,
   contextFrom,
   failed,
   hasViolations,
@@ -10,7 +9,9 @@ import {
   mentionsStopRules,
   out,
   readJsonFile,
+  recordAt,
   relative,
+  wrongShape,
   writeJsonFile,
 } from "./shared.js";
 import type { AgentAdapter, CheckResult, HookContext, HookOutput, InstallResult } from "./types.js";
@@ -40,6 +41,7 @@ export const cursorAdapter: AgentAdapter = {
 
   parseInput(stdinText: string): HookContext {
     return contextFrom(stdinText, {
+      agent: "Cursor",
       session: ["conversation_id", "session_id"],
       cwdArray: ["workspace_roots"],
       loopCount: ["loop_count"],
@@ -64,9 +66,15 @@ export const cursorAdapter: AgentAdapter = {
     if (!read.ok) return failed(shown, read.reason);
 
     const config = read.value;
-    if (typeof config["version"] !== "number") config["version"] = 1;
-    const hooks = asRecord(config["hooks"]);
-    const stop = asArray(hooks["stop"]);
+    const version = config["version"];
+    if (version === undefined) config["version"] = 1;
+    else if (typeof version !== "number") {
+      return failed(shown, wrongShape(shown, "version", "a number"));
+    }
+    const hooks = recordAt(config, "hooks");
+    if (hooks === null) return failed(shown, wrongShape(shown, "hooks", "an object"));
+    const stop = arrayAt(hooks, "stop");
+    if (stop === null) return failed(shown, wrongShape(shown, "stop", "a list"));
     if (stop.some(mentionsStopRules)) {
       return {
         ok: true,

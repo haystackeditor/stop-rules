@@ -3,11 +3,15 @@ import type { CheckReport } from "../types.js";
 /** What `check.ts` produced for this turn: clean when `violations` is empty. */
 export type CheckResult = CheckReport;
 
-/** What the hook could read out of the agent's payload. */
+/** What the hook read out of the agent's payload. */
 export interface HookContext {
   sessionId: string;
-  /** May be empty, in which case the CLI uses its own working directory. */
-  cwd: string;
+  /**
+   * The directory the agent named. Undefined only for the agents whose documented payload
+   * carries no directory at all (Windsurf's post_cascade_response, Aider's lint command),
+   * where the agent runs the hook in the project root and that is the contract.
+   */
+  cwd?: string;
   /** Follow-up rounds the agent has already run for this conversation, when it says. */
   loopCount?: number;
   /** The agent's own "you already continued me once" flag, when it has one. */

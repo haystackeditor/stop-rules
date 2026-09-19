@@ -21,8 +21,10 @@ export const plainAdapter: AgentAdapter = {
   },
 
   parseInput(stdinText: string): HookContext {
-    if (stdinText.trim().length === 0) return { sessionId: "unknown", cwd: "" };
+    // The documented input is {"session_id": "...", "cwd": "..."}, which is what the
+    // generated OpenCode and Amp plugins send. Nothing is invented when it is missing.
     return contextFrom(stdinText, {
+      agent: "plain",
       session: ["session_id", "sessionId"],
       cwd: ["cwd"],
       loopCount: ["loop_count"],

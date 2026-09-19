@@ -40,6 +40,7 @@ export const clineAdapter: AgentAdapter = {
 
   parseInput(stdinText: string): HookContext {
     return contextFrom(stdinText, {
+      agent: "Cline",
       session: ["taskId"],
       cwdArray: ["workspaceRoots"],
     });

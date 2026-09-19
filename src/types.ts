@@ -23,10 +23,16 @@ export interface ViolationLine {
 
 export interface Violation {
   file: string;
-  /** The localised lines for this (file, rule), at most 3, ascending. */
+  /**
+   * The lines that reached the cutoff, at most 3, ascending. Empty when no single line was
+   * identified, in which case `unlocalised` says why and the range below is what to read.
+   */
   lines: ViolationLine[];
-  /** True when the lines could not be localised confidently. */
-  approximate: boolean;
+  /** First and last new file line of the changed block this finding came from. */
+  fromLine: number;
+  toLine: number;
+  /** Why no line is named, in plain words. Null when `lines` holds them. */
+  unlocalised: string | null;
   ruleId: string;
   rule: string;
   /** Stage 1 score for this (chunk, rule). */
@@ -35,8 +41,9 @@ export interface Violation {
 
 export interface NotChecked {
   file: string;
-  fromLine: number;
-  toLine: number;
+  /** Absent when the failure is about the file as a whole, such as an unreadable path. */
+  fromLine?: number;
+  toLine?: number;
   reason: string;
 }
 

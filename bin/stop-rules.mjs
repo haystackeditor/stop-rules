@@ -1,8 +1,7 @@
 #!/usr/bin/env node
 
 // src/cli.ts
-import * as path19 from "node:path";
-import { fileURLToPath as fileURLToPath2 } from "node:url";
+import { fileURLToPath } from "node:url";
 
 // src/adapters/aider.ts
 import * as fs2 from "node:fs";
@@ -36,7 +35,7 @@ function pickString(payload, keys) {
     const value2 = payload[key];
     if (typeof value2 === "string" && value2.length > 0) return value2;
   }
-  return "";
+  return null;
 }
 function pickNumber(payload, keys) {
   for (const key of keys) {
@@ -52,16 +51,28 @@ function pickFirstOfArray(payload, keys) {
     const first = value2[0];
     if (typeof first === "string" && first.length > 0) return first;
   }
-  return "";
+  return null;
 }
 function contextFrom(stdinText, fields) {
   const payload = parseJsonPayload(stdinText);
-  const cwd = (fields.cwd ? pickString(payload, fields.cwd) : "") || (fields.cwdArray ? pickFirstOfArray(payload, fields.cwdArray) : "");
+  const missing = (names) => new Error(`the ${fields.agent} hook input has no ${names.join(" or ")}`);
+  const sessionId = pickString(payload, fields.session);
+  if (sessionId === null) throw missing(fields.session);
+  let cwd;
+  if (fields.cwd !== void 0) {
+    const found = pickString(payload, fields.cwd);
+    if (found === null) throw missing(fields.cwd);
+    cwd = found;
+  } else if (fields.cwdArray !== void 0) {
+    const found = pickFirstOfArray(payload, fields.cwdArray);
+    if (found === null) throw missing(fields.cwdArray);
+    cwd = found;
+  }
   const loopCount = fields.loopCount ? pickNumber(payload, fields.loopCount) : void 0;
   const active = fields.stopHookActive ? fields.stopHookActive.some((key) => payload[key] === true) : false;
   return {
-    sessionId: pickString(payload, fields.session) || "unknown",
-    cwd,
+    sessionId,
+    ...cwd !== void 0 ? { cwd } : {},
     ...loopCount !== void 0 ? { loopCount } : {},
     stopHookActive: active
   };
@@ -122,21 +133,31 @@ function mentionsStopRules(value2) {
   if (isRecord(value2)) return Object.values(value2).some(mentionsStopRules);
   return false;
 }
-function asArray(value2) {
-  return Array.isArray(value2) ? [...value2] : [];
+function arrayAt(container, key) {
+  const value2 = container[key];
+  if (value2 === void 0) return [];
+  if (!Array.isArray(value2)) return null;
+  return [...value2];
 }
-function asRecord(value2) {
-  return isRecord(value2) ? value2 : {};
+function recordAt(container, key) {
+  const value2 = container[key];
+  if (value2 === void 0) return {};
+  if (!isRecord(value2)) return null;
+  return value2;
+}
+function wrongShape(shown, key, expected) {
+  return `in ${shown}, "${key}" is not ${expected}. Nothing was changed: fix the file and run init again.`;
 }
 function anyExists(repoRoot, names) {
   return names.some((name) => fs.existsSync(path.join(repoRoot, name)));
 }
-function mergeHookGroup(container, event, entry, group = {}) {
-  const list = asArray(container[event]);
-  if (list.some(mentionsStopRules)) return false;
+function mergeHookGroup(container, shown, event, entry, group = {}) {
+  const list = arrayAt(container, event);
+  if (list === null) return { ok: false, reason: wrongShape(shown, event, "a list") };
+  if (list.some(mentionsStopRules)) return { ok: true, changed: false };
   list.push({ ...group, hooks: [entry] });
   container[event] = list;
-  return true;
+  return { ok: true, changed: true };
 }
 
 // src/adapters/aider.ts
@@ -154,7 +175,7 @@ var aiderAdapter = {
     return `node "${bundlePath}" hook --agent aider --`;
   },
   parseInput(_stdinText) {
-    return { sessionId: "aider", cwd: "" };
+    return { sessionId: "aider" };
   },
   deliver(result, report) {
     if (!hasViolations(result)) return out(0);
@@ -269,7 +290,14 @@ function runStopRules(root: string, sessionID: string): Promise<Run> {
       stderr += chunk.toString("utf8")
     })
     child.on("error", reject)
-    child.on("close", (code) => resolve({ code: code ?? 0, stdout, stderr }))
+    child.on("close", (code, signal) => {
+      // A signal death has no exit code. Calling that 0 would report a killed check as clean.
+      if (code === null) {
+        reject(new Error("stop-rules was killed by " + String(signal)))
+        return
+      }
+      resolve({ code, stdout, stderr })
+    })
     child.stdin.end(JSON.stringify({ session_id: sessionID, cwd: root }))
   })
 }
@@ -316,8 +344,8 @@ var plainAdapter = {
     return `node "${bundlePath}" hook --agent plain`;
   },
   parseInput(stdinText) {
-    if (stdinText.trim().length === 0) return { sessionId: "unknown", cwd: "" };
     return contextFrom(stdinText, {
+      agent: "plain",
       session: ["session_id", "sessionId"],
       cwd: ["cwd"],
       loopCount: ["loop_count"],
@@ -427,6 +455,7 @@ var claudeCodeAdapter = {
   },
   parseInput(stdinText) {
     return contextFrom(stdinText, {
+      agent: "Claude Code",
       session: ["session_id"],
       cwd: ["cwd"],
       stopHookActive: ["stop_hook_active"]
@@ -445,14 +474,16 @@ var claudeCodeAdapter = {
     const read = readJsonFile(file, shown);
     if (!read.ok) return failed(shown, read.reason);
     const settings = read.value;
-    const hooks = asRecord(settings["hooks"]);
-    const added = mergeHookGroup(hooks, "Stop", {
+    const hooks = recordAt(settings, "hooks");
+    if (hooks === null) return failed(shown, wrongShape(shown, "hooks", "an object"));
+    const merged = mergeHookGroup(hooks, shown, "Stop", {
       type: "command",
       command,
       asyncRewake: true,
       timeout: 120
     });
-    if (!added) {
+    if (!merged.ok) return failed(shown, merged.reason);
+    if (!merged.changed) {
       return {
         ok: true,
         files: [shown],
@@ -501,6 +532,7 @@ var clineAdapter = {
   },
   parseInput(stdinText) {
     return contextFrom(stdinText, {
+      agent: "Cline",
       session: ["taskId"],
       cwdArray: ["workspaceRoots"]
     });
@@ -574,6 +606,7 @@ var codexAdapter = {
   },
   parseInput(stdinText) {
     return contextFrom(stdinText, {
+      agent: "Codex",
       session: ["session_id"],
       cwd: ["cwd"],
       stopHookActive: ["stop_hook_active"]
@@ -592,9 +625,11 @@ var codexAdapter = {
     const read = readJsonFile(file, shown);
     if (!read.ok) return failed(shown, read.reason);
     const config = read.value;
-    const hooks = asRecord(config["hooks"]);
-    const added = mergeHookGroup(hooks, "Stop", { type: "command", command, timeout: 120 });
-    if (!added) {
+    const hooks = recordAt(config, "hooks");
+    if (hooks === null) return failed(shown, wrongShape(shown, "hooks", "an object"));
+    const merged = mergeHookGroup(hooks, shown, "Stop", { type: "command", command, timeout: 120 });
+    if (!merged.ok) return failed(shown, merged.reason);
+    if (!merged.changed) {
       return {
         ok: true,
         files: [shown],
@@ -630,6 +665,7 @@ var copilotAdapter = {
   },
   parseInput(stdinText) {
     return contextFrom(stdinText, {
+      agent: "Copilot CLI",
       session: ["sessionId", "session_id"],
       cwd: ["cwd"],
       stopHookActive: ["stop_hook_active"]
@@ -649,9 +685,15 @@ var copilotAdapter = {
     const read = readJsonFile(file, shown);
     if (!read.ok) return failed(shown, read.reason);
     const config = read.value;
-    if (typeof config["version"] !== "number") config["version"] = 1;
-    const hooks = asRecord(config["hooks"]);
-    const list = asArray(hooks["agentStop"]);
+    const version = config["version"];
+    if (version === void 0) config["version"] = 1;
+    else if (typeof version !== "number") {
+      return failed(shown, wrongShape(shown, "version", "a number"));
+    }
+    const hooks = recordAt(config, "hooks");
+    if (hooks === null) return failed(shown, wrongShape(shown, "hooks", "an object"));
+    const list = arrayAt(hooks, "agentStop");
+    if (list === null) return failed(shown, wrongShape(shown, "agentStop", "a list"));
     if (list.some(mentionsStopRules)) {
       return {
         ok: true,
@@ -690,6 +732,7 @@ var cursorAdapter = {
   },
   parseInput(stdinText) {
     return contextFrom(stdinText, {
+      agent: "Cursor",
       session: ["conversation_id", "session_id"],
       cwdArray: ["workspace_roots"],
       loopCount: ["loop_count"]
@@ -709,9 +752,15 @@ var cursorAdapter = {
     const read = readJsonFile(file, shown);
     if (!read.ok) return failed(shown, read.reason);
     const config = read.value;
-    if (typeof config["version"] !== "number") config["version"] = 1;
-    const hooks = asRecord(config["hooks"]);
-    const stop = asArray(hooks["stop"]);
+    const version = config["version"];
+    if (version === void 0) config["version"] = 1;
+    else if (typeof version !== "number") {
+      return failed(shown, wrongShape(shown, "version", "a number"));
+    }
+    const hooks = recordAt(config, "hooks");
+    if (hooks === null) return failed(shown, wrongShape(shown, "hooks", "an object"));
+    const stop = arrayAt(hooks, "stop");
+    if (stop === null) return failed(shown, wrongShape(shown, "stop", "a list"));
     if (stop.some(mentionsStopRules)) {
       return {
         ok: true,
@@ -750,6 +799,7 @@ var droidAdapter = {
   },
   parseInput(stdinText) {
     return contextFrom(stdinText, {
+      agent: "Droid",
       session: ["session_id"],
       cwd: ["cwd"],
       stopHookActive: ["stop_hook_active"]
@@ -768,8 +818,9 @@ var droidAdapter = {
     const read = readJsonFile(file, shown);
     if (!read.ok) return failed(shown, read.reason);
     const config = read.value;
-    const added = mergeHookGroup(config, "Stop", { type: "command", command, timeout: 120 });
-    if (!added) {
+    const merged = mergeHookGroup(config, shown, "Stop", { type: "command", command, timeout: 120 });
+    if (!merged.ok) return failed(shown, merged.reason);
+    if (!merged.changed) {
       return {
         ok: true,
         files: [shown],
@@ -804,6 +855,7 @@ var geminiAdapter = {
   },
   parseInput(stdinText) {
     return contextFrom(stdinText, {
+      agent: "Gemini CLI",
       session: ["session_id"],
       cwd: ["cwd"],
       stopHookActive: ["stop_hook_active"]
@@ -824,14 +876,17 @@ var geminiAdapter = {
     const read = readJsonFile(file, shown);
     if (!read.ok) return failed(shown, read.reason);
     const settings = read.value;
-    const hooks = asRecord(settings["hooks"]);
-    const added = mergeHookGroup(
+    const hooks = recordAt(settings, "hooks");
+    if (hooks === null) return failed(shown, wrongShape(shown, "hooks", "an object"));
+    const merged = mergeHookGroup(
       hooks,
+      shown,
       "AfterAgent",
       { name: "stop-rules", type: "command", command, timeout: 12e4 },
       { matcher: "*" }
     );
-    if (!added) {
+    if (!merged.ok) return failed(shown, merged.reason);
+    if (!merged.changed) {
       return {
         ok: true,
         files: [shown],
@@ -866,7 +921,7 @@ var kiroAdapter = {
     return `node "${bundlePath}" hook --agent kiro`;
   },
   parseInput(stdinText) {
-    return contextFrom(stdinText, { session: ["session_id"], cwd: ["cwd"] });
+    return contextFrom(stdinText, { agent: "Kiro", session: ["session_id"], cwd: ["cwd"] });
   },
   deliver(result, report) {
     if (!hasViolations(result)) return out(0);
@@ -882,8 +937,13 @@ var kiroAdapter = {
     const read = readJsonFile(file, shown);
     if (!read.ok) return failed(shown, read.reason);
     const config = read.value;
-    if (typeof config["version"] !== "string") config["version"] = "v1";
-    const hooks = asArray(config["hooks"]);
+    const version = config["version"];
+    if (version === void 0) config["version"] = "v1";
+    else if (typeof version !== "string") {
+      return failed(shown, wrongShape(shown, "version", "a string"));
+    }
+    const hooks = arrayAt(config, "hooks");
+    if (hooks === null) return failed(shown, wrongShape(shown, "hooks", "a list"));
     if (hooks.some(mentionsStopRules)) {
       return {
         ok: true,
@@ -941,7 +1001,14 @@ function runStopRules(root: string, sessionID: string): Promise<Run> {
       stderr += chunk.toString("utf8")
     })
     child.on("error", reject)
-    child.on("close", (code) => resolve({ code: code ?? 0, stdout, stderr }))
+    child.on("close", (code, signal) => {
+      // A signal death has no exit code. Calling that 0 would report a killed check as clean.
+      if (code === null) {
+        reject(new Error("stop-rules was killed by " + String(signal)))
+        return
+      }
+      resolve({ code, stdout, stderr })
+    })
     child.stdin.end(JSON.stringify({ session_id: sessionID, cwd: root }))
   })
 }
@@ -1066,7 +1133,7 @@ var windsurfAdapter = {
     return `node "${bundlePath}" hook --agent windsurf`;
   },
   parseInput(stdinText) {
-    return contextFrom(stdinText, { session: ["trajectory_id", "execution_id"] });
+    return contextFrom(stdinText, { agent: "Windsurf", session: ["trajectory_id", "execution_id"] });
   },
   deliver(result, report) {
     return exitTwoOnStderr(result, report);
@@ -1081,8 +1148,12 @@ var windsurfAdapter = {
     const read = readJsonFile(file, shown);
     if (!read.ok) return failed(shown, read.reason);
     const config = read.value;
-    const hooks = asRecord(config["hooks"]);
-    const list = asArray(hooks["post_cascade_response"]);
+    const hooks = recordAt(config, "hooks");
+    if (hooks === null) return failed(shown, wrongShape(shown, "hooks", "an object"));
+    const list = arrayAt(hooks, "post_cascade_response");
+    if (list === null) {
+      return failed(shown, wrongShape(shown, "post_cascade_response", "a list"));
+    }
     if (list.some(mentionsStopRules)) {
       return {
         ok: true,
@@ -1150,8 +1221,8 @@ var MAX_ATTEMPTS = 3;
 var BACKOFF_START_MS = 1e3;
 var BACKOFF_CAP_MS = 16e3;
 function defaultSleep(ms) {
-  return new Promise((resolve4) => {
-    globalThis.setTimeout(resolve4, ms);
+  return new Promise((resolve3) => {
+    globalThis.setTimeout(resolve3, ms);
   });
 }
 function parseRetryAfter(header) {
@@ -1325,12 +1396,12 @@ var JevClient = class {
     const results = [];
     let active = 0;
     let settled = false;
-    return new Promise((resolve4) => {
+    return new Promise((resolve3) => {
       const pump = () => {
         if (settled) return;
         if (queue.length === 0 && active === 0) {
           settled = true;
-          resolve4(results);
+          resolve3(results);
           return;
         }
         while (active < this.limit && queue.length > 0) {
@@ -1378,30 +1449,37 @@ var JevClient = class {
 import { promises as fs6 } from "node:fs";
 async function resolveApiKey(env) {
   const direct = env["TYPESAFE_API_KEY"];
-  if (typeof direct === "string" && direct.trim().length > 0) {
+  if (typeof direct === "string") {
+    if (direct.trim().length === 0) {
+      return { ok: false, reason: "TYPESAFE_API_KEY is set but empty. Unset it or put your key in it." };
+    }
     return { ok: true, key: direct.trim() };
   }
   const file = env["TYPESAFE_API_KEY_FILE"];
-  if (typeof file === "string" && file.trim().length > 0) {
+  if (typeof file === "string") {
+    if (file.trim().length === 0) {
+      return {
+        ok: false,
+        reason: "TYPESAFE_API_KEY_FILE is set but empty. Unset it or point it at a file holding your key."
+      };
+    }
     const keyPath = file.trim();
     try {
       const key = (await fs6.readFile(keyPath, "utf8")).trim();
       if (key.length === 0) {
-        return { ok: false, key: "", reason: `the file in TYPESAFE_API_KEY_FILE is empty` };
+        return { ok: false, reason: `${keyPath}, named by TYPESAFE_API_KEY_FILE, is empty` };
       }
       return { ok: true, key };
     } catch (error) {
       const err = error;
       return {
         ok: false,
-        key: "",
-        reason: `could not read the file in TYPESAFE_API_KEY_FILE: ${err.code ?? err.message}`
+        reason: `could not read ${keyPath}, named by TYPESAFE_API_KEY_FILE: ${err.code ?? err.message}`
       };
     }
   }
   return {
     ok: false,
-    key: "",
     reason: "no Jev API key. Set TYPESAFE_API_KEY, or TYPESAFE_API_KEY_FILE to a file holding it."
   };
 }
@@ -1412,9 +1490,19 @@ var SYSTEMONE_PATH = "/v1/systemone";
 var TOKEN_FILE = "token";
 var JEV_KEY_FILE = "jev-key";
 var TOKEN_REJECTED = "the team token is missing or wrong; run stop-rules login";
+function envValue(env, name) {
+  const raw = env[name];
+  if (raw === void 0) return { ok: true, value: null };
+  const trimmed = raw.trim();
+  if (trimmed.length === 0) {
+    return { ok: false, reason: `${name} is set but empty. Unset it or give it a value.` };
+  }
+  return { ok: true, value: trimmed };
+}
 function configDir(env) {
-  const xdg = (env["XDG_CONFIG_HOME"] ?? "").trim();
-  const base = xdg.length > 0 ? xdg : path14.join(homedir(), ".config");
+  const xdg = envValue(env, "XDG_CONFIG_HOME");
+  if (!xdg.ok) throw new Error(xdg.reason);
+  const base = xdg.value === null ? path14.join(homedir(), ".config") : xdg.value;
   return path14.join(base, "stop-rules");
 }
 function tokenPath(env) {
@@ -1424,14 +1512,16 @@ function jevKeyPath(env) {
   return path14.join(configDir(env), JEV_KEY_FILE);
 }
 async function readTrimmed(file) {
+  let text;
   try {
-    const text = (await fs7.readFile(file, "utf8")).trim();
-    return { value: text.length > 0 ? text : null };
+    text = (await fs7.readFile(file, "utf8")).trim();
   } catch (error) {
     const err = error;
     if (err.code === "ENOENT") return { value: null };
     return { value: null, error: `could not read ${file}: ${err.code ?? err.message}` };
   }
+  if (text.length === 0) return { value: null, error: `${file} is empty. Store the secret again.` };
+  return { value: text };
 }
 function parseEndpoint(raw) {
   const trimmed = raw.trim().replace(/\/+$/, "");
@@ -1453,8 +1543,11 @@ function parseEndpoint(raw) {
   };
 }
 async function readTeamEndpoint(repoRoot, env) {
-  const fromEnv = (env["STOP_RULES_ENDPOINT"] ?? "").trim();
-  if (fromEnv.length > 0) return { ok: true, endpoint: fromEnv, source: "STOP_RULES_ENDPOINT" };
+  const fromEnv = envValue(env, "STOP_RULES_ENDPOINT");
+  if (!fromEnv.ok) return { ok: false, reason: fromEnv.reason };
+  if (fromEnv.value !== null) {
+    return { ok: true, endpoint: fromEnv.value, source: "STOP_RULES_ENDPOINT" };
+  }
   const file = path14.join(repoRoot, TEAM_CONFIG_FILE);
   let raw;
   try {
@@ -1477,25 +1570,40 @@ async function readTeamEndpoint(repoRoot, env) {
     return { ok: false, reason: `${file} does not hold a JSON object.` };
   }
   const endpoint = parsed.endpoint;
-  if (endpoint === void 0) return { ok: true, endpoint: null, source: file };
+  if (endpoint === void 0) {
+    return {
+      ok: false,
+      reason: `${file} has no endpoint. Write one with stop-rules team <url>, or delete the file to use your own Jev key.`
+    };
+  }
   if (typeof endpoint !== "string") {
     return { ok: false, reason: `the endpoint in ${file} is not a string.` };
+  }
+  if (endpoint.trim().length === 0) {
+    return { ok: false, reason: `the endpoint in ${file} is empty.` };
   }
   return { ok: true, endpoint, source: file };
 }
 async function resolveCredentials(repoRoot, env) {
+  const configHome = envValue(env, "XDG_CONFIG_HOME");
+  if (!configHome.ok) return { ok: false, reason: configHome.reason };
+  const model = envValue(env, "STOP_RULES_JEV_MODEL");
+  if (!model.ok) return { ok: false, reason: model.reason };
+  const chosenModel = model.value === null ? DEFAULT_MODEL : model.value;
   const team = await readTeamEndpoint(repoRoot, env);
   if (!team.ok) return { ok: false, reason: team.reason };
   if (team.endpoint !== null) {
     const parsed = parseEndpoint(team.endpoint);
     if (!parsed.ok) return { ok: false, reason: `${parsed.reason} (from ${team.source})` };
-    let token = (env["STOP_RULES_TOKEN"] ?? "").trim();
-    if (token.length === 0) {
+    const fromEnv = envValue(env, "STOP_RULES_TOKEN");
+    if (!fromEnv.ok) return { ok: false, reason: fromEnv.reason };
+    let token = fromEnv.value;
+    if (token === null) {
       const file = await readTrimmed(tokenPath(env));
       if (file.error !== void 0) return { ok: false, reason: file.error };
-      token = file.value ?? "";
+      token = file.value;
     }
-    if (token.length === 0) {
+    if (token === null) {
       return {
         ok: false,
         reason: `no team token for ${parsed.base}. Store one with: printf %s "$TOKEN" | stop-rules login --token-stdin`
@@ -1503,20 +1611,33 @@ async function resolveCredentials(repoRoot, env) {
     }
     return {
       ok: true,
-      credentials: { mode: "team", endpoint: parsed.post, bearer: token, teamBase: parsed.base }
+      credentials: {
+        mode: "team",
+        endpoint: parsed.post,
+        bearer: token,
+        model: chosenModel,
+        teamBase: parsed.base
+      }
     };
   }
-  const endpoint = (env["STOP_RULES_JEV_ENDPOINT"] ?? "").trim() || DEFAULT_ENDPOINT;
-  const envKeySet = (env["TYPESAFE_API_KEY"] ?? "").trim().length > 0 || (env["TYPESAFE_API_KEY_FILE"] ?? "").trim().length > 0;
-  if (envKeySet) {
+  const override = envValue(env, "STOP_RULES_JEV_ENDPOINT");
+  if (!override.ok) return { ok: false, reason: override.reason };
+  const endpoint = override.value === null ? DEFAULT_ENDPOINT : override.value;
+  if (env["TYPESAFE_API_KEY"] !== void 0 || env["TYPESAFE_API_KEY_FILE"] !== void 0) {
     const key = await resolveApiKey(env);
-    if (!key.ok) return { ok: false, reason: key.reason ?? "no Jev API key." };
-    return { ok: true, credentials: { mode: "local", endpoint, bearer: key.key } };
+    if (!key.ok) return { ok: false, reason: key.reason };
+    return {
+      ok: true,
+      credentials: { mode: "local", endpoint, bearer: key.key, model: chosenModel }
+    };
   }
   const stored = await readTrimmed(jevKeyPath(env));
   if (stored.error !== void 0) return { ok: false, reason: stored.error };
   if (stored.value !== null) {
-    return { ok: true, credentials: { mode: "local", endpoint, bearer: stored.value } };
+    return {
+      ok: true,
+      credentials: { mode: "local", endpoint, bearer: stored.value, model: chosenModel }
+    };
   }
   return {
     ok: false,
@@ -1594,7 +1715,7 @@ async function login(env, target, secret) {
 async function loginCheck(repoRoot, env, fetchImpl = (url, init2) => fetch(url, init2)) {
   const resolved = await resolveCredentials(repoRoot, env);
   if (!resolved.ok) return { ok: false, lines: [`stop-rules: ${resolved.reason}`] };
-  const { mode, endpoint, bearer: bearer2, teamBase } = resolved.credentials;
+  const { mode, endpoint, bearer: bearer2, model, teamBase } = resolved.credentials;
   const lines = [`mode: ${mode}`, `endpoint: ${endpoint}`];
   let ok = true;
   if (teamBase !== void 0) {
@@ -1610,7 +1731,7 @@ async function loginCheck(repoRoot, env, fetchImpl = (url, init2) => fetch(url, 
   }
   const client = new JevClient({
     endpoint,
-    model: (env["STOP_RULES_JEV_MODEL"] ?? "").trim() || DEFAULT_MODEL,
+    model,
     apiKey: bearer2,
     // Room for the transport's own three attempts, so a network failure reports itself as
     // one rather than as an exhausted budget.
@@ -1722,7 +1843,8 @@ function chunkText(chunk) {
 ${chunk.hunks.map(hunkText).join("")}`;
 }
 function shortenBodyLine(body) {
-  const marker = body[0] ?? " ";
+  const marker = body[0];
+  if (marker === void 0) throw new Error("internal error: an empty diff body line");
   const text = body.slice(1);
   if (text.length <= LONG_LINE_LIMIT) return body;
   return `${marker}${longLineMarker(text.length)}`;
@@ -1753,25 +1875,82 @@ function chunkRange(chunk) {
   if (!Number.isFinite(from)) return { from: 0, to: 0 };
   return { from, to };
 }
-function unquotePath(raw) {
-  if (!raw.startsWith('"')) return raw;
+var SIMPLE_ESCAPES = {
+  '"': 34,
+  "\\": 92,
+  a: 7,
+  b: 8,
+  f: 12,
+  n: 10,
+  r: 13,
+  t: 9,
+  v: 11
+};
+function decodeQuotedPath(raw) {
+  if (!raw.startsWith('"')) return { ok: true, path: raw };
+  if (raw.length < 2 || !raw.endsWith('"')) {
+    return { ok: false, reason: "git quoted this path but the closing quote is missing" };
+  }
+  const body = raw.slice(1, -1);
+  const bytes = [];
+  let plain = "";
+  const flush = () => {
+    if (plain.length === 0) return;
+    for (const byte of encoder.encode(plain)) bytes.push(byte);
+    plain = "";
+  };
+  for (let i = 0; i < body.length; i += 1) {
+    const char = body[i];
+    if (char === void 0) break;
+    if (char !== "\\") {
+      plain += char;
+      continue;
+    }
+    i += 1;
+    const escape = body[i];
+    if (escape === void 0) {
+      return { ok: false, reason: "git quoted this path but a backslash escape is cut short" };
+    }
+    const simple = SIMPLE_ESCAPES[escape];
+    if (simple !== void 0) {
+      flush();
+      bytes.push(simple);
+      continue;
+    }
+    if (escape >= "0" && escape <= "7") {
+      const digits = body.slice(i, i + 3);
+      if (!/^[0-7]{3}$/.test(digits)) {
+        return { ok: false, reason: `git quoted this path with an octal escape stop-rules cannot read: \\${digits}` };
+      }
+      flush();
+      bytes.push(Number.parseInt(digits, 8));
+      i += 2;
+      continue;
+    }
+    return { ok: false, reason: `git quoted this path with an escape stop-rules does not know: \\${escape}` };
+  }
+  flush();
   try {
-    const parsed = JSON.parse(raw);
-    return typeof parsed === "string" ? parsed : raw;
-  } catch {
-    return raw.slice(1, -1);
+    return { ok: true, path: new TextDecoder("utf-8", { fatal: true }).decode(new Uint8Array(bytes)) };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return { ok: false, reason: `this path is not valid UTF-8, so stop-rules cannot name it (${message})` };
   }
 }
 function stripPrefix(raw) {
-  const p = unquotePath(raw);
-  if (p.startsWith("a/") || p.startsWith("b/")) return p.slice(2);
-  return p;
+  const read = decodeQuotedPath(raw);
+  if (!read.ok) return read;
+  if (read.path.startsWith("a/") || read.path.startsWith("b/")) {
+    return { ok: true, path: read.path.slice(2) };
+  }
+  return read;
 }
 var HUNK_RE = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)$/;
 function parseDiff(diff, extraSkip = []) {
   const lines = diff.split("\n");
   const files = [];
   const skipped = [];
+  const failures = [];
   let i = 0;
   while (i < lines.length) {
     const line = lines[i] ?? "";
@@ -1783,6 +1962,7 @@ function parseDiff(diff, extraSkip = []) {
     let binary = false;
     let newPath = null;
     let deleted = false;
+    let unreadablePath = null;
     i += 1;
     while (i < lines.length) {
       const current = lines[i] ?? "";
@@ -1795,8 +1975,13 @@ function parseDiff(diff, extraSkip = []) {
       }
       if (current.startsWith("+++ ")) {
         const target = current.slice(4).trim();
-        if (target === "/dev/null") deleted = true;
-        else newPath = stripPrefix(target);
+        if (target === "/dev/null") {
+          deleted = true;
+        } else {
+          const read = stripPrefix(target);
+          if (read.ok) newPath = read.path;
+          else unreadablePath = { file: target, reason: read.reason };
+        }
         break;
       }
     }
@@ -1837,8 +2022,12 @@ function parseDiff(diff, extraSkip = []) {
       }
       hunks.push(hunk);
     }
+    if (unreadablePath !== null) {
+      failures.push(unreadablePath);
+      continue;
+    }
     if (binary) {
-      skipped.push({ file: newPath ?? pathFromDiffHeader(line), reason: "binary file" });
+      skipped.push({ file: newPath ?? headerPath(line, failures), reason: "binary file" });
       continue;
     }
     if (deleted || newPath === null) continue;
@@ -1854,13 +2043,19 @@ function parseDiff(diff, extraSkip = []) {
     }
     files.push({ file: newPath, header, hunks });
   }
-  return { files, skipped };
+  return { files, skipped, failures };
 }
-function pathFromDiffHeader(headerLine) {
+function headerPath(headerLine, failures) {
   const rest = headerLine.slice("diff --git ".length);
   const cut = rest.lastIndexOf(" b/");
-  if (cut === -1) return rest;
-  return stripPrefix(rest.slice(cut + 1));
+  if (cut === -1) {
+    failures.push({ file: rest, reason: "stop-rules could not find a file name in this diff header" });
+    return rest;
+  }
+  const read = stripPrefix(rest.slice(cut + 1));
+  if (read.ok) return read.path;
+  failures.push({ file: rest, reason: read.reason });
+  return rest;
 }
 function splitHunk(hunk, pieces) {
   if (pieces < 2 || hunk.lines.length < 2) return [hunk];
@@ -1951,6 +2146,14 @@ async function sha256Hex(parts) {
 }
 function cacheKey(model, claim, state) {
   return sha256Hex([CACHE_KEY_VERSION, model, claim, JSON.stringify(state)]);
+}
+function unlocalisedFor(entry) {
+  if (entry.candidates.size > 0) return null;
+  const first = entry.unlocalised[0];
+  if (first === void 0) {
+    throw new Error(`internal error: ${entry.file} has neither a line nor a reason for having none`);
+  }
+  return first;
 }
 function entryKey(file, ruleId2) {
   return `${file}\0${ruleId2}`;
@@ -2075,6 +2278,7 @@ async function runEngine(input) {
   const fresh = input.skipFinding === void 0 ? hits : hits.filter((hit) => !input.skipFinding?.(hit.rule.id, chunkText(hit.chunk)));
   const stage2Nodes = [];
   const scores = /* @__PURE__ */ new Map();
+  const localiseFailures = /* @__PURE__ */ new Map();
   const hitKey = (rule, chunk) => `${rule.id}\0${chunkText(chunk)}`;
   for (const hit of fresh) {
     const lineState = { file: hit.chunk.file, diff: chunkText(hit.chunk), rule: hit.rule.text };
@@ -2099,9 +2303,9 @@ async function runEngine(input) {
       const failure2 = result.outcome.failure;
       if (holdsBaseline(failure2)) holdBaseline = true;
       noteFailure(failure2);
-      note(
-        `could not localise rule ${rule.id} in ${chunk.file}: ${reasonFor(failure2, result.outcome.message)}`
-      );
+      const why = `the question about which line failed: ${reasonFor(failure2, result.outcome.message)}`;
+      note(`could not localise rule ${rule.id} in ${chunk.file}: ${why}`);
+      localiseFailures.set(hitKey(rule, chunk), why);
       continue;
     }
     for (const [id, line] of Object.entries(byQuestion)) {
@@ -2117,58 +2321,79 @@ async function runEngine(input) {
   const entries = /* @__PURE__ */ new Map();
   const findings = [];
   for (const hit of fresh) {
-    const chunkLines = addedLines(hit.chunk);
-    const perLine = scores.get(hitKey(hit.rule, hit.chunk)) ?? /* @__PURE__ */ new Map();
+    const key2 = hitKey(hit.rule, hit.chunk);
+    const perLine = scores.get(key2);
+    if (perLine === void 0) {
+      throw new Error(`internal error: no line scores were recorded for ${hit.chunk.file}`);
+    }
+    const textByLine = new Map(addedLines(hit.chunk).map((line) => [line.line, line.text.trim()]));
     const byScore = [...perLine.entries()].sort((a, b) => b[1] - a[1]);
     const above = byScore.filter(([, score]) => score >= threshold).slice(0, MAX_LINES_PER_VIOLATION);
-    const textOf = (lineNo) => (chunkLines.find((line) => line.line === lineNo)?.text ?? "").trim();
     findings.push({ ruleId: hit.rule.id, chunkText: chunkText(hit.chunk) });
-    let picked;
-    let approximate;
-    if (above.length > 0) {
-      picked = above;
-      approximate = false;
-    } else if (byScore.length > 0) {
-      picked = byScore.slice(0, 1);
-      approximate = true;
-    } else {
-      const fallback = localisableLines(hit.chunk)[0] ?? chunkLines[0];
-      picked = [[fallback?.line ?? chunkRange(hit.chunk).from, 0]];
-      approximate = true;
-    }
-    const key = entryKey(hit.chunk.file, hit.rule.id);
-    const entry = entries.get(key) ?? {
-      file: hit.chunk.file,
-      ruleId: hit.rule.id,
-      rule: hit.rule.text,
-      confidence: hit.score,
-      approximate,
-      candidates: /* @__PURE__ */ new Map()
-    };
-    entry.confidence = Math.max(entry.confidence, hit.score);
-    entry.approximate = entry.approximate && approximate;
-    for (const [lineNo, score] of picked) {
-      const existing = entry.candidates.get(lineNo);
-      if (existing === void 0 || existing.score < score) {
-        entry.candidates.set(lineNo, { text: textOf(lineNo), score });
+    const range = chunkRange(hit.chunk);
+    let unlocalised = null;
+    if (above.length === 0) {
+      const failed2 = localiseFailures.get(key2);
+      if (failed2 !== void 0) unlocalised = failed2;
+      else if (byScore.length > 0) {
+        unlocalised = `no added line reached the ${threshold} cutoff`;
+      } else if (localisableLines(hit.chunk).length === 0) {
+        unlocalised = "no added line in this block has text to point at";
+      } else {
+        unlocalised = "no line scores came back for this block";
       }
     }
-    entries.set(key, entry);
+    const key = entryKey(hit.chunk.file, hit.rule.id);
+    let entry = entries.get(key);
+    if (entry === void 0) {
+      entry = {
+        file: hit.chunk.file,
+        ruleId: hit.rule.id,
+        rule: hit.rule.text,
+        confidence: hit.score,
+        fromLine: range.from,
+        toLine: range.to,
+        unlocalised: [],
+        candidates: /* @__PURE__ */ new Map()
+      };
+      entries.set(key, entry);
+    }
+    entry.confidence = Math.max(entry.confidence, hit.score);
+    entry.fromLine = Math.min(entry.fromLine, range.from);
+    entry.toLine = Math.max(entry.toLine, range.to);
+    if (unlocalised !== null) entry.unlocalised.push(unlocalised);
+    for (const [lineNo, score] of above) {
+      const text = textByLine.get(lineNo);
+      if (text === void 0) {
+        throw new Error(`internal error: line ${lineNo} is not an added line of ${hit.chunk.file}`);
+      }
+      const existing = entry.candidates.get(lineNo);
+      if (existing === void 0 || existing.score < score) {
+        entry.candidates.set(lineNo, { text, score });
+      }
+    }
   }
   const violations = [...entries.values()].map((entry) => ({
     file: entry.file,
     lines: [...entry.candidates.entries()].sort((a, b) => b[1].score - a[1].score).slice(0, MAX_LINES_PER_VIOLATION).map(([line, value2]) => ({ line, text: value2.text })).sort((a, b) => a.line - b.line),
-    approximate: entry.approximate,
+    fromLine: entry.fromLine,
+    toLine: entry.toLine,
+    // One line named is enough for the entry; the reason is only reported when none is.
+    unlocalised: unlocalisedFor(entry),
     ruleId: entry.ruleId,
     rule: entry.rule,
     confidence: entry.confidence
   }));
-  const firstLine = (violation) => violation.lines[0]?.line ?? 0;
+  const firstLine = (violation) => {
+    const first = violation.lines[0];
+    return first === void 0 ? violation.fromLine : first.line;
+  };
   violations.sort(
     (a, b) => a.file === b.file ? firstLine(a) - firstLine(b) : a.file < b.file ? -1 : 1
   );
+  const fromLineOf = (entry) => entry.fromLine === void 0 ? 0 : entry.fromLine;
   notChecked.sort(
-    (a, b) => a.file === b.file ? a.fromLine - b.fromLine : a.file < b.file ? -1 : 1
+    (a, b) => a.file === b.file ? fromLineOf(a) - fromLineOf(b) : a.file < b.file ? -1 : 1
   );
   return {
     violations,
@@ -2191,7 +2416,7 @@ import * as path15 from "node:path";
 import { randomBytes } from "node:crypto";
 var MAX_BUFFER = 256 * 1024 * 1024;
 function runGit(cwd, args, extraEnv) {
-  return new Promise((resolve4, reject) => {
+  return new Promise((resolve3, reject) => {
     execFile(
       "git",
       args,
@@ -2203,12 +2428,12 @@ function runGit(cwd, args, extraEnv) {
       },
       (error, stdout, stderr) => {
         if (error === null) {
-          resolve4({ code: 0, stdout, stderr });
+          resolve3({ code: 0, stdout, stderr });
           return;
         }
         const withCode = error;
         if (typeof withCode.code === "number") {
-          resolve4({ code: withCode.code, stdout, stderr });
+          resolve3({ code: withCode.code, stdout, stderr });
           return;
         }
         reject(new Error(`could not run git ${args.join(" ")}: ${error.message}`));
@@ -2286,14 +2511,25 @@ function trimQuoted(text) {
   return `${text.slice(0, MAX_QUOTED_LINE)}...`;
 }
 function notCheckedLine(entry) {
+  if (entry.fromLine === void 0 || entry.toLine === void 0) {
+    return `${entry.file}: ${entry.reason}`;
+  }
   const where = entry.fromLine === entry.toLine ? `line ${entry.fromLine}` : `lines ${entry.fromLine}-${entry.toLine}`;
   return `${entry.file} ${where}: ${entry.reason}`;
 }
 function violationBlock(violation, index) {
+  if (violation.unlocalised !== null) {
+    const range = violation.fromLine === violation.toLine ? `line ${violation.fromLine}` : `lines ${violation.fromLine}-${violation.toLine}`;
+    return [
+      `${index}. ${violation.file} ${range}`,
+      `   Rule: ${violation.rule}`,
+      `   No single line identified: ${violation.unlocalised}`,
+      `   Confidence: ${confidence(violation.confidence)}`
+    ].join("\n");
+  }
   const where = violation.lines.map((line) => line.line).join(", ");
-  const approximate = violation.approximate ? violation.lines.length > 1 ? " (approximate lines)" : " (approximate line)" : "";
   return [
-    `${index}. ${violation.file}:${where}${approximate}`,
+    `${index}. ${violation.file}:${where}`,
     `   Rule: ${violation.rule}`,
     ...violation.lines.map((line) => `   Line: ${trimQuoted(line.text)}`),
     `   Confidence: ${confidence(violation.confidence)}`
@@ -2407,17 +2643,15 @@ async function loadRules(rulesPath) {
     if (err.code === "ENOENT") {
       return {
         ok: false,
-        rules: [],
         reason: `no rules file at ${rulesPath}. Run "stop-rules init" to create one.`
       };
     }
-    return { ok: false, rules: [], reason: `could not read ${rulesPath}: ${err.message}` };
+    return { ok: false, reason: `could not read ${rulesPath}: ${err.message}` };
   }
   const rules = parseRules(source);
   if (rules.length === 0) {
     return {
       ok: false,
-      rules: [],
       reason: `no rules found in ${rulesPath}. Each top-level list item is one rule.`
     };
   }
@@ -2428,13 +2662,17 @@ var STARTER_RULES = `# Coding rules checked by stop-rules
 Each top-level bullet is one rule. Write rules as plain sentences a reviewer could apply
 to a diff. Headings and paragraphs are ignored.
 
-- Do not silently swallow errors. Every catch block must rethrow, return the failure to the caller, or log it with enough context to debug.
+If a linter can check it, use the linter. These rules are for things that need judgment.
+A rule must also be something a reviewer could judge from one piece of a change, without
+seeing the rest of the codebase.
+
+- Do not silently swallow errors. When code catches or receives an error it must rethrow it, return it to the caller, or log it with enough context to debug.
 - Do not add fallback values or default branches that hide a failure the caller needs to know about.
-- Do not write comments that only restate what the code does, or that narrate the change being made ("now we also handle X", "fixed the bug where").
-- Do not leave debugging output (console.log, print, dbg!) in non-test code.
-- Do not weaken type safety to make an error go away: no \`any\`, no \`as unknown as\`, no \`@ts-ignore\` or \`# type: ignore\` without a reason on the same line.
-- Do not add configuration options, parameters or abstractions that nothing in this change uses.
+- Do not write comments that only restate what the code does, or that narrate the change being made ("now we also handle X", "fixed the bug where"). A comment that explains why the code must be this way is fine.
 - Do not delete, skip or loosen an existing test to make it pass.
+- Do not hardcode a value or special-case a specific input just to make a test or check pass.
+- Do not leave stubs, placeholders, TODO implementations or fake data in code that is presented as finished.
+- An error message must say what failed and include the value or identifier that caused it.
 `;
 
 // src/state.ts
@@ -2456,12 +2694,20 @@ function emptyCache() {
   return { version: 1, entries: {} };
 }
 async function readJson(file) {
+  let text;
   try {
-    return JSON.parse(await fs10.readFile(file, "utf8"));
+    text = await fs10.readFile(file, "utf8");
   } catch (error) {
     const err = error;
     if (err.code === "ENOENT") return null;
-    throw new Error(`could not read ${path16.basename(file)}: ${err.message}`);
+    throw new Error(`could not read ${file}: ${err.code ?? err.message}`);
+  }
+  try {
+    return JSON.parse(text);
+  } catch (error) {
+    throw new Error(
+      `${file} is not valid JSON (${error instanceof Error ? error.message : String(error)}). Run stop-rules baseline --reset to start again.`
+    );
   }
 }
 async function writeJsonAtomic(file, value2) {
@@ -2471,21 +2717,28 @@ async function writeJsonAtomic(file, value2) {
 `, "utf8");
   await fs10.rename(temp, file);
 }
-async function loadState(stateDir, note) {
-  let raw;
-  try {
-    raw = await readJson(path16.join(stateDir, "state.json"));
-  } catch (error) {
-    note(`${error.message}; starting from empty state`);
-    return emptyState();
+function isRecord2(value2) {
+  return typeof value2 === "object" && value2 !== null && !Array.isArray(value2);
+}
+async function loadState(stateDir) {
+  const file = path16.join(stateDir, "state.json");
+  const raw = await readJson(file);
+  if (raw === null) return emptyState();
+  if (!isRecord2(raw)) {
+    throw new Error(`${file} does not hold a JSON object. Run stop-rules baseline --reset.`);
   }
-  if (raw === null || typeof raw !== "object") return emptyState();
-  const candidate = raw;
+  const lastTree = raw["lastTree"];
+  const reported = raw["reported"];
+  const sessions = raw["sessions"];
+  const wrong = (field) => new Error(`${file} has a ${field} that stop-rules did not write. Run stop-rules baseline --reset.`);
+  if (lastTree !== void 0 && typeof lastTree !== "string") throw wrong("lastTree");
+  if (reported !== void 0 && !isRecord2(reported)) throw wrong("reported");
+  if (sessions !== void 0 && !isRecord2(sessions)) throw wrong("sessions");
   return {
     version: 1,
-    ...typeof candidate.lastTree === "string" ? { lastTree: candidate.lastTree } : {},
-    reported: typeof candidate.reported === "object" && candidate.reported !== null ? candidate.reported : {},
-    sessions: typeof candidate.sessions === "object" && candidate.sessions !== null ? candidate.sessions : {}
+    ...typeof lastTree === "string" ? { lastTree } : {},
+    reported: isRecord2(reported) ? reported : {},
+    sessions: isRecord2(sessions) ? sessions : {}
   };
 }
 function prune(entries, at, max) {
@@ -2499,18 +2752,17 @@ async function saveState(stateDir, state) {
   prune(state.reported, (value2) => value2, MAX_REPORTED_ENTRIES);
   await writeJsonAtomic(path16.join(stateDir, "state.json"), state);
 }
-async function loadCache(stateDir, note) {
-  let raw;
-  try {
-    raw = await readJson(path16.join(stateDir, "cache.json"));
-  } catch (error) {
-    note(`${error.message}; starting from an empty cache`);
-    return emptyCache();
+async function loadCache(stateDir) {
+  const file = path16.join(stateDir, "cache.json");
+  const raw = await readJson(file);
+  if (raw === null) return emptyCache();
+  if (!isRecord2(raw) || !isRecord2(raw["entries"])) {
+    throw new Error(`${file} is not a stop-rules cache. Delete it and run again.`);
   }
-  if (raw === null || typeof raw !== "object") return emptyCache();
-  const entries = raw.entries;
-  if (typeof entries !== "object" || entries === null) return emptyCache();
-  return { version: 1, entries };
+  return { version: 1, entries: raw["entries"] };
+}
+async function resetState(stateDir) {
+  await writeJsonAtomic(path16.join(stateDir, "state.json"), emptyState());
 }
 async function saveCache(stateDir, cache) {
   prune(cache.entries, (value2) => value2.at, MAX_CACHE_ENTRIES);
@@ -2604,6 +2856,21 @@ function fileCache(cache) {
     }
   };
 }
+async function resetBaseline(cwd) {
+  const repo = await findRepo(cwd);
+  if (repo === null) {
+    return { ok: false, lines: [`stop-rules: ${cwd} is not inside a git repository.`] };
+  }
+  const stateDir = stateDirFor(repo.gitDir);
+  await resetState(stateDir);
+  return {
+    ok: true,
+    lines: [
+      `cleared the saved baseline in ${stateDir}`,
+      "The next check starts from HEAD and reports everything it finds."
+    ]
+  };
+}
 async function run(options) {
   const started = Date.now();
   const env = options.env ?? process.env;
@@ -2615,7 +2882,7 @@ async function run(options) {
   if (repo === null) return cannotRun(`${options.cwd} is not inside a git repository.`);
   const rulesPath = options.rulesPath ? path17.resolve(options.cwd, options.rulesPath) : path17.join(repo.root, ".stop-rules.md");
   const rulesLoad = await loadRules(rulesPath);
-  if (!rulesLoad.ok) return cannotRun(rulesLoad.reason ?? "no rules to check against.");
+  if (!rulesLoad.ok) return cannotRun(rulesLoad.reason);
   const credentials = await resolveCredentials(repo.root, env);
   if (!credentials.ok) return cannotRun(credentials.reason);
   const stateDir = stateDirFor(repo.gitDir);
@@ -2626,7 +2893,6 @@ async function run(options) {
   try {
     return await runLocked({
       options,
-      env,
       repo,
       rulesPath,
       rules: rulesLoad.rules,
@@ -2641,20 +2907,33 @@ async function run(options) {
   }
 }
 async function runLocked(args) {
-  const { options, env, repo, rulesPath, rules, credentials, stateDir, notes, note, started } = args;
-  const model = env["STOP_RULES_JEV_MODEL"] ?? DEFAULT_MODEL;
-  const state = await loadState(stateDir, note);
-  const cache = await loadCache(stateDir, note);
+  const { options, repo, rulesPath, rules, credentials, stateDir, notes, note, started } = args;
+  const model = credentials.model;
+  let state;
+  let cache;
+  try {
+    state = await loadState(stateDir);
+    cache = await loadCache(stateDir);
+  } catch (error) {
+    return cannotRun(error instanceof Error ? error.message : String(error));
+  }
   const snapshot = await snapshotWorkingTree(repo, stateDir);
   let baseline;
   if (options.base !== void 0) {
     const resolved = await resolveTree(repo.root, options.base);
     if (resolved === null) return cannotRun(`unknown revision ${options.base}.`);
     baseline = resolved;
-  } else if (state.lastTree !== void 0 && await objectExists(repo.root, state.lastTree)) {
+  } else if (state.lastTree !== void 0) {
+    if (!await objectExists(repo.root, state.lastTree)) {
+      return cannotRun(
+        "the saved baseline is gone (git cleaned it up). Run stop-rules baseline --reset to start again from HEAD."
+      );
+    }
     baseline = state.lastTree;
   } else if (await hasHead(repo.root)) {
-    baseline = await resolveTree(repo.root, "HEAD") ?? await emptyTree(repo.root);
+    const head = await resolveTree(repo.root, "HEAD");
+    if (head === null) return cannotRun("git could not resolve HEAD to a tree in this repository.");
+    baseline = head;
   } else {
     baseline = await emptyTree(repo.root);
   }
@@ -2662,6 +2941,10 @@ async function runLocked(args) {
   const parsed = parseDiff(await diffTrees(repo.root, baseline, snapshot), [rulesRelative]);
   const files = parsed.files;
   const chunks = files.flatMap(chunkFile);
+  const parseFailures = parsed.failures.map((failure2) => ({
+    file: failure2.file,
+    reason: failure2.reason
+  }));
   const alreadyReported = state.reported;
   const engineResult = await runEngine({
     chunks,
@@ -2688,6 +2971,7 @@ async function runLocked(args) {
     await saveCache(stateDir, cache);
     return cannotRun("could not reach Jev for any chunk of this diff.");
   }
+  const notChecked = [...parseFailures, ...engineResult.notChecked];
   const stats = {
     files: files.length,
     chunks: chunks.length,
@@ -2695,14 +2979,14 @@ async function runLocked(args) {
     calls: engineResult.calls,
     cacheHits: engineResult.cacheHits,
     violations: engineResult.violations.length,
-    notChecked: engineResult.notChecked.length,
+    notChecked: notChecked.length,
     inputTokens: engineResult.usage.inputTokens,
     outputTokens: engineResult.usage.outputTokens,
     durationMs: Date.now() - started
   };
   const report = {
     violations: engineResult.violations,
-    notChecked: engineResult.notChecked,
+    notChecked,
     skipped: parsed.skipped,
     stats
   };
@@ -2733,7 +3017,10 @@ function decide(options, report, state, findings, snapshot, holdBaseline) {
   if (options.mode !== "hook") {
     return hasViolations2 ? { kind: "violations", report, text } : { kind: "clean", report, text };
   }
-  const sessionId = options.sessionId ?? "unknown";
+  const sessionId = options.sessionId;
+  if (sessionId === void 0) {
+    throw new Error("internal error: hook mode ran without a session id");
+  }
   const session = state.sessions[sessionId] ?? { violationRuns: 0, at: Date.now() };
   let handoff = false;
   if (hasViolations2) {
@@ -2765,27 +3052,13 @@ ${text}` };
 }
 
 // src/init.ts
-import { promises as fs12 } from "node:fs";
+import { promises as fs11 } from "node:fs";
 import * as path18 from "node:path";
 
 // src/version.ts
-import { promises as fs11 } from "node:fs";
-import { fileURLToPath } from "node:url";
-var BAKED = true ? "0.1.0" : null;
+var VERSION = "0.1.0";
 function isBundled() {
-  return BAKED !== null;
-}
-async function version() {
-  if (BAKED !== null) return BAKED;
-  const pkgPath = fileURLToPath(new URL("../package.json", import.meta.url));
-  try {
-    const raw = JSON.parse(await fs11.readFile(pkgPath, "utf8"));
-    const value2 = raw.version;
-    return typeof value2 === "string" ? value2 : "unknown";
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    return `unknown (could not read ${pkgPath}: ${message})`;
-  }
+  return true;
 }
 
 // src/init.ts
@@ -2853,7 +3126,7 @@ async function init(options) {
     report.mode = "team";
     report.team = { endpoint: options.team.trim(), path: TEAM_CONFIG_FILE, written: true };
   } else {
-    const existing = await readTeamEndpoint(root, options.env ?? {});
+    const existing = await readTeamEndpoint(root, options.env);
     if (!existing.ok) return failure(root, existing.reason);
     if (existing.endpoint !== null) {
       report.mode = "team";
@@ -2864,8 +3137,8 @@ async function init(options) {
   const target = path18.join(root, BUNDLE_PATH);
   if (path18.resolve(source) !== path18.resolve(target)) {
     try {
-      await fs12.mkdir(path18.dirname(target), { recursive: true });
-      await fs12.copyFile(source, target);
+      await fs11.mkdir(path18.dirname(target), { recursive: true });
+      await fs11.copyFile(source, target);
       report.bundle.written = true;
     } catch (error) {
       const err = error;
@@ -2877,7 +3150,7 @@ async function init(options) {
   }
   const rulesPath = path18.join(root, ".stop-rules.md");
   try {
-    await fs12.writeFile(rulesPath, STARTER_RULES, { encoding: "utf8", flag: "wx" });
+    await fs11.writeFile(rulesPath, STARTER_RULES, { encoding: "utf8", flag: "wx" });
     report.rules.created = true;
   } catch (error) {
     const err = error;
@@ -3112,9 +3385,9 @@ async function systemone(request, env) {
   );
 }
 async function route(request, env) {
-  const path20 = new URL(request.url).pathname.replace(/\/+$/, "");
-  if (request.method === "GET" && (path20 === "" || path20.endsWith("/health"))) return health(env);
-  if (request.method === "POST" && path20.endsWith("/v1/systemone")) return systemone(request, env);
+  const path19 = new URL(request.url).pathname.replace(/\/+$/, "");
+  if (request.method === "GET" && (path19 === "" || path19.endsWith("/health"))) return health(env);
+  if (request.method === "POST" && path19.endsWith("/v1/systemone")) return systemone(request, env);
   return json(404, {
     error: "not_found",
     message: "stop-rules serves GET /health and POST /v1/systemone"
@@ -3148,8 +3421,11 @@ function requestFrom(req, body) {
     if (raw === void 0 || HOP_BY_HOP.has(name)) continue;
     headers.set(name, Array.isArray(raw) ? raw.join(", ") : raw);
   }
-  const method = req.method ?? "GET";
-  const url = new URL(req.url ?? "/", `http://${req.headers.host ?? `localhost:${DEFAULT_PORT}`}`);
+  const method = req.method;
+  if (method === void 0) throw new Error("this request had no method");
+  if (req.url === void 0) throw new Error("this request had no URL");
+  const authority = req.headers.host === void 0 ? `localhost:${DEFAULT_PORT}` : req.headers.host;
+  const url = new URL(req.url, `http://${authority}`);
   const init2 = { method, headers };
   if (method !== "GET" && method !== "HEAD") init2.body = body;
   return new Request(url, init2);
@@ -3184,7 +3460,14 @@ function createStopRulesServer(env = process.env) {
       chunks.push(chunk);
     });
     req.on("end", () => {
-      handle(requestFrom(req, Buffer.concat(chunks)), env).then((response) => writeResponse(res, response)).catch((error) => {
+      let request;
+      try {
+        request = requestFrom(req, Buffer.concat(chunks));
+      } catch (error) {
+        fail(res, error);
+        return;
+      }
+      handle(request, env).then((response) => writeResponse(res, response)).catch((error) => {
         fail(res, error);
       });
     });
@@ -3192,8 +3475,10 @@ function createStopRulesServer(env = process.env) {
 }
 function resolvePort(env, override) {
   if (override !== void 0) return override;
-  const raw = (env["PORT"] ?? "").trim();
-  if (raw.length === 0) return DEFAULT_PORT;
+  const set = env["PORT"];
+  if (set === void 0) return DEFAULT_PORT;
+  const raw = set.trim();
+  if (raw.length === 0) throw new Error("PORT is set but empty. Unset it or give it a port number.");
   const port = Number(raw);
   if (!Number.isInteger(port) || port < 0 || port > 65535) {
     throw new Error(`PORT is not a port number: ${raw}`);
@@ -3202,7 +3487,7 @@ function resolvePort(env, override) {
 }
 function startServer(port, env = process.env) {
   const server = createStopRulesServer(env);
-  return new Promise((resolve4, reject) => {
+  return new Promise((resolve3, reject) => {
     let listening = false;
     server.on("error", (error) => {
       if (!listening) {
@@ -3214,7 +3499,7 @@ function startServer(port, env = process.env) {
     });
     server.listen(port, HOST, () => {
       listening = true;
-      resolve4(server);
+      resolve3(server);
     });
   });
 }
@@ -3251,6 +3536,7 @@ Usage:
   stop-rules login --jev-key-stdin     store your own Jev key, read from stdin
   stop-rules login --check             check the endpoint and one real Jev call
   stop-rules serve [--port n]          run the team server (it holds the Jev key)
+  stop-rules baseline --reset          forget what was checked; start again from HEAD
 
 Options:
   --agent <name>       hook mode only: which agent's protocol to speak (default ${DEFAULT_AGENT})
@@ -3263,6 +3549,7 @@ Options:
   --base <rev>         check mode only: diff this revision against the working tree
   --json               print the findings, or the init result, as JSON
   --port <n>           serve mode only: port to listen on (default PORT or 8080)
+  --reset              baseline mode only: clear the saved baseline
   --                   stop reading options: anything after it is ignored
   --help               print this text
   --version            print the version
@@ -3298,6 +3585,7 @@ function parseArgs(argv) {
     tokenStdin: false,
     jevKeyStdin: false,
     check: false,
+    reset: false,
     help: false,
     version: false
   };
@@ -3330,6 +3618,9 @@ function parseArgs(argv) {
         break;
       case "--check":
         parsed.check = true;
+        break;
+      case "--reset":
+        parsed.reset = true;
         break;
       case "--port": {
         i += 1;
@@ -3401,12 +3692,12 @@ async function readStdin() {
   return Buffer.concat(parts).toString("utf8");
 }
 function runningFile() {
-  if (import.meta.url.startsWith("file:")) return fileURLToPath2(import.meta.url);
-  const entry = process.argv[1];
-  if (entry === void 0) {
-    throw new Error("could not work out which file is running, so init cannot vendor it");
+  if (!import.meta.url.startsWith("file:")) {
+    throw new Error(
+      `stop-rules is running from ${import.meta.url}, which is not a file on disk, so init has nothing to copy`
+    );
   }
-  return path19.resolve(entry);
+  return fileURLToPath(import.meta.url);
 }
 function emit(delivery) {
   if (delivery.stdout.length > 0) process.stdout.write(delivery.stdout);
@@ -3443,7 +3734,9 @@ async function runHook(args) {
     return 1;
   }
   const outcome = await run({
-    cwd: input.cwd.length > 0 ? input.cwd : process.cwd(),
+    // An adapter leaves cwd undefined only when its agent documents no directory field at
+    // all, and those agents run the hook in the project root. See HookContext.
+    cwd: input.cwd === void 0 ? process.cwd() : input.cwd,
     mode: "hook",
     threshold: args.threshold,
     maxCalls: args.maxCalls,
@@ -3500,6 +3793,13 @@ function writeResult(result) {
 `);
   return result.ok ? 0 : 1;
 }
+async function runBaselineCommand(args) {
+  if (!args.reset) {
+    process.stderr.write("stop-rules: baseline only takes --reset, as in stop-rules baseline --reset\n");
+    return 1;
+  }
+  return writeResult(await resetBaseline(process.cwd()));
+}
 async function runTeamCommand(args) {
   if (args.operand === void 0) {
     process.stderr.write("stop-rules: team needs an endpoint, as in stop-rules team https://example.com\n");
@@ -3544,7 +3844,7 @@ async function main() {
     return 1;
   }
   if (args.version) {
-    process.stdout.write(`${await version()}
+    process.stdout.write(`${VERSION}
 `);
     return 0;
   }
@@ -3569,7 +3869,17 @@ async function main() {
     case "login":
       return runLoginCommand(args);
     case "serve":
-      return serveMain(args.port);
+      try {
+        return await serveMain(args.port);
+      } catch (error) {
+        process.stderr.write(
+          `stop-rules: ${error instanceof Error ? error.message : String(error)}
+`
+        );
+        return 1;
+      }
+    case "baseline":
+      return runBaselineCommand(args);
     default:
       process.stderr.write(`stop-rules: unknown command ${args.command}
 `);

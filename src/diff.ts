@@ -132,7 +132,9 @@ export function chunkText(chunk: Chunk): string {
 
 /** One diff body line, with an over-long payload replaced by its marker. */
 function shortenBodyLine(body: string): string {
-  const marker = body[0] ?? " ";
+  const marker = body[0];
+  // Only ever called with a line that starts with " ", "+", "-" or "\".
+  if (marker === undefined) throw new Error("internal error: an empty diff body line");
   const text = body.slice(1);
   if (text.length <= LONG_LINE_LIMIT) return body;
   return `${marker}${longLineMarker(text.length)}`;
@@ -168,23 +170,86 @@ export function chunkRange(chunk: Chunk): { from: number; to: number } {
   return { from, to };
 }
 
-function unquotePath(raw: string): string {
-  if (!raw.startsWith('"')) return raw;
+export type PathRead = { ok: true; path: string } | { ok: false; reason: string };
+
+const SIMPLE_ESCAPES: Record<string, number> = {
+  '"': 0x22,
+  "\\": 0x5c,
+  a: 0x07,
+  b: 0x08,
+  f: 0x0c,
+  n: 0x0a,
+  r: 0x0d,
+  t: 0x09,
+  v: 0x0b,
+};
+
+/**
+ * Decodes the C style quoting git uses for a path with a space, a quote, a control
+ * character or a byte outside ASCII (git's quote.c: octal escapes plus the simple ones
+ * above). A path this cannot decode is reported, never half decoded.
+ */
+export function decodeQuotedPath(raw: string): PathRead {
+  if (!raw.startsWith('"')) return { ok: true, path: raw };
+  if (raw.length < 2 || !raw.endsWith('"')) {
+    return { ok: false, reason: "git quoted this path but the closing quote is missing" };
+  }
+  const body = raw.slice(1, -1);
+  const bytes: number[] = [];
+  let plain = "";
+  const flush = (): void => {
+    if (plain.length === 0) return;
+    for (const byte of encoder.encode(plain)) bytes.push(byte);
+    plain = "";
+  };
+
+  for (let i = 0; i < body.length; i += 1) {
+    const char = body[i];
+    if (char === undefined) break;
+    if (char !== "\\") {
+      plain += char;
+      continue;
+    }
+    i += 1;
+    const escape = body[i];
+    if (escape === undefined) {
+      return { ok: false, reason: "git quoted this path but a backslash escape is cut short" };
+    }
+    const simple = SIMPLE_ESCAPES[escape];
+    if (simple !== undefined) {
+      flush();
+      bytes.push(simple);
+      continue;
+    }
+    if (escape >= "0" && escape <= "7") {
+      const digits = body.slice(i, i + 3);
+      if (!/^[0-7]{3}$/.test(digits)) {
+        return { ok: false, reason: `git quoted this path with an octal escape stop-rules cannot read: \\${digits}` };
+      }
+      flush();
+      bytes.push(Number.parseInt(digits, 8));
+      i += 2;
+      continue;
+    }
+    return { ok: false, reason: `git quoted this path with an escape stop-rules does not know: \\${escape}` };
+  }
+  flush();
+
   try {
-    // git quotes unusual paths in C style, which JSON parses for the common cases.
-    const parsed: unknown = JSON.parse(raw);
-    return typeof parsed === "string" ? parsed : raw;
-  } catch {
-    // A path git escaped in a way JSON does not accept. Keep the raw form rather than
-    // dropping the file; the path only ever reaches the report and the Jev state.
-    return raw.slice(1, -1);
+    return { ok: true, path: new TextDecoder("utf-8", { fatal: true }).decode(new Uint8Array(bytes)) };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return { ok: false, reason: `this path is not valid UTF-8, so stop-rules cannot name it (${message})` };
   }
 }
 
-function stripPrefix(raw: string): string {
-  const p = unquotePath(raw);
-  if (p.startsWith("a/") || p.startsWith("b/")) return p.slice(2);
-  return p;
+function stripPrefix(raw: string): PathRead {
+  const read = decodeQuotedPath(raw);
+  if (!read.ok) return read;
+  if (read.path.startsWith("a/") || read.path.startsWith("b/")) {
+    return { ok: true, path: read.path.slice(2) };
+  }
+  return read;
 }
 
 const HUNK_RE = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)$/;
@@ -193,6 +258,8 @@ export interface ParsedDiff {
   files: FileDiff[];
   /** Files left out on purpose, with the reason. Not failures. */
   skipped: SkippedFile[];
+  /** Files this parser could not handle. Real failures, reported as not checked. */
+  failures: { file: string; reason: string }[];
 }
 
 /** Parses `git diff -U8` output into per-file diffs, dropping what no rule is about. */
@@ -200,6 +267,7 @@ export function parseDiff(diff: string, extraSkip: readonly string[] = []): Pars
   const lines = diff.split("\n");
   const files: FileDiff[] = [];
   const skipped: SkippedFile[] = [];
+  const failures: { file: string; reason: string }[] = [];
   let i = 0;
 
   while (i < lines.length) {
@@ -212,6 +280,7 @@ export function parseDiff(diff: string, extraSkip: readonly string[] = []): Pars
     let binary = false;
     let newPath: string | null = null;
     let deleted = false;
+    let unreadablePath: { file: string; reason: string } | null = null;
     i += 1;
 
     // Extended header lines up to and including "+++", or up to the next file.
@@ -226,8 +295,13 @@ export function parseDiff(diff: string, extraSkip: readonly string[] = []): Pars
       }
       if (current.startsWith("+++ ")) {
         const target = current.slice(4).trim();
-        if (target === "/dev/null") deleted = true;
-        else newPath = stripPrefix(target);
+        if (target === "/dev/null") {
+          deleted = true;
+        } else {
+          const read = stripPrefix(target);
+          if (read.ok) newPath = read.path;
+          else unreadablePath = { file: target, reason: read.reason };
+        }
         break;
       }
     }
@@ -277,8 +351,12 @@ export function parseDiff(diff: string, extraSkip: readonly string[] = []): Pars
       hunks.push(hunk);
     }
 
+    if (unreadablePath !== null) {
+      failures.push(unreadablePath);
+      continue;
+    }
     if (binary) {
-      skipped.push({ file: newPath ?? pathFromDiffHeader(line), reason: "binary file" });
+      skipped.push({ file: newPath ?? headerPath(line, failures), reason: "binary file" });
       continue;
     }
     if (deleted || newPath === null) continue;
@@ -295,15 +373,25 @@ export function parseDiff(diff: string, extraSkip: readonly string[] = []): Pars
     files.push({ file: newPath, header, hunks });
   }
 
-  return { files, skipped };
+  return { files, skipped, failures };
 }
 
-/** Best effort path for a file we never reached a "+++" line for, such as a binary one. */
-function pathFromDiffHeader(headerLine: string): string {
+/**
+ * The name to show for a file whose "+++" line never came, which happens for a binary one.
+ * The only source left is the "diff --git a/x b/x" line. A name that cannot be read from it
+ * is recorded as a failure and the raw line is shown.
+ */
+function headerPath(headerLine: string, failures: { file: string; reason: string }[]): string {
   const rest = headerLine.slice("diff --git ".length);
   const cut = rest.lastIndexOf(" b/");
-  if (cut === -1) return rest;
-  return stripPrefix(rest.slice(cut + 1));
+  if (cut === -1) {
+    failures.push({ file: rest, reason: "stop-rules could not find a file name in this diff header" });
+    return rest;
+  }
+  const read = stripPrefix(rest.slice(cut + 1));
+  if (read.ok) return read.path;
+  failures.push({ file: rest, reason: read.reason });
+  return rest;
 }
 
 /** Splits one hunk between lines, repeating an adjusted hunk header for each piece. */

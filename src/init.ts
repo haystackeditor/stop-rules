@@ -48,7 +48,7 @@ export interface InitOptions {
   /** Team mode: the stop-rules server every developer's hook should send questions to. */
   team?: string;
   /** Environment, so an endpoint already set in it counts as team mode. */
-  env?: NodeJS.ProcessEnv;
+  env: NodeJS.ProcessEnv;
 }
 
 function failure(repo: string, reason: string): InitReport {
@@ -126,7 +126,7 @@ export async function init(options: InitOptions): Promise<InitReport> {
     report.team = { endpoint: options.team.trim(), path: TEAM_CONFIG_FILE, written: true };
   } else {
     // A teammate installing into a repository that is already on a team server.
-    const existing = await readTeamEndpoint(root, options.env ?? {});
+    const existing = await readTeamEndpoint(root, options.env);
     if (!existing.ok) return failure(root, existing.reason);
     if (existing.endpoint !== null) {
       report.mode = "team";

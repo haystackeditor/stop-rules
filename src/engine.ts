@@ -118,8 +118,21 @@ interface Entry {
   ruleId: string;
   rule: string;
   confidence: number;
-  approximate: boolean;
+  fromLine: number;
+  toLine: number;
+  /** Plain reasons, one per chunk that could not be narrowed to a line. */
+  unlocalised: string[];
   candidates: Map<number, { text: string; score: number }>;
+}
+
+/** The reason an entry names no line, or null when it names at least one. */
+function unlocalisedFor(entry: Entry): string | null {
+  if (entry.candidates.size > 0) return null;
+  const first = entry.unlocalised[0];
+  if (first === undefined) {
+    throw new Error(`internal error: ${entry.file} has neither a line nor a reason for having none`);
+  }
+  return first;
 }
 
 function entryKey(file: string, ruleId: string): string {
@@ -267,6 +280,7 @@ export async function runEngine(input: EngineInput): Promise<EngineResult> {
   // Stage 2: one call per flagged (chunk, rule), one claim per added line.
   const stage2Nodes: AskNode<Stage2Payload>[] = [];
   const scores = new Map<string, Map<number, number>>();
+  const localiseFailures = new Map<string, string>();
   const hitKey = (rule: Rule, chunk: Chunk): string => `${rule.id}\u0000${chunkText(chunk)}`;
 
   for (const hit of fresh) {
@@ -293,10 +307,11 @@ export async function runEngine(input: EngineInput): Promise<EngineResult> {
       const failure = result.outcome.failure;
       if (holdsBaseline(failure)) holdBaseline = true;
       noteFailure(failure);
-      // A failed localisation never drops a violation; it only makes the line approximate.
-      note(
-        `could not localise rule ${rule.id} in ${chunk.file}: ${reasonFor(failure, result.outcome.message)}`,
-      );
+      // A failed localisation never drops the violation and never guesses a line: the
+      // finding says the call failed and why.
+      const why = `the question about which line failed: ${reasonFor(failure, result.outcome.message)}`;
+      note(`could not localise rule ${rule.id} in ${chunk.file}: ${why}`);
+      localiseFailures.set(hitKey(rule, chunk), why);
       continue;
     }
     for (const [id, line] of Object.entries(byQuestion)) {
@@ -316,50 +331,64 @@ export async function runEngine(input: EngineInput): Promise<EngineResult> {
   const findings: { ruleId: string; chunkText: string }[] = [];
 
   for (const hit of fresh) {
-    const chunkLines = addedLines(hit.chunk);
-    const perLine = scores.get(hitKey(hit.rule, hit.chunk)) ?? new Map<number, number>();
+    const key2 = hitKey(hit.rule, hit.chunk);
+    const perLine = scores.get(key2);
+    if (perLine === undefined) {
+      // Set for every hit a few lines above. Never silently carry on with an empty score
+      // table, because that would look like "no line matched".
+      throw new Error(`internal error: no line scores were recorded for ${hit.chunk.file}`);
+    }
+    const textByLine = new Map(addedLines(hit.chunk).map((line) => [line.line, line.text.trim()]));
     const byScore = [...perLine.entries()].sort((a, b) => b[1] - a[1]);
     const above = byScore
       .filter(([, score]) => score >= threshold)
       .slice(0, MAX_LINES_PER_VIOLATION);
-    const textOf = (lineNo: number): string =>
-      (chunkLines.find((line) => line.line === lineNo)?.text ?? "").trim();
     findings.push({ ruleId: hit.rule.id, chunkText: chunkText(hit.chunk) });
+    const range = chunkRange(hit.chunk);
 
-    let picked: [number, number][];
-    let approximate: boolean;
-    if (above.length > 0) {
-      picked = above;
-      approximate = false;
-    } else if (byScore.length > 0) {
-      // Nothing reached the threshold: point at the best line and say so.
-      picked = byScore.slice(0, 1);
-      approximate = true;
-    } else {
-      // Localisation never ran or never answered. A violation is never dropped for that.
-      const fallback = localisableLines(hit.chunk)[0] ?? chunkLines[0];
-      picked = [[fallback?.line ?? chunkRange(hit.chunk).from, 0]];
-      approximate = true;
+    // Why this chunk names no line, when it names none. Never a guessed line.
+    let unlocalised: string | null = null;
+    if (above.length === 0) {
+      const failed = localiseFailures.get(key2);
+      if (failed !== undefined) unlocalised = failed;
+      else if (byScore.length > 0) {
+        unlocalised = `no added line reached the ${threshold} cutoff`;
+      } else if (localisableLines(hit.chunk).length === 0) {
+        unlocalised = "no added line in this block has text to point at";
+      } else {
+        unlocalised = "no line scores came back for this block";
+      }
     }
 
     const key = entryKey(hit.chunk.file, hit.rule.id);
-    const entry: Entry = entries.get(key) ?? {
-      file: hit.chunk.file,
-      ruleId: hit.rule.id,
-      rule: hit.rule.text,
-      confidence: hit.score,
-      approximate,
-      candidates: new Map(),
-    };
+    let entry = entries.get(key);
+    if (entry === undefined) {
+      entry = {
+        file: hit.chunk.file,
+        ruleId: hit.rule.id,
+        rule: hit.rule.text,
+        confidence: hit.score,
+        fromLine: range.from,
+        toLine: range.to,
+        unlocalised: [],
+        candidates: new Map(),
+      };
+      entries.set(key, entry);
+    }
     entry.confidence = Math.max(entry.confidence, hit.score);
-    entry.approximate = entry.approximate && approximate;
-    for (const [lineNo, score] of picked) {
+    entry.fromLine = Math.min(entry.fromLine, range.from);
+    entry.toLine = Math.max(entry.toLine, range.to);
+    if (unlocalised !== null) entry.unlocalised.push(unlocalised);
+    for (const [lineNo, score] of above) {
+      const text = textByLine.get(lineNo);
+      if (text === undefined) {
+        throw new Error(`internal error: line ${lineNo} is not an added line of ${hit.chunk.file}`);
+      }
       const existing = entry.candidates.get(lineNo);
       if (existing === undefined || existing.score < score) {
-        entry.candidates.set(lineNo, { text: textOf(lineNo), score });
+        entry.candidates.set(lineNo, { text, score });
       }
     }
-    entries.set(key, entry);
   }
 
   const violations: Violation[] = [...entries.values()].map((entry) => ({
@@ -369,18 +398,26 @@ export async function runEngine(input: EngineInput): Promise<EngineResult> {
       .slice(0, MAX_LINES_PER_VIOLATION)
       .map(([line, value]): ViolationLine => ({ line, text: value.text }))
       .sort((a, b) => a.line - b.line),
-    approximate: entry.approximate,
+    fromLine: entry.fromLine,
+    toLine: entry.toLine,
+    // One line named is enough for the entry; the reason is only reported when none is.
+    unlocalised: unlocalisedFor(entry),
     ruleId: entry.ruleId,
     rule: entry.rule,
     confidence: entry.confidence,
   }));
 
-  const firstLine = (violation: Violation): number => violation.lines[0]?.line ?? 0;
+  const firstLine = (violation: Violation): number => {
+    const first = violation.lines[0];
+    return first === undefined ? violation.fromLine : first.line;
+  };
   violations.sort((a, b) =>
     a.file === b.file ? firstLine(a) - firstLine(b) : a.file < b.file ? -1 : 1,
   );
+  // An entry with no line range is about the whole file, so it comes first for that file.
+  const fromLineOf = (entry: NotChecked): number => (entry.fromLine === undefined ? 0 : entry.fromLine);
   notChecked.sort((a, b) =>
-    a.file === b.file ? a.fromLine - b.fromLine : a.file < b.file ? -1 : 1,
+    a.file === b.file ? fromLineOf(a) - fromLineOf(b) : a.file < b.file ? -1 : 1,
   );
 
   return {

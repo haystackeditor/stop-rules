@@ -1,15 +1,16 @@
 import * as path from "node:path";
 import {
   anyExists,
-  asArray,
-  asRecord,
+  arrayAt,
   contextFrom,
   exitTwoOnStderr,
   failed,
   mentionsStopRules,
   out,
   readJsonFile,
+  recordAt,
   relative,
+  wrongShape,
   writeJsonFile,
 } from "./shared.js";
 import type { AgentAdapter, CheckResult, HookContext, HookOutput, InstallResult } from "./types.js";
@@ -39,9 +40,9 @@ export const windsurfAdapter: AgentAdapter = {
   },
 
   parseInput(stdinText: string): HookContext {
-    // No workspace path in this event's payload, so the CLI falls back to its own cwd,
-    // which Windsurf sets to the workspace root.
-    return contextFrom(stdinText, { session: ["trajectory_id", "execution_id"] });
+    // This event's documented payload carries no directory, and `working_directory`
+    // "Defaults to your workspace root", so the process cwd IS the contract here.
+    return contextFrom(stdinText, { agent: "Windsurf", session: ["trajectory_id", "execution_id"] });
   },
 
   deliver(result: CheckResult, report: string): HookOutput {
@@ -59,8 +60,12 @@ export const windsurfAdapter: AgentAdapter = {
     if (!read.ok) return failed(shown, read.reason);
 
     const config = read.value;
-    const hooks = asRecord(config["hooks"]);
-    const list = asArray(hooks["post_cascade_response"]);
+    const hooks = recordAt(config, "hooks");
+    if (hooks === null) return failed(shown, wrongShape(shown, "hooks", "an object"));
+    const list = arrayAt(hooks, "post_cascade_response");
+    if (list === null) {
+      return failed(shown, wrongShape(shown, "post_cascade_response", "a list"));
+    }
     if (list.some(mentionsStopRules)) {
       return {
         ok: true,

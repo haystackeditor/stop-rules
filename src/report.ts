@@ -13,6 +13,9 @@ export function trimQuoted(text: string): string {
 }
 
 function notCheckedLine(entry: NotChecked): string {
+  if (entry.fromLine === undefined || entry.toLine === undefined) {
+    return `${entry.file}: ${entry.reason}`;
+  }
   const where =
     entry.fromLine === entry.toLine
       ? `line ${entry.fromLine}`
@@ -21,14 +24,23 @@ function notCheckedLine(entry: NotChecked): string {
 }
 
 function violationBlock(violation: Violation, index: number): string {
+  // No line is ever guessed at. When nothing scored high enough, the entry says so and
+  // points at the block of changed lines instead.
+  if (violation.unlocalised !== null) {
+    const range =
+      violation.fromLine === violation.toLine
+        ? `line ${violation.fromLine}`
+        : `lines ${violation.fromLine}-${violation.toLine}`;
+    return [
+      `${index}. ${violation.file} ${range}`,
+      `   Rule: ${violation.rule}`,
+      `   No single line identified: ${violation.unlocalised}`,
+      `   Confidence: ${confidence(violation.confidence)}`,
+    ].join("\n");
+  }
   const where = violation.lines.map((line) => line.line).join(", ");
-  const approximate = violation.approximate
-    ? violation.lines.length > 1
-      ? " (approximate lines)"
-      : " (approximate line)"
-    : "";
   return [
-    `${index}. ${violation.file}:${where}${approximate}`,
+    `${index}. ${violation.file}:${where}`,
     `   Rule: ${violation.rule}`,
     ...violation.lines.map((line) => `   Line: ${trimQuoted(line.text)}`),
     `   Confidence: ${confidence(violation.confidence)}`,

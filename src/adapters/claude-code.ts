@@ -1,7 +1,7 @@
 import * as path from "node:path";
 import {
   anyExists,
-  asRecord,
+  recordAt,
   contextFrom,
   exitTwoOnStderr,
   failed,
@@ -9,6 +9,7 @@ import {
   out,
   readJsonFile,
   relative,
+  wrongShape,
   writeJsonFile,
 } from "./shared.js";
 import type { AgentAdapter, CheckResult, HookContext, HookOutput, InstallResult } from "./types.js";
@@ -36,6 +37,7 @@ export const claudeCodeAdapter: AgentAdapter = {
 
   parseInput(stdinText: string): HookContext {
     return contextFrom(stdinText, {
+      agent: "Claude Code",
       session: ["session_id"],
       cwd: ["cwd"],
       stopHookActive: ["stop_hook_active"],
@@ -57,14 +59,16 @@ export const claudeCodeAdapter: AgentAdapter = {
     if (!read.ok) return failed(shown, read.reason);
 
     const settings = read.value;
-    const hooks = asRecord(settings["hooks"]);
-    const added = mergeHookGroup(hooks, "Stop", {
+    const hooks = recordAt(settings, "hooks");
+    if (hooks === null) return failed(shown, wrongShape(shown, "hooks", "an object"));
+    const merged = mergeHookGroup(hooks, shown, "Stop", {
       type: "command",
       command,
       asyncRewake: true,
       timeout: 120,
     });
-    if (!added) {
+    if (!merged.ok) return failed(shown, merged.reason);
+    if (!merged.changed) {
       return {
         ok: true,
         files: [shown],

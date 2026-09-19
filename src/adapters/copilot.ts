@@ -1,8 +1,7 @@
 import * as path from "node:path";
 import {
   anyExists,
-  asArray,
-  asRecord,
+  arrayAt,
   contextFrom,
   failed,
   hasViolations,
@@ -10,7 +9,9 @@ import {
   mentionsStopRules,
   out,
   readJsonFile,
+  recordAt,
   relative,
+  wrongShape,
   writeJsonFile,
 } from "./shared.js";
 import type { AgentAdapter, CheckResult, HookContext, HookOutput, InstallResult } from "./types.js";
@@ -42,6 +43,7 @@ export const copilotAdapter: AgentAdapter = {
 
   parseInput(stdinText: string): HookContext {
     return contextFrom(stdinText, {
+      agent: "Copilot CLI",
       session: ["sessionId", "session_id"],
       cwd: ["cwd"],
       stopHookActive: ["stop_hook_active"],
@@ -65,9 +67,15 @@ export const copilotAdapter: AgentAdapter = {
     if (!read.ok) return failed(shown, read.reason);
 
     const config = read.value;
-    if (typeof config["version"] !== "number") config["version"] = 1;
-    const hooks = asRecord(config["hooks"]);
-    const list = asArray(hooks["agentStop"]);
+    const version = config["version"];
+    if (version === undefined) config["version"] = 1;
+    else if (typeof version !== "number") {
+      return failed(shown, wrongShape(shown, "version", "a number"));
+    }
+    const hooks = recordAt(config, "hooks");
+    if (hooks === null) return failed(shown, wrongShape(shown, "hooks", "an object"));
+    const list = arrayAt(hooks, "agentStop");
+    if (list === null) return failed(shown, wrongShape(shown, "agentStop", "a list"));
     if (list.some(mentionsStopRules)) {
       return {
         ok: true,

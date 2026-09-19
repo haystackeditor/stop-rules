@@ -16,7 +16,7 @@ import {
   resolveTree,
   snapshotWorkingTree,
 } from "./git.js";
-import { AUTH_REJECTED, BILLING_EXHAUSTED, DEFAULT_MODEL, type FetchLike } from "./jev.js";
+import { AUTH_REJECTED, BILLING_EXHAUSTED, type FetchLike } from "./jev.js";
 import { renderReport } from "./report.js";
 import { loadRules } from "./rules.js";
 import {
@@ -25,13 +25,14 @@ import {
   loadCache,
   loadState,
   reportedKey,
+  resetState,
   saveCache,
   saveState,
   stateDirFor,
   type Cache,
   type StopRulesState,
 } from "./state.js";
-import type { CheckReport, Rule, RunStats } from "./types.js";
+import type { CheckReport, NotChecked, Rule, RunStats } from "./types.js";
 
 const LOOP_GUARD_ROUNDS = 3;
 const MAX_SESSIONS_KEPT = 100;
@@ -72,6 +73,28 @@ function fileCache(cache: Cache): CacheLike {
   };
 }
 
+export interface CommandResult {
+  ok: boolean;
+  lines: string[];
+}
+
+/** `stop-rules baseline --reset`: forget the baseline so the next run starts from HEAD. */
+export async function resetBaseline(cwd: string): Promise<CommandResult> {
+  const repo = await findRepo(cwd);
+  if (repo === null) {
+    return { ok: false, lines: [`stop-rules: ${cwd} is not inside a git repository.`] };
+  }
+  const stateDir = stateDirFor(repo.gitDir);
+  await resetState(stateDir);
+  return {
+    ok: true,
+    lines: [
+      `cleared the saved baseline in ${stateDir}`,
+      "The next check starts from HEAD and reports everything it finds.",
+    ],
+  };
+}
+
 export async function run(options: RunOptions): Promise<RunOutcome> {
   const started = Date.now();
   const env = options.env ?? process.env;
@@ -87,7 +110,7 @@ export async function run(options: RunOptions): Promise<RunOutcome> {
     ? path.resolve(options.cwd, options.rulesPath)
     : path.join(repo.root, ".stop-rules.md");
   const rulesLoad = await loadRules(rulesPath);
-  if (!rulesLoad.ok) return cannotRun(rulesLoad.reason ?? "no rules to check against.");
+  if (!rulesLoad.ok) return cannotRun(rulesLoad.reason);
 
   // Team mode when this repo knows a stop-rules endpoint, the developer's own key if not.
   const credentials = await resolveCredentials(repo.root, env);
@@ -101,7 +124,6 @@ export async function run(options: RunOptions): Promise<RunOutcome> {
   try {
     return await runLocked({
       options,
-      env,
       repo,
       rulesPath,
       rules: rulesLoad.rules,
@@ -118,7 +140,6 @@ export async function run(options: RunOptions): Promise<RunOutcome> {
 
 interface LockedArgs {
   options: RunOptions;
-  env: NodeJS.ProcessEnv;
   repo: { root: string; gitDir: string };
   rulesPath: string;
   rules: Rule[];
@@ -130,11 +151,18 @@ interface LockedArgs {
 }
 
 async function runLocked(args: LockedArgs): Promise<RunOutcome> {
-  const { options, env, repo, rulesPath, rules, credentials, stateDir, notes, note, started } = args;
-  const model = env["STOP_RULES_JEV_MODEL"] ?? DEFAULT_MODEL;
+  const { options, repo, rulesPath, rules, credentials, stateDir, notes, note, started } = args;
+  const model = credentials.model;
 
-  const state = await loadState(stateDir, note);
-  const cache = await loadCache(stateDir, note);
+  let state: StopRulesState;
+  let cache: Cache;
+  try {
+    state = await loadState(stateDir);
+    cache = await loadCache(stateDir);
+  } catch (error) {
+    // A file of ours that is there but unreadable. Say so; never start over silently.
+    return cannotRun(error instanceof Error ? error.message : String(error));
+  }
 
   // Taken under the lock, so a second firing checks the newest tree.
   const snapshot = await snapshotWorkingTree(repo, stateDir);
@@ -144,11 +172,22 @@ async function runLocked(args: LockedArgs): Promise<RunOutcome> {
     const resolved = await resolveTree(repo.root, options.base);
     if (resolved === null) return cannotRun(`unknown revision ${options.base}.`);
     baseline = resolved;
-  } else if (state.lastTree !== undefined && (await objectExists(repo.root, state.lastTree))) {
+  } else if (state.lastTree !== undefined) {
+    // A baseline we recorded but git has since removed. Turning that into HEAD silently
+    // would re-check work the user has already been told about, or skip work in between.
+    if (!(await objectExists(repo.root, state.lastTree))) {
+      return cannotRun(
+        "the saved baseline is gone (git cleaned it up). Run stop-rules baseline --reset to start again from HEAD.",
+      );
+    }
     baseline = state.lastTree;
   } else if (await hasHead(repo.root)) {
-    baseline = (await resolveTree(repo.root, "HEAD")) ?? (await emptyTree(repo.root));
+    // First run in this repository: HEAD is the defined starting point.
+    const head = await resolveTree(repo.root, "HEAD");
+    if (head === null) return cannotRun("git could not resolve HEAD to a tree in this repository.");
+    baseline = head;
   } else {
+    // First run in a repository with no commit yet: everything is new.
     baseline = await emptyTree(repo.root);
   }
 
@@ -158,6 +197,11 @@ async function runLocked(args: LockedArgs): Promise<RunOutcome> {
   const parsed = parseDiff(await diffTrees(repo.root, baseline, snapshot), [rulesRelative]);
   const files = parsed.files;
   const chunks = files.flatMap(chunkFile);
+  // Files the parser could not name are failures, not skips, and they are reported.
+  const parseFailures: NotChecked[] = parsed.failures.map((failure) => ({
+    file: failure.file,
+    reason: failure.reason,
+  }));
 
   const alreadyReported = state.reported;
   const engineResult = await runEngine({
@@ -194,6 +238,7 @@ async function runLocked(args: LockedArgs): Promise<RunOutcome> {
     return cannotRun("could not reach Jev for any chunk of this diff.");
   }
 
+  const notChecked = [...parseFailures, ...engineResult.notChecked];
   const stats: RunStats = {
     files: files.length,
     chunks: chunks.length,
@@ -201,14 +246,14 @@ async function runLocked(args: LockedArgs): Promise<RunOutcome> {
     calls: engineResult.calls,
     cacheHits: engineResult.cacheHits,
     violations: engineResult.violations.length,
-    notChecked: engineResult.notChecked.length,
+    notChecked: notChecked.length,
     inputTokens: engineResult.usage.inputTokens,
     outputTokens: engineResult.usage.outputTokens,
     durationMs: Date.now() - started,
   };
   const report: CheckReport = {
     violations: engineResult.violations,
-    notChecked: engineResult.notChecked,
+    notChecked,
     skipped: parsed.skipped,
     stats,
   };
@@ -252,7 +297,10 @@ function decide(
     return hasViolations ? { kind: "violations", report, text } : { kind: "clean", report, text };
   }
 
-  const sessionId = options.sessionId ?? "unknown";
+  const sessionId = options.sessionId;
+  if (sessionId === undefined) {
+    throw new Error("internal error: hook mode ran without a session id");
+  }
   const session = state.sessions[sessionId] ?? { violationRuns: 0, at: Date.now() };
   let handoff = false;
 

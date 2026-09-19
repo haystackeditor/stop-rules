@@ -1,35 +1,17 @@
-import { promises as fs } from "node:fs";
-import { fileURLToPath } from "node:url";
+/**
+ * The version, in one place. `scripts/check-versions.mjs` fails the build when this string
+ * and package.json disagree, so there is nothing to read at run time and nothing to guess.
+ */
+export const VERSION = "0.1.0";
 
 /**
- * Replaced with a string literal by `scripts/bundle.mjs`, so the vendored single file knows
- * its own version without a package.json next to it. In the plain `tsc` build the
- * identifier does not exist, and `typeof` on an undeclared identifier is safe in JS.
+ * True when the running file is the single file bundle. `scripts/bundle.mjs` defines this
+ * when esbuild inlines the CLI; the plain tsc build leaves it undefined, and "not a bundle"
+ * is then the correct answer, because dist/cli.js is not one. `init` uses this to vendor the
+ * file that is running, whatever it has been renamed to.
  */
-declare const __STOP_RULES_VERSION__: string | undefined;
+declare const __STOP_RULES_BUNDLED__: boolean | undefined;
 
-const BAKED: string | null =
-  typeof __STOP_RULES_VERSION__ === "string" ? __STOP_RULES_VERSION__ : null;
-
-/**
- * True when the running file is the single file bundle. Only the bundler bakes the version
- * in, so this is the one honest way to know, whatever the file is called. `init` uses it to
- * vendor the file that is running instead of guessing at a name beside it.
- */
 export function isBundled(): boolean {
-  return BAKED !== null;
-}
-
-export async function version(): Promise<string> {
-  if (BAKED !== null) return BAKED;
-  const pkgPath = fileURLToPath(new URL("../package.json", import.meta.url));
-  try {
-    const raw: unknown = JSON.parse(await fs.readFile(pkgPath, "utf8"));
-    const value = (raw as { version?: unknown }).version;
-    return typeof value === "string" ? value : "unknown";
-  } catch (error) {
-    // Not fatal, but do not pretend we know: say why.
-    const message = error instanceof Error ? error.message : String(error);
-    return `unknown (could not read ${pkgPath}: ${message})`;
-  }
+  return typeof __STOP_RULES_BUNDLED__ === "boolean" && __STOP_RULES_BUNDLED__;
 }

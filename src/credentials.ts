@@ -25,17 +25,37 @@ export interface Credentials {
   endpoint: string;
   /** Bearer value: the team token in team mode, the Jev key in local mode. */
   bearer: string;
+  /** The model to ask for. The one place it is resolved. */
+  model: string;
   /** The team server root, so login --check can also call its health route. */
   teamBase?: string;
+}
+
+export type EnvRead = { ok: true; value: string | null } | { ok: false; reason: string };
+
+/**
+ * Reads one environment variable. Absent means "not configured here", which lets the next
+ * source or a documented default take over. Set but blank is a mistake, and says so.
+ */
+export function envValue(env: NodeJS.ProcessEnv, name: string): EnvRead {
+  const raw = env[name];
+  if (raw === undefined) return { ok: true, value: null };
+  const trimmed = raw.trim();
+  if (trimmed.length === 0) {
+    return { ok: false, reason: `${name} is set but empty. Unset it or give it a value.` };
+  }
+  return { ok: true, value: trimmed };
 }
 
 export type CredentialsResult =
   | { ok: true; credentials: Credentials }
   | { ok: false; reason: string };
 
+/** Throws when XDG_CONFIG_HOME is set but blank. Absent means the usual ~/.config. */
 export function configDir(env: NodeJS.ProcessEnv): string {
-  const xdg = (env["XDG_CONFIG_HOME"] ?? "").trim();
-  const base = xdg.length > 0 ? xdg : path.join(homedir(), ".config");
+  const xdg = envValue(env, "XDG_CONFIG_HOME");
+  if (!xdg.ok) throw new Error(xdg.reason);
+  const base = xdg.value === null ? path.join(homedir(), ".config") : xdg.value;
   return path.join(base, "stop-rules");
 }
 
@@ -55,14 +75,17 @@ interface FileRead {
 }
 
 async function readTrimmed(file: string): Promise<FileRead> {
+  let text: string;
   try {
-    const text = (await fs.readFile(file, "utf8")).trim();
-    return { value: text.length > 0 ? text : null };
+    text = (await fs.readFile(file, "utf8")).trim();
   } catch (error) {
     const err = error as NodeJS.ErrnoException;
     if (err.code === "ENOENT") return { value: null };
     return { value: null, error: `could not read ${file}: ${err.code ?? err.message}` };
   }
+  // A file that is there but empty is a mistake, not an absent file.
+  if (text.length === 0) return { value: null, error: `${file} is empty. Store the secret again.` };
+  return { value: text };
 }
 
 export type EndpointParse =
@@ -99,8 +122,11 @@ export async function readTeamEndpoint(
   repoRoot: string,
   env: NodeJS.ProcessEnv,
 ): Promise<TeamEndpointLookup> {
-  const fromEnv = (env["STOP_RULES_ENDPOINT"] ?? "").trim();
-  if (fromEnv.length > 0) return { ok: true, endpoint: fromEnv, source: "STOP_RULES_ENDPOINT" };
+  const fromEnv = envValue(env, "STOP_RULES_ENDPOINT");
+  if (!fromEnv.ok) return { ok: false, reason: fromEnv.reason };
+  if (fromEnv.value !== null) {
+    return { ok: true, endpoint: fromEnv.value, source: "STOP_RULES_ENDPOINT" };
+  }
 
   const file = path.join(repoRoot, TEAM_CONFIG_FILE);
   let raw: string;
@@ -124,9 +150,18 @@ export async function readTeamEndpoint(
     return { ok: false, reason: `${file} does not hold a JSON object.` };
   }
   const endpoint = (parsed as { endpoint?: unknown }).endpoint;
-  if (endpoint === undefined) return { ok: true, endpoint: null, source: file };
+  // The file exists, so it is meant to point somewhere. Local mode is not what was meant.
+  if (endpoint === undefined) {
+    return {
+      ok: false,
+      reason: `${file} has no endpoint. Write one with stop-rules team <url>, or delete the file to use your own Jev key.`,
+    };
+  }
   if (typeof endpoint !== "string") {
     return { ok: false, reason: `the endpoint in ${file} is not a string.` };
+  }
+  if (endpoint.trim().length === 0) {
+    return { ok: false, reason: `the endpoint in ${file} is empty.` };
   }
   return { ok: true, endpoint, source: file };
 }
@@ -135,19 +170,31 @@ export async function resolveCredentials(
   repoRoot: string,
   env: NodeJS.ProcessEnv,
 ): Promise<CredentialsResult> {
+  // Checked here so a blank XDG_CONFIG_HOME is one plain message, not a thrown error from
+  // deep inside a file read.
+  const configHome = envValue(env, "XDG_CONFIG_HOME");
+  if (!configHome.ok) return { ok: false, reason: configHome.reason };
+  const model = envValue(env, "STOP_RULES_JEV_MODEL");
+  if (!model.ok) return { ok: false, reason: model.reason };
+  const chosenModel = model.value === null ? DEFAULT_MODEL : model.value;
+
   const team = await readTeamEndpoint(repoRoot, env);
   if (!team.ok) return { ok: false, reason: team.reason };
 
   if (team.endpoint !== null) {
     const parsed = parseEndpoint(team.endpoint);
     if (!parsed.ok) return { ok: false, reason: `${parsed.reason} (from ${team.source})` };
-    let token = (env["STOP_RULES_TOKEN"] ?? "").trim();
-    if (token.length === 0) {
+    // An endpoint with no token is a broken team setup. It never quietly becomes local mode,
+    // which would send the developer's own key or fail with the wrong message.
+    const fromEnv = envValue(env, "STOP_RULES_TOKEN");
+    if (!fromEnv.ok) return { ok: false, reason: fromEnv.reason };
+    let token = fromEnv.value;
+    if (token === null) {
       const file = await readTrimmed(tokenPath(env));
       if (file.error !== undefined) return { ok: false, reason: file.error };
-      token = file.value ?? "";
+      token = file.value;
     }
-    if (token.length === 0) {
+    if (token === null) {
       return {
         ok: false,
         reason: `no team token for ${parsed.base}. Store one with: printf %s "$TOKEN" | stop-rules login --token-stdin`,
@@ -155,23 +202,35 @@ export async function resolveCredentials(
     }
     return {
       ok: true,
-      credentials: { mode: "team", endpoint: parsed.post, bearer: token, teamBase: parsed.base },
+      credentials: {
+        mode: "team",
+        endpoint: parsed.post,
+        bearer: token,
+        model: chosenModel,
+        teamBase: parsed.base,
+      },
     };
   }
 
-  const endpoint = (env["STOP_RULES_JEV_ENDPOINT"] ?? "").trim() || DEFAULT_ENDPOINT;
-  const envKeySet =
-    (env["TYPESAFE_API_KEY"] ?? "").trim().length > 0 ||
-    (env["TYPESAFE_API_KEY_FILE"] ?? "").trim().length > 0;
-  if (envKeySet) {
+  const override = envValue(env, "STOP_RULES_JEV_ENDPOINT");
+  if (!override.ok) return { ok: false, reason: override.reason };
+  const endpoint = override.value === null ? DEFAULT_ENDPOINT : override.value;
+
+  if (env["TYPESAFE_API_KEY"] !== undefined || env["TYPESAFE_API_KEY_FILE"] !== undefined) {
     const key = await resolveApiKey(env);
-    if (!key.ok) return { ok: false, reason: key.reason ?? "no Jev API key." };
-    return { ok: true, credentials: { mode: "local", endpoint, bearer: key.key } };
+    if (!key.ok) return { ok: false, reason: key.reason };
+    return {
+      ok: true,
+      credentials: { mode: "local", endpoint, bearer: key.key, model: chosenModel },
+    };
   }
   const stored = await readTrimmed(jevKeyPath(env));
   if (stored.error !== undefined) return { ok: false, reason: stored.error };
   if (stored.value !== null) {
-    return { ok: true, credentials: { mode: "local", endpoint, bearer: stored.value } };
+    return {
+      ok: true,
+      credentials: { mode: "local", endpoint, bearer: stored.value, model: chosenModel },
+    };
   }
   return {
     ok: false,
@@ -275,7 +334,7 @@ export async function loginCheck(
 ): Promise<WriteResult> {
   const resolved = await resolveCredentials(repoRoot, env);
   if (!resolved.ok) return { ok: false, lines: [`stop-rules: ${resolved.reason}`] };
-  const { mode, endpoint, bearer, teamBase } = resolved.credentials;
+  const { mode, endpoint, bearer, model, teamBase } = resolved.credentials;
   const lines = [`mode: ${mode}`, `endpoint: ${endpoint}`];
   let ok = true;
 
@@ -293,7 +352,7 @@ export async function loginCheck(
 
   const client = new JevClient({
     endpoint,
-    model: (env["STOP_RULES_JEV_MODEL"] ?? "").trim() || DEFAULT_MODEL,
+    model,
     apiKey: bearer,
     // Room for the transport's own three attempts, so a network failure reports itself as
     // one rather than as an exhausted budget.

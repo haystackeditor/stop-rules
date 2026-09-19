@@ -51,7 +51,14 @@ function runStopRules(root: string, sessionID: string): Promise<Run> {
       stderr += chunk.toString("utf8")
     })
     child.on("error", reject)
-    child.on("close", (code) => resolve({ code: code ?? 0, stdout, stderr }))
+    child.on("close", (code, signal) => {
+      // A signal death has no exit code. Calling that 0 would report a killed check as clean.
+      if (code === null) {
+        reject(new Error("stop-rules was killed by " + String(signal)))
+        return
+      }
+      resolve({ code, stdout, stderr })
+    })
     child.stdin.end(JSON.stringify({ session_id: sessionID, cwd: root }))
   })
 }

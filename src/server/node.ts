@@ -29,8 +29,15 @@ function requestFrom(req: IncomingMessage, body: Buffer): Request {
     if (raw === undefined || HOP_BY_HOP.has(name)) continue;
     headers.set(name, Array.isArray(raw) ? raw.join(", ") : raw);
   }
-  const method = req.method ?? "GET";
-  const url = new URL(req.url ?? "/", `http://${req.headers.host ?? `localhost:${DEFAULT_PORT}`}`);
+  // node:http always sets both on a server request. If one is missing something is wrong
+  // with the request, and this server says so rather than answering a made up one.
+  const method = req.method;
+  if (method === undefined) throw new Error("this request had no method");
+  if (req.url === undefined) throw new Error("this request had no URL");
+  // Only the path is used. The Host header is optional in HTTP/1.0, so a placeholder
+  // authority is how the path gets parsed, not a stand in for missing input.
+  const authority = req.headers.host === undefined ? `localhost:${DEFAULT_PORT}` : req.headers.host;
+  const url = new URL(req.url, `http://${authority}`);
   const init: RequestInit = { method, headers };
   if (method !== "GET" && method !== "HEAD") init.body = body;
   return new Request(url, init);
@@ -68,7 +75,14 @@ export function createStopRulesServer(env: NodeJS.ProcessEnv = process.env): Ser
       chunks.push(chunk);
     });
     req.on("end", () => {
-      handle(requestFrom(req, Buffer.concat(chunks)), env as Record<string, string | undefined>)
+      let request: Request;
+      try {
+        request = requestFrom(req, Buffer.concat(chunks));
+      } catch (error) {
+        fail(res, error);
+        return;
+      }
+      handle(request, env as Record<string, string | undefined>)
         .then((response) => writeResponse(res, response))
         .catch((error: unknown) => {
           fail(res, error);
@@ -79,8 +93,11 @@ export function createStopRulesServer(env: NodeJS.ProcessEnv = process.env): Ser
 
 export function resolvePort(env: NodeJS.ProcessEnv, override?: number): number {
   if (override !== undefined) return override;
-  const raw = (env["PORT"] ?? "").trim();
-  if (raw.length === 0) return DEFAULT_PORT;
+  const set = env["PORT"];
+  // Not set means the documented default. Set to nothing is a mistake worth saying out loud.
+  if (set === undefined) return DEFAULT_PORT;
+  const raw = set.trim();
+  if (raw.length === 0) throw new Error("PORT is set but empty. Unset it or give it a port number.");
   const port = Number(raw);
   if (!Number.isInteger(port) || port < 0 || port > 65535) {
     throw new Error(`PORT is not a port number: ${raw}`);

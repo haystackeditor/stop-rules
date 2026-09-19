@@ -1,14 +1,13 @@
 #!/usr/bin/env node
-import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { DEFAULT_AGENT, agentNames, getAdapter } from "./adapters/index.js";
 import type { AgentAdapter, HookContext, HookOutput } from "./adapters/index.js";
-import { run, type RunOutcome } from "./check.js";
+import { resetBaseline, run, type RunOutcome } from "./check.js";
 import { login, loginCheck, writeTeamConfig } from "./credentials.js";
 import { findRepo } from "./git.js";
 import { init, renderInit } from "./init.js";
 import { serveMain } from "./server/node.js";
-import { version } from "./version.js";
+import { VERSION } from "./version.js";
 
 const USAGE = `stop-rules: check the code your agent just wrote against your team's rules.
 
@@ -21,6 +20,7 @@ Usage:
   stop-rules login --jev-key-stdin     store your own Jev key, read from stdin
   stop-rules login --check             check the endpoint and one real Jev call
   stop-rules serve [--port n]          run the team server (it holds the Jev key)
+  stop-rules baseline --reset          forget what was checked; start again from HEAD
 
 Options:
   --agent <name>       hook mode only: which agent's protocol to speak (default ${DEFAULT_AGENT})
@@ -33,6 +33,7 @@ Options:
   --base <rev>         check mode only: diff this revision against the working tree
   --json               print the findings, or the init result, as JSON
   --port <n>           serve mode only: port to listen on (default PORT or 8080)
+  --reset              baseline mode only: clear the saved baseline
   --                   stop reading options: anything after it is ignored
   --help               print this text
   --version            print the version
@@ -74,6 +75,7 @@ interface ParsedArgs {
   tokenStdin: boolean;
   jevKeyStdin: boolean;
   check: boolean;
+  reset: boolean;
   help: boolean;
   version: boolean;
 }
@@ -90,6 +92,7 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
     tokenStdin: false,
     jevKeyStdin: false,
     check: false,
+    reset: false,
     help: false,
     version: false,
   };
@@ -126,6 +129,9 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
         break;
       case "--check":
         parsed.check = true;
+        break;
+      case "--reset":
+        parsed.reset = true;
         break;
       case "--port": {
         i += 1;
@@ -202,17 +208,17 @@ async function readStdin(): Promise<string> {
 }
 
 /**
- * The absolute path of the file running right now. import.meta.url is the honest answer for
- * both dist/cli.js and the single file bundle; process.argv[1] is the fallback for a runtime
- * that hands us a URL no file path can be made from.
+ * The absolute path of the file running right now, which init vendors when that file is the
+ * bundle. Node gives a file: URL for every module loaded from disk, so anything else means
+ * this code is running somewhere init cannot copy from, and it says so.
  */
 function runningFile(): string {
-  if (import.meta.url.startsWith("file:")) return fileURLToPath(import.meta.url);
-  const entry = process.argv[1];
-  if (entry === undefined) {
-    throw new Error("could not work out which file is running, so init cannot vendor it");
+  if (!import.meta.url.startsWith("file:")) {
+    throw new Error(
+      `stop-rules is running from ${import.meta.url}, which is not a file on disk, so init has nothing to copy`,
+    );
   }
-  return path.resolve(entry);
+  return fileURLToPath(import.meta.url);
 }
 
 function emit(delivery: HookOutput): number {
@@ -251,7 +257,9 @@ async function runHook(args: ParsedArgs): Promise<number> {
     return 1;
   }
   const outcome = await run({
-    cwd: input.cwd.length > 0 ? input.cwd : process.cwd(),
+    // An adapter leaves cwd undefined only when its agent documents no directory field at
+    // all, and those agents run the hook in the project root. See HookContext.
+    cwd: input.cwd === undefined ? process.cwd() : input.cwd,
     mode: "hook",
     threshold: args.threshold,
     maxCalls: args.maxCalls,
@@ -306,6 +314,15 @@ function writeResult(result: { ok: boolean; lines: string[] }): number {
   return result.ok ? 0 : 1;
 }
 
+/** The only way to start over after git has thrown the recorded baseline away. */
+async function runBaselineCommand(args: ParsedArgs): Promise<number> {
+  if (!args.reset) {
+    process.stderr.write("stop-rules: baseline only takes --reset, as in stop-rules baseline --reset\n");
+    return 1;
+  }
+  return writeResult(await resetBaseline(process.cwd()));
+}
+
 /** Team mode: write the endpoint into the repo so every developer's hook finds it. */
 async function runTeamCommand(args: ParsedArgs): Promise<number> {
   if (args.operand === undefined) {
@@ -353,7 +370,7 @@ async function main(): Promise<number> {
   }
 
   if (args.version) {
-    process.stdout.write(`${await version()}\n`);
+    process.stdout.write(`${VERSION}\n`);
     return 0;
   }
   if (args.help || args.command.length === 0) {
@@ -378,7 +395,18 @@ async function main(): Promise<number> {
     case "login":
       return runLoginCommand(args);
     case "serve":
-      return serveMain(args.port);
+      try {
+        return await serveMain(args.port);
+      } catch (error) {
+        // A port that cannot be used is the user's to fix, so it reads as one line.
+        process.stderr.write(
+          `stop-rules: ${error instanceof Error ? error.message : String(error)}
+`,
+        );
+        return 1;
+      }
+    case "baseline":
+      return runBaselineCommand(args);
     default:
       process.stderr.write(`stop-rules: unknown command ${args.command}\n`);
       process.stderr.write(USAGE);

@@ -37,6 +37,7 @@ export const droidAdapter: AgentAdapter = {
 
   parseInput(stdinText: string): HookContext {
     return contextFrom(stdinText, {
+      agent: "Droid",
       session: ["session_id"],
       cwd: ["cwd"],
       stopHookActive: ["stop_hook_active"],
@@ -58,8 +59,9 @@ export const droidAdapter: AgentAdapter = {
     if (!read.ok) return failed(shown, read.reason);
 
     const config = read.value;
-    const added = mergeHookGroup(config, "Stop", { type: "command", command, timeout: 120 });
-    if (!added) {
+    const merged = mergeHookGroup(config, shown, "Stop", { type: "command", command, timeout: 120 });
+    if (!merged.ok) return failed(shown, merged.reason);
+    if (!merged.changed) {
       return {
         ok: true,
         files: [shown],

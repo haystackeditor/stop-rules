@@ -1,7 +1,7 @@
 import * as path from "node:path";
 import {
   anyExists,
-  asArray,
+  arrayAt,
   contextFrom,
   failed,
   hasViolations,
@@ -10,6 +10,7 @@ import {
   out,
   readJsonFile,
   relative,
+  wrongShape,
   writeJsonFile,
 } from "./shared.js";
 import type { AgentAdapter, CheckResult, HookContext, HookOutput, InstallResult } from "./types.js";
@@ -55,7 +56,7 @@ export const kiroAdapter: AgentAdapter = {
   },
 
   parseInput(stdinText: string): HookContext {
-    return contextFrom(stdinText, { session: ["session_id"], cwd: ["cwd"] });
+    return contextFrom(stdinText, { agent: "Kiro", session: ["session_id"], cwd: ["cwd"] });
   },
 
   deliver(result: CheckResult, report: string): HookOutput {
@@ -78,8 +79,13 @@ export const kiroAdapter: AgentAdapter = {
     if (!read.ok) return failed(shown, read.reason);
 
     const config = read.value;
-    if (typeof config["version"] !== "string") config["version"] = "v1";
-    const hooks = asArray(config["hooks"]);
+    const version = config["version"];
+    if (version === undefined) config["version"] = "v1";
+    else if (typeof version !== "string") {
+      return failed(shown, wrongShape(shown, "version", "a string"));
+    }
+    const hooks = arrayAt(config, "hooks");
+    if (hooks === null) return failed(shown, wrongShape(shown, "hooks", "a list"));
     if (hooks.some(mentionsStopRules)) {
       return {
         ok: true,

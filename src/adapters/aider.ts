@@ -34,8 +34,10 @@ export const aiderAdapter: AgentAdapter = {
   },
 
   parseInput(_stdinText: string): HookContext {
-    // Aider passes no payload. The lint command runs with the repo root as its cwd.
-    return { sessionId: "aider", cwd: "" };
+    // Aider has no hook payload and no conversation id at all: it runs a lint command in
+    // the repository root. So the process cwd and one fixed session id ARE the contract
+    // here, not a stand in for something that went missing.
+    return { sessionId: "aider" };
   },
 
   deliver(result: CheckResult, report: string): HookOutput {

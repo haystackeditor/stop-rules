@@ -1,7 +1,7 @@
 import * as path from "node:path";
 import {
   anyExists,
-  asRecord,
+  recordAt,
   contextFrom,
   failed,
   hasViolations,
@@ -10,6 +10,7 @@ import {
   out,
   readJsonFile,
   relative,
+  wrongShape,
   writeJsonFile,
 } from "./shared.js";
 import type { AgentAdapter, CheckResult, HookContext, HookOutput, InstallResult } from "./types.js";
@@ -40,6 +41,7 @@ export const geminiAdapter: AgentAdapter = {
 
   parseInput(stdinText: string): HookContext {
     return contextFrom(stdinText, {
+      agent: "Gemini CLI",
       session: ["session_id"],
       cwd: ["cwd"],
       stopHookActive: ["stop_hook_active"],
@@ -62,14 +64,17 @@ export const geminiAdapter: AgentAdapter = {
     if (!read.ok) return failed(shown, read.reason);
 
     const settings = read.value;
-    const hooks = asRecord(settings["hooks"]);
-    const added = mergeHookGroup(
+    const hooks = recordAt(settings, "hooks");
+    if (hooks === null) return failed(shown, wrongShape(shown, "hooks", "an object"));
+    const merged = mergeHookGroup(
       hooks,
+      shown,
       "AfterAgent",
       { name: "stop-rules", type: "command", command, timeout: 120000 },
       { matcher: "*" },
     );
-    if (!added) {
+    if (!merged.ok) return failed(shown, merged.reason);
+    if (!merged.changed) {
       return {
         ok: true,
         files: [shown],

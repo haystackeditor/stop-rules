@@ -1,7 +1,7 @@
 import * as path from "node:path";
 import {
   anyExists,
-  asRecord,
+  recordAt,
   contextFrom,
   exitTwoOnStderr,
   failed,
@@ -9,6 +9,7 @@ import {
   out,
   readJsonFile,
   relative,
+  wrongShape,
   writeJsonFile,
 } from "./shared.js";
 import type { AgentAdapter, CheckResult, HookContext, HookOutput, InstallResult } from "./types.js";
@@ -38,6 +39,7 @@ export const codexAdapter: AgentAdapter = {
 
   parseInput(stdinText: string): HookContext {
     return contextFrom(stdinText, {
+      agent: "Codex",
       session: ["session_id"],
       cwd: ["cwd"],
       stopHookActive: ["stop_hook_active"],
@@ -60,9 +62,11 @@ export const codexAdapter: AgentAdapter = {
     if (!read.ok) return failed(shown, read.reason);
 
     const config = read.value;
-    const hooks = asRecord(config["hooks"]);
-    const added = mergeHookGroup(hooks, "Stop", { type: "command", command, timeout: 120 });
-    if (!added) {
+    const hooks = recordAt(config, "hooks");
+    if (hooks === null) return failed(shown, wrongShape(shown, "hooks", "an object"));
+    const merged = mergeHookGroup(hooks, shown, "Stop", { type: "command", command, timeout: 120 });
+    if (!merged.ok) return failed(shown, merged.reason);
+    if (!merged.changed) {
       return {
         ok: true,
         files: [shown],
