@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: stop-rules
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    autoDeployTrigger: "off"
+    envVars:
+      - key: TYPESAFE_API_KEY
+        sync: false
+      - key: STOP_RULES_TOKEN
+        sync: false

@@ -1,0 +1,5 @@
+project_id = "stop-rules"
+
+# This function authenticates with the team token, not with a Supabase JWT.
+[functions.stop-rules]
+verify_jwt = false

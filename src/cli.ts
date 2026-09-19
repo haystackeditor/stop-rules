@@ -3,7 +3,10 @@ import { fileURLToPath } from "node:url";
 import { DEFAULT_AGENT, agentNames, getAdapter } from "./adapters/index.js";
 import type { AgentAdapter, HookContext, HookOutput } from "./adapters/index.js";
 import { run, type RunOutcome } from "./check.js";
+import { login, loginCheck, writeTeamConfig } from "./credentials.js";
+import { findRepo } from "./git.js";
 import { init, renderInit } from "./init.js";
+import { serveMain } from "./server/node.js";
 import { version } from "./version.js";
 
 const USAGE = `stop-rules: check the code your agent just wrote against your team's rules.
@@ -12,6 +15,11 @@ Usage:
   stop-rules hook [options]            run as a stop hook, reading the agent's JSON on stdin
   stop-rules check [options]           run the same check in a terminal, pre-commit or CI
   stop-rules init [options]            vendor the checker and wire it into your agents
+  stop-rules team <endpoint>           point this repo at your team's stop-rules server
+  stop-rules login --token-stdin       store the team token, read from stdin
+  stop-rules login --jev-key-stdin     store your own Jev key, read from stdin
+  stop-rules login --check             check the endpoint and one real Jev call
+  stop-rules serve [--port n]          run the team server (it holds the Jev key)
 
 Options:
   --agent <name>       hook mode only: which agent's protocol to speak (default ${DEFAULT_AGENT})
@@ -22,17 +30,26 @@ Options:
   --max-calls <n>      hard ceiling on requests to Jev in one run (default 60)
   --base <rev>         check mode only: diff this revision against the working tree
   --json               print the findings, or the init result, as JSON
+  --port <n>           serve mode only: port to listen on (default PORT or 8080)
   --                   stop reading options: anything after it is ignored
   --help               print this text
   --version            print the version
 
 Agents: ${agentNames().join(", ")}
 
-Environment:
-  TYPESAFE_API_KEY         your Jev API key
-  TYPESAFE_API_KEY_FILE    a file holding the key, used when the variable above is unset
-  STOP_RULES_JEV_ENDPOINT  override the Jev endpoint
+Environment, client:
+  STOP_RULES_ENDPOINT      your team's stop-rules server, beats .stop-rules.json
+  STOP_RULES_TOKEN         the team token, beats the stored token file
+  TYPESAFE_API_KEY         your own Jev API key, used when there is no team endpoint
+  TYPESAFE_API_KEY_FILE    a file holding that key, used when the variable above is unset
+  STOP_RULES_JEV_ENDPOINT  override the Jev endpoint in local mode
   STOP_RULES_JEV_MODEL     override the Jev model
+
+Environment, server (stop-rules serve and every cloud deploy):
+  TYPESAFE_API_KEY         the Jev key the server holds on the team's behalf
+  STOP_RULES_TOKEN         the token every developer's hook sends
+  STOP_RULES_JEV_UPSTREAM  override where the server forwards questions
+  PORT                     port to listen on
 
 Exit codes: 0 clean, 2 violations, 1 could not run. Some agents need a different code to
 carry the report, so the hook exit code is whatever that agent documents.
@@ -40,6 +57,8 @@ carry the report, so the hook exit code is whatever that agent documents.
 
 interface ParsedArgs {
   command: string;
+  /** The one positional a command can take, today only `team <endpoint>`. */
+  operand?: string;
   rules?: string;
   threshold: number;
   maxCalls: number;
@@ -48,6 +67,10 @@ interface ParsedArgs {
   agent: string;
   agents?: string[];
   dir?: string;
+  port?: number;
+  tokenStdin: boolean;
+  jevKeyStdin: boolean;
+  check: boolean;
   help: boolean;
   version: boolean;
 }
@@ -61,6 +84,9 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
     maxCalls: 60,
     json: false,
     agent: DEFAULT_AGENT,
+    tokenStdin: false,
+    jevKeyStdin: false,
+    check: false,
     help: false,
     version: false,
   };
@@ -89,6 +115,24 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
       case "--json":
         parsed.json = true;
         break;
+      case "--token-stdin":
+        parsed.tokenStdin = true;
+        break;
+      case "--jev-key-stdin":
+        parsed.jevKeyStdin = true;
+        break;
+      case "--check":
+        parsed.check = true;
+        break;
+      case "--port": {
+        i += 1;
+        const value = Number(take(i, "--port"));
+        if (!Number.isInteger(value) || value < 0 || value > 65535) {
+          throw new UsageError("--port must be a port number");
+        }
+        parsed.port = value;
+        break;
+      }
       case "--rules":
         i += 1;
         parsed.rules = take(i, "--rules");
@@ -135,8 +179,9 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
       }
       default:
         if (arg.startsWith("-")) throw new UsageError(`unknown flag ${arg}`);
-        if (parsed.command.length > 0) throw new UsageError(`unexpected argument ${arg}`);
-        parsed.command = arg;
+        if (parsed.command.length === 0) parsed.command = arg;
+        else if (parsed.operand === undefined) parsed.operand = arg;
+        else throw new UsageError(`unexpected argument ${arg}`);
     }
   }
   return parsed;
@@ -232,6 +277,48 @@ async function runInitCommand(args: ParsedArgs): Promise<number> {
   return report.ok ? 0 : 1;
 }
 
+function writeResult(result: { ok: boolean; lines: string[] }): number {
+  const stream = result.ok ? process.stdout : process.stderr;
+  stream.write(`${result.lines.join("\n")}\n`);
+  return result.ok ? 0 : 1;
+}
+
+/** Team mode: write the endpoint into the repo so every developer's hook finds it. */
+async function runTeamCommand(args: ParsedArgs): Promise<number> {
+  if (args.operand === undefined) {
+    process.stderr.write("stop-rules: team needs an endpoint, as in stop-rules team https://example.com\n");
+    return 1;
+  }
+  const repo = await findRepo(process.cwd());
+  if (repo === null) {
+    process.stderr.write(`stop-rules: ${process.cwd()} is not inside a git repository.\n`);
+    return 1;
+  }
+  return writeResult(await writeTeamConfig(repo.root, args.operand));
+}
+
+/** Secrets arrive on stdin only, so they never reach shell history or a process list. */
+async function runLoginCommand(args: ParsedArgs): Promise<number> {
+  if (args.check) {
+    const repo = await findRepo(process.cwd());
+    const root = repo === null ? process.cwd() : repo.root;
+    return writeResult(await loginCheck(root, process.env));
+  }
+  if (args.tokenStdin === args.jevKeyStdin) {
+    process.stderr.write(
+      [
+        "stop-rules: login needs one of --token-stdin, --jev-key-stdin or --check.",
+        '  printf %s "$TOKEN" | stop-rules login --token-stdin',
+        '  printf %s "$JEV_KEY" | stop-rules login --jev-key-stdin',
+        "  stop-rules login --check",
+      ].join("\n") + "\n",
+    );
+    return 1;
+  }
+  const secret = await readStdin();
+  return writeResult(await login(process.env, args.tokenStdin ? "token" : "jev-key", secret));
+}
+
 async function main(): Promise<number> {
   let args: ParsedArgs;
   try {
@@ -251,6 +338,11 @@ async function main(): Promise<number> {
     return args.help ? 0 : 1;
   }
 
+  if (args.operand !== undefined && args.command !== "team") {
+    process.stderr.write(`stop-rules: unexpected argument ${args.operand}\n`);
+    return 1;
+  }
+
   switch (args.command) {
     case "hook":
       return runHook(args);
@@ -258,6 +350,12 @@ async function main(): Promise<number> {
       return runCheckCommand(args);
     case "init":
       return runInitCommand(args);
+    case "team":
+      return runTeamCommand(args);
+    case "login":
+      return runLoginCommand(args);
+    case "serve":
+      return serveMain(args.port);
     default:
       process.stderr.write(`stop-rules: unknown command ${args.command}\n`);
       process.stderr.write(USAGE);

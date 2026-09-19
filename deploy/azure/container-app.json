@@ -1,0 +1,88 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "comments": "stop-rules team server on Azure Container Apps. Azure has no one click path that builds a repository's Dockerfile, so this template runs an already published image."
+  },
+  "parameters": {
+    "name": {
+      "type": "string",
+      "defaultValue": "stop-rules",
+      "metadata": { "description": "Name of the container app and its environment." }
+    },
+    "location": {
+      "type": "string",
+      "defaultValue": "[resourceGroup().location]",
+      "metadata": { "description": "Region to deploy into." }
+    },
+    "image": {
+      "type": "string",
+      "defaultValue": "ghcr.io/haystackeditor/stop-rules:latest",
+      "metadata": { "description": "Public image built from this repository's Dockerfile." }
+    },
+    "typesafeApiKey": {
+      "type": "secureString",
+      "metadata": { "description": "Your Jev API key from TypeSafe. It stays on the server." }
+    },
+    "stopRulesToken": {
+      "type": "secureString",
+      "metadata": { "description": "The token every developer's hook sends. openssl rand -hex 24" }
+    }
+  },
+  "variables": {
+    "environmentName": "[concat(parameters('name'), '-env')]"
+  },
+  "resources": [
+    {
+      "type": "Microsoft.App/managedEnvironments",
+      "apiVersion": "2026-01-01",
+      "name": "[variables('environmentName')]",
+      "location": "[parameters('location')]",
+      "properties": {}
+    },
+    {
+      "type": "Microsoft.App/containerApps",
+      "apiVersion": "2026-01-01",
+      "name": "[parameters('name')]",
+      "location": "[parameters('location')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.App/managedEnvironments', variables('environmentName'))]"
+      ],
+      "properties": {
+        "managedEnvironmentId": "[resourceId('Microsoft.App/managedEnvironments', variables('environmentName'))]",
+        "configuration": {
+          "ingress": {
+            "external": true,
+            "targetPort": 8080,
+            "transport": "auto"
+          },
+          "secrets": [
+            { "name": "typesafe-api-key", "value": "[parameters('typesafeApiKey')]" },
+            { "name": "stop-rules-token", "value": "[parameters('stopRulesToken')]" }
+          ]
+        },
+        "template": {
+          "containers": [
+            {
+              "name": "stop-rules",
+              "image": "[parameters('image')]",
+              "resources": { "cpu": 0.5, "memory": "1Gi" },
+              "env": [
+                { "name": "TYPESAFE_API_KEY", "secretRef": "typesafe-api-key" },
+                { "name": "STOP_RULES_TOKEN", "secretRef": "stop-rules-token" },
+                { "name": "PORT", "value": "8080" }
+              ]
+            }
+          ],
+          "scale": { "minReplicas": 0, "maxReplicas": 1 }
+        }
+      }
+    }
+  ],
+  "outputs": {
+    "endpoint": {
+      "type": "string",
+      "value": "[concat('https://', reference(resourceId('Microsoft.App/containerApps', parameters('name'))).configuration.ingress.fqdn)]"
+    }
+  }
+}

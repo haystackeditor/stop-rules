@@ -1,0 +1,20 @@
+# DigitalOcean App Platform template. The spec: key is required by the deploy button.
+# The two env vars have no value on purpose: App Platform then prompts for them.
+spec:
+  name: stop-rules
+  services:
+    - name: stop-rules
+      dockerfile_path: Dockerfile
+      http_port: 8080
+      git:
+        repo_clone_url: https://github.com/haystackeditor/stop-rules.git
+        branch: main
+      health_check:
+        http_path: /health
+      envs:
+        - key: TYPESAFE_API_KEY
+          scope: RUN_TIME
+          type: SECRET
+        - key: STOP_RULES_TOKEN
+          scope: RUN_TIME
+          type: SECRET
