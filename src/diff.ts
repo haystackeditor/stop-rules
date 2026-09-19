@@ -42,7 +42,10 @@ const SKIP_BASENAMES = new Set([
   "uv.lock",
   "Gemfile.lock",
   "composer.lock",
+  // Our own two files: the rules being checked and the team endpoint. Configuration, not
+  // code any rule is about.
   ".stop-rules.md",
+  ".stop-rules.json",
 ]);
 
 /** Generated code, and data or log formats that carry no coding rules. */

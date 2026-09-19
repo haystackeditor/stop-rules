@@ -4,12 +4,7 @@
  */
 
 import * as path from "node:path";
-import {
-  resolveCredentials,
-  TEAM_CONFIG_FILE,
-  TOKEN_REJECTED,
-  type Credentials,
-} from "./credentials.js";
+import { resolveCredentials, TOKEN_REJECTED, type Credentials } from "./credentials.js";
 import { chunkFile, parseDiff } from "./diff.js";
 import { runEngine, type CacheLike } from "./engine.js";
 import {
@@ -21,7 +16,7 @@ import {
   resolveTree,
   snapshotWorkingTree,
 } from "./git.js";
-import { AUTH_REJECTED, DEFAULT_MODEL, type FetchLike } from "./jev.js";
+import { AUTH_REJECTED, BILLING_EXHAUSTED, DEFAULT_MODEL, type FetchLike } from "./jev.js";
 import { renderReport } from "./report.js";
 import { loadRules } from "./rules.js";
 import {
@@ -158,11 +153,9 @@ async function runLocked(args: LockedArgs): Promise<RunOutcome> {
   }
 
   const rulesRelative = path.relative(repo.root, rulesPath).split(path.sep).join("/");
-  // The rules file and the team endpoint file are configuration, not code a rule is about.
-  const parsed = parseDiff(await diffTrees(repo.root, baseline, snapshot), [
-    rulesRelative,
-    TEAM_CONFIG_FILE,
-  ]);
+  // .stop-rules.md and .stop-rules.json are skipped by name inside parseDiff. The extra
+  // name here is for a rules file the user pointed somewhere else with --rules.
+  const parsed = parseDiff(await diffTrees(repo.root, baseline, snapshot), [rulesRelative]);
   const files = parsed.files;
   const chunks = files.flatMap(chunkFile);
 
@@ -187,9 +180,12 @@ async function runLocked(args: LockedArgs): Promise<RunOutcome> {
     ...(options.sleep ? { sleep: options.sleep } : {}),
   });
 
-  // A rejected credential is the user's problem, not the agent's, so it can never exit 2.
-  if (engineResult.notChecked.some((entry) => entry.reason === AUTH_REJECTED)) {
+  // A rejected credential or an empty account is the user's problem, not the agent's, so it
+  // can never exit 2. Returning here also leaves the baseline and the reported list alone,
+  // so the same change is checked again once the human has fixed it.
+  if (engineResult.blocked !== null) {
     await saveCache(stateDir, cache);
+    if (engineResult.blocked === "billing") return cannotRun(BILLING_EXHAUSTED);
     return cannotRun(credentials.mode === "team" ? TOKEN_REJECTED : `${AUTH_REJECTED}.`);
   }
 

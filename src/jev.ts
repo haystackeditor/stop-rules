@@ -7,6 +7,13 @@ export const DEFAULT_ENDPOINT = "https://api.typesafe.ai/v1/systemone";
 export const DEFAULT_MODEL = "jev-latest";
 /** What a 401 or 403 from the endpoint reads as. Team mode translates it for the user. */
 export const AUTH_REJECTED = "Jev rejected the API key";
+/**
+ * What an empty TypeSafe account reads as. It is the team's problem, not the agent's, so it
+ * can never be delivered as something to fix. In team mode the server relays the upstream
+ * status and body as they are, so the client sees the same 402.
+ */
+export const BILLING_EXHAUSTED =
+  "the Jev account is out of credits. Add credits at TypeSafe, then run again.";
 
 export interface JevQuestion {
   type: "noul";
@@ -23,6 +30,7 @@ export type FailureClass =
   | "server"
   | "rate_limit"
   | "auth"
+  | "billing"
   | "client"
   | "too_large"
   | "budget";
@@ -34,6 +42,7 @@ export function holdsBaseline(failure: FailureClass): boolean {
     failure === "server" ||
     failure === "rate_limit" ||
     failure === "auth" ||
+    failure === "billing" ||
     failure === "budget"
   );
 }
@@ -225,6 +234,12 @@ export class JevClient {
         this.usage.inputTokens += usage.inputTokens;
         this.usage.outputTokens += usage.outputTokens;
         return { ok: true, answers, usage };
+      }
+
+      // Out of credits. 402 is what TypeSafe answers with today, and the body names the
+      // reason, so a platform that rewrites the status is still recognised.
+      if (response.status === 402 || text.includes('"billing_error"')) {
+        return { ok: false, failure: "billing", message: BILLING_EXHAUSTED };
       }
 
       if (response.status === 429) {

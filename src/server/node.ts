@@ -5,7 +5,6 @@
  */
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { pathToFileURL } from "node:url";
 import { handle, missingEnv, SERVER_VERSION } from "./handler.js";
 
 export const DEFAULT_PORT = 8080;
@@ -128,14 +127,4 @@ export async function serveMain(port?: number): Promise<number> {
   process.on("SIGINT", stop);
   process.on("SIGTERM", stop);
   return 0;
-}
-
-const entry = process.argv[1];
-if (entry !== undefined && import.meta.url === pathToFileURL(entry).href) {
-  serveMain().catch((error: unknown) => {
-    process.stderr.write(
-      `stop-rules serve: ${error instanceof Error ? error.message : String(error)}\n`,
-    );
-    process.exitCode = 1;
-  });
 }

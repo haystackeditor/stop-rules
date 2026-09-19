@@ -1,27 +1,38 @@
 // Build tooling, not shipped source: bundles the CLI into one file with no imports other
 // than node: builtins, so a repository can vendor it as .stop-rules/stop-rules.mjs.
 import { readFile } from "node:fs/promises";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import * as path from "node:path";
 import { build } from "esbuild";
 
-const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
-const pkg = JSON.parse(await readFile(path.join(root, "package.json"), "utf8"));
+export const repoRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+export const BUNDLE_OUT = path.join(repoRoot, "dist", "stop-rules.mjs");
+/** The copy that is committed, so a clone needs no build. */
+export const BIN_OUT = path.join(repoRoot, "bin", "stop-rules.mjs");
 
-const result = await build({
-  entryPoints: [path.join(root, "src", "cli.ts")],
-  outfile: path.join(root, "dist", "stop-rules.mjs"),
-  bundle: true,
-  platform: "node",
-  target: "node20",
-  format: "esm",
-  // No banner: esbuild keeps the shebang that src/cli.ts already starts with.
-  define: { __STOP_RULES_VERSION__: JSON.stringify(pkg.version) },
-  legalComments: "none",
-  logLevel: "warning",
-});
+/** Bundles src/cli.ts into one file. Throws when esbuild reports an error. */
+export async function buildBundle(outfile = BUNDLE_OUT) {
+  const pkg = JSON.parse(await readFile(path.join(repoRoot, "package.json"), "utf8"));
+  const result = await build({
+    entryPoints: [path.join(repoRoot, "src", "cli.ts")],
+    outfile,
+    bundle: true,
+    platform: "node",
+    target: "node20",
+    format: "esm",
+    // No banner: esbuild keeps the shebang that src/cli.ts already starts with.
+    define: { __STOP_RULES_VERSION__: JSON.stringify(pkg.version) },
+    legalComments: "none",
+    logLevel: "warning",
+  });
+  if (result.errors.length > 0) {
+    // esbuild already printed them; do not let the build look successful.
+    throw new Error(`esbuild reported ${result.errors.length} error(s)`);
+  }
+  return outfile;
+}
 
-if (result.errors.length > 0) {
-  // esbuild already printed them; make the failure the process result too.
-  process.exitCode = 1;
+const entry = process.argv[1];
+if (entry !== undefined && import.meta.url === pathToFileURL(entry).href) {
+  await buildBundle();
 }

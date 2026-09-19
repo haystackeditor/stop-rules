@@ -7,7 +7,9 @@ WORKDIR /app
 COPY package.json package-lock.json tsconfig.json ./
 RUN npm ci
 COPY src ./src
-RUN npm run build
+# The image only needs the compiled server, not the vendored bundle or the AWS template, so
+# it runs the TypeScript compile on its own rather than the whole npm run build.
+RUN npm run build:server
 
 FROM node:22-alpine
 WORKDIR /app
@@ -19,4 +21,4 @@ COPY package.json ./
 COPY --from=build /app/dist ./dist
 EXPOSE 8080
 USER node
-CMD ["node", "dist/server/node.js"]
+CMD ["node", "dist/server/start.js"]

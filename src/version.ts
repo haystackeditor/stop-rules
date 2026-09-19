@@ -11,6 +11,15 @@ declare const __STOP_RULES_VERSION__: string | undefined;
 const BAKED: string | null =
   typeof __STOP_RULES_VERSION__ === "string" ? __STOP_RULES_VERSION__ : null;
 
+/**
+ * True when the running file is the single file bundle. Only the bundler bakes the version
+ * in, so this is the one honest way to know, whatever the file is called. `init` uses it to
+ * vendor the file that is running instead of guessing at a name beside it.
+ */
+export function isBundled(): boolean {
+  return BAKED !== null;
+}
+
 export async function version(): Promise<string> {
   if (BAKED !== null) return BAKED;
   const pkgPath = fileURLToPath(new URL("../package.json", import.meta.url));

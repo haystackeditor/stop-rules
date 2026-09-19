@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { DEFAULT_AGENT, agentNames, getAdapter } from "./adapters/index.js";
 import type { AgentAdapter, HookContext, HookOutput } from "./adapters/index.js";
@@ -25,6 +26,7 @@ Options:
   --agent <name>       hook mode only: which agent's protocol to speak (default ${DEFAULT_AGENT})
   --agents <a,b,c>     init mode only: which agents to wire up (default: the ones detected)
   --dir <path>         init mode only: the repository to install into (default: this one)
+  --team <endpoint>    init mode only: use your team's stop-rules server, not your own key
   --rules <path>       rules file (default <repo root>/.stop-rules.md)
   --threshold <0..1>   score at or above which a rule counts as violated (default 0.5)
   --max-calls <n>      hard ceiling on requests to Jev in one run (default 60)
@@ -67,6 +69,7 @@ interface ParsedArgs {
   agent: string;
   agents?: string[];
   dir?: string;
+  team?: string;
   port?: number;
   tokenStdin: boolean;
   jevKeyStdin: boolean;
@@ -159,6 +162,10 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
         i += 1;
         parsed.dir = take(i, "--dir");
         break;
+      case "--team":
+        i += 1;
+        parsed.team = take(i, "--team");
+        break;
       case "--threshold": {
         i += 1;
         const value = Number(take(i, "--threshold"));
@@ -192,6 +199,20 @@ async function readStdin(): Promise<string> {
   const parts: Buffer[] = [];
   for await (const part of process.stdin) parts.push(part as Buffer);
   return Buffer.concat(parts).toString("utf8");
+}
+
+/**
+ * The absolute path of the file running right now. import.meta.url is the honest answer for
+ * both dist/cli.js and the single file bundle; process.argv[1] is the fallback for a runtime
+ * that hands us a URL no file path can be made from.
+ */
+function runningFile(): string {
+  if (import.meta.url.startsWith("file:")) return fileURLToPath(import.meta.url);
+  const entry = process.argv[1];
+  if (entry === undefined) {
+    throw new Error("could not work out which file is running, so init cannot vendor it");
+  }
+  return path.resolve(entry);
 }
 
 function emit(delivery: HookOutput): number {
@@ -263,8 +284,10 @@ async function runCheckCommand(args: ParsedArgs): Promise<number> {
 async function runInitCommand(args: ParsedArgs): Promise<number> {
   const report = await init({
     dir: args.dir ?? process.cwd(),
-    selfPath: fileURLToPath(import.meta.url),
+    selfPath: runningFile(),
+    env: process.env,
     ...(args.agents !== undefined ? { agents: args.agents } : {}),
+    ...(args.team !== undefined ? { team: args.team } : {}),
   });
   if (args.json) {
     const stream = report.ok ? process.stdout : process.stderr;
