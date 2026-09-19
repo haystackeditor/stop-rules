@@ -1,3 +1,6 @@
 node_modules
 dist
 .scratch
+# Local secrets for the team server. Only the .example files belong in git.
+.dev.vars
+.env

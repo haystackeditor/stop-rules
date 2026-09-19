@@ -5,6 +5,8 @@
 
 export const DEFAULT_ENDPOINT = "https://api.typesafe.ai/v1/systemone";
 export const DEFAULT_MODEL = "jev-latest";
+/** What a 401 or 403 from the endpoint reads as. Team mode translates it for the user. */
+export const AUTH_REJECTED = "Jev rejected the API key";
 
 export interface JevQuestion {
   type: "noul";
@@ -242,7 +244,7 @@ export class JevClient {
       }
 
       if (response.status === 401 || response.status === 403) {
-        return { ok: false, failure: "auth", message: "Jev rejected the API key" };
+        return { ok: false, failure: "auth", message: AUTH_REJECTED };
       }
 
       if (response.status >= 500) {

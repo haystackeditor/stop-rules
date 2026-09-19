@@ -4,6 +4,12 @@
  */
 
 import * as path from "node:path";
+import {
+  resolveCredentials,
+  TEAM_CONFIG_FILE,
+  TOKEN_REJECTED,
+  type Credentials,
+} from "./credentials.js";
 import { chunkFile, parseDiff } from "./diff.js";
 import { runEngine, type CacheLike } from "./engine.js";
 import {
@@ -15,8 +21,7 @@ import {
   resolveTree,
   snapshotWorkingTree,
 } from "./git.js";
-import { DEFAULT_ENDPOINT, DEFAULT_MODEL, type FetchLike } from "./jev.js";
-import { resolveApiKey } from "./key.js";
+import { AUTH_REJECTED, DEFAULT_MODEL, type FetchLike } from "./jev.js";
 import { renderReport } from "./report.js";
 import { loadRules } from "./rules.js";
 import {
@@ -87,8 +92,9 @@ export async function run(options: RunOptions): Promise<RunOutcome> {
   const rulesLoad = await loadRules(rulesPath);
   if (!rulesLoad.ok) return cannotRun(rulesLoad.reason ?? "no rules to check against.");
 
-  const key = await resolveApiKey(env);
-  if (!key.ok) return cannotRun(key.reason ?? "no Jev API key.");
+  // Team mode when this repo knows a stop-rules endpoint, the developer's own key if not.
+  const credentials = await resolveCredentials(repo.root, env);
+  if (!credentials.ok) return cannotRun(credentials.reason);
 
   const stateDir = stateDirFor(repo.gitDir);
   const release = await acquireLock(stateDir);
@@ -102,7 +108,7 @@ export async function run(options: RunOptions): Promise<RunOutcome> {
       repo,
       rulesPath,
       rules: rulesLoad.rules,
-      apiKey: key.key,
+      credentials: credentials.credentials,
       stateDir,
       notes,
       note,
@@ -119,7 +125,7 @@ interface LockedArgs {
   repo: { root: string; gitDir: string };
   rulesPath: string;
   rules: Rule[];
-  apiKey: string;
+  credentials: Credentials;
   stateDir: string;
   notes: string[];
   note: (message: string) => void;
@@ -127,9 +133,8 @@ interface LockedArgs {
 }
 
 async function runLocked(args: LockedArgs): Promise<RunOutcome> {
-  const { options, env, repo, rulesPath, rules, apiKey, stateDir, notes, note, started } = args;
+  const { options, env, repo, rulesPath, rules, credentials, stateDir, notes, note, started } = args;
   const model = env["STOP_RULES_JEV_MODEL"] ?? DEFAULT_MODEL;
-  const endpoint = env["STOP_RULES_JEV_ENDPOINT"] ?? DEFAULT_ENDPOINT;
 
   const state = await loadState(stateDir, note);
   const cache = await loadCache(stateDir, note);
@@ -151,7 +156,11 @@ async function runLocked(args: LockedArgs): Promise<RunOutcome> {
   }
 
   const rulesRelative = path.relative(repo.root, rulesPath).split(path.sep).join("/");
-  const files = parseDiff(await diffTrees(repo.root, baseline, snapshot), [rulesRelative]);
+  // The rules file and the team endpoint file are configuration, not code a rule is about.
+  const files = parseDiff(await diffTrees(repo.root, baseline, snapshot), [
+    rulesRelative,
+    TEAM_CONFIG_FILE,
+  ]);
   const chunks = files.flatMap(chunkFile);
 
   const alreadyReported = state.reported;
@@ -161,8 +170,8 @@ async function runLocked(args: LockedArgs): Promise<RunOutcome> {
     threshold: options.threshold,
     maxCalls: options.maxCalls,
     model,
-    endpoint,
-    apiKey,
+    endpoint: credentials.endpoint,
+    apiKey: credentials.bearer,
     fetchImpl: options.fetchImpl ?? ((url, init) => fetch(url, init)),
     cache: fileCache(cache),
     note,
@@ -174,6 +183,12 @@ async function runLocked(args: LockedArgs): Promise<RunOutcome> {
       : {}),
     ...(options.sleep ? { sleep: options.sleep } : {}),
   });
+
+  // A rejected credential is the user's problem, not the agent's, so it can never exit 2.
+  if (engineResult.notChecked.some((entry) => entry.reason === AUTH_REJECTED)) {
+    await saveCache(stateDir, cache);
+    return cannotRun(credentials.mode === "team" ? TOKEN_REJECTED : `${AUTH_REJECTED}.`);
+  }
 
   if (chunks.length > 0 && engineResult.answered === 0 && engineResult.transportFailed) {
     await saveCache(stateDir, cache);

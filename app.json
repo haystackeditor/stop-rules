@@ -1,0 +1,18 @@
+{
+  "name": "stop-rules",
+  "description": "A locked down Jev proxy, so your team's coding rules hook needs no Jev key.",
+  "repository": "https://github.com/haystackeditor/stop-rules",
+  "website": "https://github.com/haystackeditor/stop-rules",
+  "keywords": ["jev", "code-review", "claude-code", "stop-hook"],
+  "stack": "container",
+  "env": {
+    "TYPESAFE_API_KEY": {
+      "description": "Your Jev API key from TypeSafe. It stays on this server and no developer needs it.",
+      "required": true
+    },
+    "STOP_RULES_TOKEN": {
+      "description": "The token every developer's hook will send. Generate one with: openssl rand -hex 24",
+      "required": true
+    }
+  }
+}

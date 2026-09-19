@@ -1,0 +1,9 @@
+.git
+.scratch
+node_modules
+dist
+deploy
+api
+netlify
+supabase
+*.md

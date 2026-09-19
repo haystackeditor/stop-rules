@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>stop-rules team server</title>
+    <style>
+      body {
+        font: 16px/1.6 system-ui, sans-serif;
+        margin: 3rem auto;
+        max-width: 34rem;
+        padding: 0 1rem;
+      }
+      code {
+        background: #f2f2f2;
+        padding: 0.1rem 0.3rem;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>stop-rules team server</h1>
+    <p>
+      This is a locked down Jev proxy. It holds one Jev API key so that nobody on the team
+      has to, and it answers two routes:
+    </p>
+    <ul>
+      <li><code>GET /health</code>, which says whether the server is configured</li>
+      <li><code>POST /v1/systemone</code>, which needs the team token</li>
+    </ul>
+    <p>
+      Point a repository at it with
+      <code>stop-rules team &lt;this url&gt;</code>. Source and setup notes:
+      <a href="https://github.com/haystackeditor/stop-rules">github.com/haystackeditor/stop-rules</a>.
+    </p>
+  </body>
+</html>
