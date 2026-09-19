@@ -100,7 +100,29 @@ export interface Chunk {
   hunks: Hunk[];
 }
 
-function countOld(lines: readonly string[]): number {
+/**
+ * A piece: one or more whole syntactic units of one file, or one diff hunk when the file has
+ * no grammar. This is what a question is asked about.
+ */
+export interface Piece extends Chunk {
+  /** The name of the first unit in the piece. Null when the piece was cut by hunk. */
+  unitName: string | null;
+  /** The new file lines this piece covers. */
+  fromLine: number;
+  toLine: number;
+  cut: "unit" | "hunk";
+}
+
+/**
+ * The old file line a hunk header names. Git writes the line before an insertion when the
+ * hunk removes nothing, as in `@@ -0,0 +1,3 @@` for a new file.
+ */
+export function gitOldStart(cursor: number, oldCount: number): number {
+  if (oldCount > 0) return cursor;
+  return Math.max(cursor - 1, 0);
+}
+
+export function countOld(lines: readonly string[]): number {
   let n = 0;
   for (const line of lines) {
     if (line.startsWith(" ") || line.startsWith("-")) n += 1;
@@ -108,7 +130,7 @@ function countOld(lines: readonly string[]): number {
   return n;
 }
 
-function countNew(lines: readonly string[]): number {
+export function countNew(lines: readonly string[]): number {
   let n = 0;
   for (const line of lines) {
     if (line.startsWith(" ") || line.startsWith("+")) n += 1;
@@ -448,6 +470,29 @@ export function chunkFile(file: FileDiff): Chunk[] {
 
   // A chunk with no added lines cannot violate a claim about added lines.
   return chunks.filter((chunk) => chunk.hunks.some((h) => h.lines.some((l) => l.startsWith("+"))));
+}
+
+/**
+ * Halves a piece for a resend after max_tokens_exceeded, the same way a chunk is halved.
+ * Null when it cannot shrink any further.
+ */
+export function halvePiece(piece: Piece): [Piece, Piece] | null {
+  const halves = halveChunk(piece);
+  if (halves === null) return null;
+  return [asPiece(piece, halves[0]), asPiece(piece, halves[1])];
+}
+
+function asPiece(original: Piece, part: Chunk): Piece {
+  const range = chunkRange(part);
+  return {
+    file: part.file,
+    header: part.header,
+    hunks: part.hunks,
+    unitName: original.unitName,
+    fromLine: range.from,
+    toLine: range.to,
+    cut: original.cut,
+  };
 }
 
 /** Halves a chunk for a resend after max_tokens_exceeded. Null when it cannot shrink. */

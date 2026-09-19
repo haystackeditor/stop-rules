@@ -117,6 +117,16 @@ export async function snapshotWorkingTree(repo: RepoPaths, stateDir: string): Pr
   }
 }
 
+/**
+ * The content of one file as it is in a tree. Null when git cannot read it there, which the
+ * caller reports: it never guesses at the content.
+ */
+export async function readBlob(root: string, tree: string, filePath: string): Promise<string | null> {
+  const result = await runGit(root, ["cat-file", "blob", `${tree}:${filePath}`]);
+  if (result.code !== 0) return null;
+  return result.stdout;
+}
+
 export async function diffTrees(root: string, base: string, head: string): Promise<string> {
   return gitOrThrow(root, [
     "diff",

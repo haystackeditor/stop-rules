@@ -4,6 +4,7 @@ import { DEFAULT_AGENT, agentNames, getAdapter } from "./adapters/index.js";
 import type { AgentAdapter, HookContext, HookOutput } from "./adapters/index.js";
 import { resetBaseline, run, type RunOutcome } from "./check.js";
 import { login, loginCheck, writeTeamConfig } from "./credentials.js";
+import { DEFAULT_THRESHOLD } from "./engine.js";
 import { findRepo } from "./git.js";
 import { init, renderInit } from "./init.js";
 import { serveMain } from "./server/node.js";
@@ -28,7 +29,7 @@ Options:
   --dir <path>         init mode only: the repository to install into (default: this one)
   --team <endpoint>    init mode only: use your team's stop-rules server, not your own key
   --rules <path>       rules file (default <repo root>/.stop-rules.md)
-  --threshold <0..1>   score at or above which a rule counts as violated (default 0.5)
+  --threshold <0..1>   score at or above which a rule counts as violated (default ${DEFAULT_THRESHOLD})
   --max-calls <n>      hard ceiling on requests to Jev in one run (default 60)
   --base <rev>         check mode only: diff this revision against the working tree
   --json               print the findings, or the init result, as JSON
@@ -85,7 +86,7 @@ class UsageError extends Error {}
 function parseArgs(argv: readonly string[]): ParsedArgs {
   const parsed: ParsedArgs = {
     command: "",
-    threshold: 0.5,
+    threshold: DEFAULT_THRESHOLD,
     maxCalls: 60,
     json: false,
     agent: DEFAULT_AGENT,

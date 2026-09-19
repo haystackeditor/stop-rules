@@ -11,6 +11,22 @@ at 1,000,000 bytes, it rejects anything that is not a set of `noul` questions, i
 Jev model itself, and it relays the upstream status, body and `Retry-After` unchanged so
 the client's own rate limit backoff and request splitting keep working.
 
+## The rate limit is per Jev account, so the server holds a line
+
+One server instance keeps at most 12 calls open to Jev at a time. Past that it answers 429
+with `Retry-After: 1`, and the client backs off through the same code path it uses for a 429
+from Jev itself, so nothing is lost.
+
+Read that number honestly:
+
+- The measured Jev limit is per account, not per server: about 16 calls in flight is fine,
+  and 32 gets about half of them refused.
+- On a serverless platform (Cloudflare Workers, Vercel, Netlify, Lambda, Deno Deploy,
+  Supabase) the cap is **per instance**. The platform can run many instances at once, and
+  they do not know about each other, so a big team can still go past the account limit. The
+  clients handle that as a 429 and slow down.
+- One container or VM is one instance, so there the cap is the whole team's.
+
 ## Every deploy needs the same two secrets
 
 | Name | What it is |
@@ -190,7 +206,7 @@ purpose, so the two boxes are filled in by hand in the console.
 The inline code is generated, never hand written:
 
 ```bash
-npm run build          # compiles, bundles, and checks that the template below is current
+npm run compile        # compiles, bundles, and checks that the template below is current
 npm run build:aws      # rewrite deploy/aws/template.yaml after changing the server
 ```
 

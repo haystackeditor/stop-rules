@@ -127,5 +127,4 @@ seeing the rest of the codebase.
 - Do not delete, skip or loosen an existing test to make it pass.
 - Do not hardcode a value or special-case a specific input just to make a test or check pass.
 - Do not leave stubs, placeholders, TODO implementations or fake data in code that is presented as finished.
-- An error message must say what failed and include the value or identifier that caused it.
 `;

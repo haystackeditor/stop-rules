@@ -23,24 +23,29 @@ export interface ViolationLine {
 
 export interface Violation {
   file: string;
-  /**
-   * The lines that reached the cutoff, at most 3, ascending. Empty when no single line was
-   * identified, in which case `unlocalised` says why and the range below is what to read.
-   */
-  lines: ViolationLine[];
-  /** First and last new file line of the changed block this finding came from. */
+  /** The name of the unit the piece starts at. Null when the piece was cut by diff hunk. */
+  unitName: string | null;
+  /** First and last new file line of the piece this finding came from. */
   fromLine: number;
   toLine: number;
+  /** The piece's diff text, which the report hands to the agent as it is. */
+  diff: string;
+  /**
+   * Only filled by the old line finding report: the lines that reached the cutoff, at most
+   * 3, ascending. Empty in the piece report, which names no line.
+   */
+  lines: ViolationLine[];
   /** Why no line is named, in plain words. Null when `lines` holds them. */
   unlocalised: string | null;
   ruleId: string;
   rule: string;
-  /** Stage 1 score for this (chunk, rule). */
+  /** The score for this (piece, rule). */
   confidence: number;
 }
 
 export interface NotChecked {
-  file: string;
+  /** Absent when the reason is about the run, such as a grammar that is not installed. */
+  file?: string;
   /** Absent when the failure is about the file as a whole, such as an unreadable path. */
   fromLine?: number;
   toLine?: number;
@@ -55,15 +60,26 @@ export interface SkippedFile {
 
 export interface RunStats {
   files: number;
-  chunks: number;
+  /** Pieces the diff was cut into. Each one is judged on its own. */
+  pieces: number;
   skipped: number;
   calls: number;
+  /** How many pieces rode in each call, in call order. */
+  piecesPerCall: number[];
   cacheHits: number;
   violations: number;
   notChecked: number;
+  /** Files cut by diff hunk instead of by syntax, and why. */
+  cutByHunk: CutByHunk[];
   inputTokens: number;
   outputTokens: number;
   durationMs: number;
+}
+
+/** A file with no tree-sitter grammar, cut by diff hunk instead. */
+export interface CutByHunk {
+  file: string;
+  reason: string;
 }
 
 export interface CheckReport {

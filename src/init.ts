@@ -3,13 +3,23 @@ import * as path from "node:path";
 import { ADAPTERS, agentNames, getAdapter } from "./adapters/index.js";
 import type { AgentAdapter, InstallResult } from "./adapters/index.js";
 import { readTeamEndpoint, TEAM_CONFIG_FILE, writeTeamConfig } from "./credentials.js";
-import { findRepo } from "./git.js";
+import { findRepo, runGit } from "./git.js";
+import {
+  EXTENSIONS,
+  GRAMMAR_TITLE,
+  extensionOf,
+  grammarWasmName,
+  type GrammarKey,
+} from "./languages.js";
 import { parseRules, STARTER_RULES } from "./rules.js";
+import { grammarWasmPath, runtimeWasmPath, vendorDir } from "./treesitter.js";
 import { isBundled } from "./version.js";
 
 /** Where the vendored single file lands inside the target repository. */
 export const BUNDLE_PATH = ".stop-rules/stop-rules.mjs";
 const BUNDLE_NAME = "stop-rules.mjs";
+/** Where the parser and the grammars land inside the target repository. */
+export const VENDOR_DIR = ".stop-rules";
 
 export interface InitAgentReport {
   name: string;
@@ -23,12 +33,25 @@ export interface InitAgentReport {
   notes: string[];
 }
 
+/** What the parser side of an install ended up with. */
+export interface InitGrammars {
+  /** Languages this repository has files in, so their grammars were copied. */
+  languages: string[];
+  /** Grammar files this run wrote for the first time. */
+  added: string[];
+  /** Grammar files that were already there. */
+  kept: string[];
+  /** Size of the whole .stop-rules folder afterwards, in bytes. */
+  bytes: number;
+}
+
 export interface InitReport {
   ok: boolean;
   repo: string;
   /** Team mode when this repo sends its questions to a team server, local mode otherwise. */
   mode: "team" | "local";
   bundle: { path: string; written: boolean };
+  grammars: InitGrammars;
   rules: { path: string; created: boolean };
   /** The team server this repo now points at, and the file that says so. */
   team: { endpoint: string; path: string; written: boolean } | null;
@@ -51,12 +74,17 @@ export interface InitOptions {
   env: NodeJS.ProcessEnv;
 }
 
+function noGrammars(): InitGrammars {
+  return { languages: [], added: [], kept: [], bytes: 0 };
+}
+
 function failure(repo: string, reason: string): InitReport {
   return {
     ok: false,
     repo,
     mode: "local",
     bundle: { path: BUNDLE_PATH, written: false },
+    grammars: noGrammars(),
     rules: { path: ".stop-rules.md", created: false },
     team: null,
     agents: [],
@@ -109,6 +137,7 @@ export async function init(options: InitOptions): Promise<InitReport> {
     repo: root,
     mode: "local",
     bundle: { path: BUNDLE_PATH, written: false },
+    grammars: noGrammars(),
     rules: { path: ".stop-rules.md", created: false },
     team: null,
     agents: [],
@@ -151,6 +180,13 @@ export async function init(options: InitOptions): Promise<InitReport> {
           : `could not copy the bundle to ${target}: ${err.message}`,
       );
     }
+  }
+
+  // 3b. The parser and the grammars for the languages this repository is written in.
+  try {
+    report.grammars = await copyGrammars(root);
+  } catch (error) {
+    return failure(root, error instanceof Error ? error.message : String(error));
   }
 
   // 4. The rules file, only when it is absent.
@@ -202,11 +238,86 @@ export async function init(options: InitOptions): Promise<InitReport> {
   report.todo.push(`Edit ${report.rules.path} so it says what your team actually cares about.`);
   report.todo.push(
     report.mode === "team"
-      ? `Commit ${BUNDLE_PATH}, ${TEAM_CONFIG_FILE} and the config files, so teammates and cloud agents get the check too.`
-      : `Commit ${BUNDLE_PATH} and the config files, so teammates and cloud agents get the check too.`,
+      ? `Commit ${VENDOR_DIR}/ (the checker and its grammars), ${TEAM_CONFIG_FILE} and the config files, so teammates and cloud agents get the check too.`
+      : `Commit ${VENDOR_DIR}/ (the checker and its grammars) and the config files, so teammates and cloud agents get the check too.`,
   );
   report.todo.push("Check it works: stop-rules login --check");
   return report;
+}
+
+/** Which grammars this repository needs, from the extensions of its tracked files. */
+async function languagesInRepo(root: string): Promise<GrammarKey[]> {
+  const listed = await runGit(root, ["ls-files"]);
+  if (listed.code !== 0) {
+    throw new Error(`git ls-files failed in ${root}: ${listed.stderr.trim()}`);
+  }
+  const keys = new Set<GrammarKey>();
+  for (const line of listed.stdout.split("\n")) {
+    if (line.length === 0) continue;
+    const key = EXTENSIONS[extensionOf(line)];
+    if (key !== undefined) keys.add(key);
+  }
+  return [...keys].sort();
+}
+
+async function copyIfNew(source: string, target: string): Promise<boolean> {
+  let fresh = true;
+  try {
+    await fs.access(target);
+    fresh = false;
+  } catch (error) {
+    const err = error as NodeJS.ErrnoException;
+    if (err.code !== "ENOENT") throw new Error(`could not look at ${target}: ${err.message}`);
+  }
+  await fs.mkdir(path.dirname(target), { recursive: true });
+  try {
+    await fs.copyFile(source, target);
+  } catch (error) {
+    const err = error as NodeJS.ErrnoException;
+    throw new Error(
+      err.code === "ENOENT"
+        ? `no file at ${source}. This stop-rules copy is incomplete: clone it again.`
+        : `could not copy ${source} to ${target}: ${err.message}`,
+    );
+  }
+  return fresh;
+}
+
+/** Bytes used by a folder and everything in it. */
+async function folderBytes(dir: string): Promise<number> {
+  let total = 0;
+  const entries = await fs.readdir(dir, { withFileTypes: true });
+  for (const entry of entries) {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) total += await folderBytes(full);
+    else total += (await fs.stat(full)).size;
+  }
+  return total;
+}
+
+/**
+ * Copies the tree-sitter runtime and only the grammars this repository needs. Running init
+ * again adds the ones that are missing and leaves the rest alone.
+ */
+async function copyGrammars(root: string): Promise<InitGrammars> {
+  const from = vendorDir();
+  const into = path.join(root, VENDOR_DIR);
+  const languages = await languagesInRepo(root);
+  await copyIfNew(runtimeWasmPath(from), path.join(into, "tree-sitter.wasm"));
+  const added: string[] = [];
+  const kept: string[] = [];
+  for (const key of languages) {
+    const name = grammarWasmName(key);
+    const fresh = await copyIfNew(grammarWasmPath(key, from), path.join(into, "grammars", name));
+    if (fresh) added.push(name);
+    else kept.push(name);
+  }
+  return {
+    languages: languages.map((key) => GRAMMAR_TITLE[key]),
+    added,
+    kept,
+    bytes: await folderBytes(into),
+  };
 }
 
 /** The human form of an init report. */
@@ -222,6 +333,13 @@ export function renderInit(report: InitReport): string[] {
     report.bundle.written
       ? `  wrote ${report.bundle.path}`
       : `  kept ${report.bundle.path} (it is the file running now)`,
+  );
+  const grammars = report.grammars;
+  const megabytes = (grammars.bytes / 1_000_000).toFixed(1);
+  lines.push(
+    grammars.languages.length === 0
+      ? `  no file in this repo has a language stop-rules can parse, so it copied no grammars (${VENDOR_DIR} is ${megabytes} MB)`
+      : `  grammars for ${grammars.languages.join(", ")}: ${grammars.added.length} copied, ${grammars.kept.length} already there (${VENDOR_DIR} is ${megabytes} MB)`,
   );
   lines.push(
     report.rules.created

@@ -1,10 +1,10 @@
 # stop-rules
 
 `stop-rules` holds your coding agent to your team's written coding rules. When the agent
-finishes a turn, it takes the code changed since the last check and asks
-[Jev](https://typesafe.ai) one yes or no question per diff chunk and per rule. If a rule is
-likely broken, it hands the findings back to the agent so it fixes them before you see
-them.
+finishes a turn, it cuts the code changed since the last check into pieces, one or more whole
+functions each, and asks [Jev](https://typesafe.ai) one yes or no question per piece and per
+rule. If a rule is likely broken, it hands the piece that broke it back to the agent so it
+fixes it before you see it.
 
 Using a coding agent? Point it at [AGENT-SETUP.md](AGENT-SETUP.md) and let it do the
 install.
@@ -19,8 +19,9 @@ node stop-rules/bin/stop-rules.mjs init --dir /path/to/your/repo
 No `npm install`, no build: `bin/stop-rules.mjs` is committed and ready to run.
 
 `init` finds which coding agents your repo already uses, copies itself into
-`.stop-rules/stop-rules.mjs` there, writes a starter `.stop-rules.md`, and wires the hook
-into each agent's own config file. Then:
+`.stop-rules/stop-rules.mjs` there, copies the parser and only the grammars for the languages
+your repo is written in, writes a starter `.stop-rules.md`, and wires the hook into each
+agent's own config file. Then:
 
 ```bash
 cd /path/to/your/repo
@@ -28,9 +29,15 @@ printf %s "$JEV_KEY" | node .stop-rules/stop-rules.mjs login --jev-key-stdin
 node .stop-rules/stop-rules.mjs login --check
 ```
 
-Edit `.stop-rules.md` so it says what your team cares about, then commit
-`.stop-rules.md`, `.stop-rules/stop-rules.mjs` and the agent config files. Your key is not
-in any of them: it lives in `~/.config/stop-rules/jev-key`, mode 0600.
+Edit `.stop-rules.md` so it says what your team cares about, then commit `.stop-rules.md`,
+the `.stop-rules/` folder and the agent config files. Your key is not in any of them: it
+lives in `~/.config/stop-rules/jev-key`, mode 0600.
+
+`.stop-rules/` holds the checker, the parser and one grammar file per language, so it is a few
+megabytes. Commit it and teammates and cloud agents get the check with nothing to install. If
+you would rather not have binaries in git, leave the grammars out and each person runs `init`
+again on their own machine; a language whose grammar is missing is reported as not checked and
+nothing else breaks.
 
 ## Quick start, a team
 
@@ -88,6 +95,29 @@ documents the `TaskComplete` hook, the file it lives in and the JSON it must ans
 and the same README marks that event "coming soon!". The file is written to the documented
 contract, so if your Cline never runs it, that is why.
 
+## Which languages it can cut into pieces
+
+A change is judged one piece at a time, and a piece is one or more whole functions. That
+needs a parser, so these are the languages it has one for:
+
+<!-- languages -->
+| Language | File extensions |
+|---|---|
+| TypeScript | `.ts`, `.mts`, `.cts` |
+| TSX | `.tsx`, `.jsx` |
+| JavaScript | `.js`, `.mjs`, `.cjs` |
+| Python | `.py` |
+| Go | `.go` |
+| Rust | `.rs` |
+| Ruby | `.rb` |
+| Java | `.java` |
+| Kotlin | `.kt`, `.kts` |
+| Swift | `.swift` |
+<!-- /languages -->
+
+Any other file is cut by diff hunk instead, which works and is a little blunter.
+`check --json` says which files that happened to and why.
+
 ## Writing good rules
 
 `.stop-rules.md` is Markdown. Every top-level list item is one rule. Indented lines and
@@ -107,47 +137,79 @@ Then write each rule as one checkable sentence that says what to do instead:
   it, return it to the caller, or log it with enough context to debug.
 - Do not leave stubs, placeholders, TODO implementations or fake data in code that is
   presented as finished.
-- An error message must say what failed and include the value or identifier that caused it.
 ```
 
 Rules that work less well are the vague ones ("write clean code") and the ones about things
-one chunk of a diff cannot show ("keep the service boundaries tidy").
+one piece of a change cannot show ("keep the service boundaries tidy").
 
 ## How it works
 
 1. **What changed.** The working tree is written to a git tree object through a temporary
    index, so your own index and staged changes are never touched. That snapshot is diffed
    against the tree from the last check, so each turn only pays for new work.
-2. **Chunks.** The diff is split per file into chunks of at most 12,000 bytes. Lock files,
-   minified bundles, data and log files, binaries and deletions are skipped.
-3. **One yes or no score per rule.** One request per chunk asks, for every rule, whether
-   the added lines break it. Jev answers each claim with a probability. At or above the
-   threshold (0.5 by default) it is a finding.
-4. **Find the line.** For each flagged chunk and rule, a second request asks which added
-   line is at fault, one claim per line. Up to three lines are named. If no line reaches
-   the threshold, the finding says so and names the block of changed lines instead. No line
-   is ever guessed.
-5. **Tell the agent.** The findings go to the agent as plain text: file, line, rule, the
-   line itself, and the score.
+2. **Pieces.** Each changed file is parsed, and its diff is cut into pieces. A piece is one
+   or more whole functions: the function, method, constructor or class member each added line
+   sits in, with neighbours merged in until the piece holds 40 added lines. A file with no
+   grammar is cut by diff hunk instead. Lock files, minified bundles, data and log files,
+   binaries and deletions are skipped.
+3. **One yes or no score per rule.** Every piece is asked about every rule: does the added
+   code break this rule. Jev answers each claim with a probability. At or above the cutoff
+   (0.6 by default) it is a finding. Up to four pieces ride in one request, and a request is
+   also bounded at 60,000 bytes, so a normal turn is one or two requests.
+4. **Tell the agent.** Each finding is the file, the line range, the name of the function,
+   the rule in full, the score, and the piece's own diff. The agent gets the code that broke
+   the rule, not a line number to go and find.
 
 It never nags twice: a finding the hook has already delivered in this repo is not delivered
 again. A second run over the same code costs nothing, because every answer is cached in the
-repo's git directory, keyed on the model, the exact claim and the exact chunk text. And
-every run has a hard ceiling on requests (60 by default, `--max-calls`), counted across
-retries and splits. When it runs out, the work left over is reported as "not checked".
+repo's git directory, keyed on the model, the exact claim and the exact piece text. Packing
+does not change that key, so re-packing never throws answers away. And every run has a hard
+ceiling on requests (60 by default, `--max-calls`), counted across retries and splits. When
+it runs out, the work left over is reported as "not checked".
+
+### Why 0.6
+
+The cutoff was measured on 240 real agent written changes, blind labelled and adjudicated.
+Cutting code into whole functions does not make Jev rank better, it shifts the scores up, so
+pieces need 0.6 where whole chunks needed 0.5. That is the only reason for the number.
+
+### Not spamming Jev
+
+Jev's rate limit is per account, so a whole team shares it and so does every tool on your
+machine. Three things keep this one polite:
+
+- One run keeps at most 4 requests in flight.
+- Every stop-rules process on the machine shares 8 slots, held as lock files in your cache
+  folder. If they are all busy for a minute the run stops and says so, and the same change is
+  checked on the next turn.
+- A 429 halves the in-flight ceiling, waits as long as `Retry-After` says, and earns one slot
+  back after four answers in a row.
+
+### How accurate is it
+
+Small samples, measured, and worth knowing before you trust it:
+
+- On 240 real agent written changes, with whole chunks at 0.5, none of the 16 flags was a
+  plain false alarm, and about 1 real break in 3 was caught.
+- On planted examples: stubs 20 of 20, hardcoded test values 12 of 20, and 0 of 40 harmless
+  look-alikes flagged.
+
+So it is quiet rather than thorough. It will miss things. What it does flag is usually real.
 
 ## What leaves your machine
 
-Sent to Jev, per request: one chunk of your diff, the path of the file it came from, and
-the text of your rules. Nothing else: no repo name, no history, no file the diff does not
-touch. In team mode the same request goes to your own server, which adds the Jev key and
-forwards it.
+Sent to Jev, per request: up to four pieces of your diff, the path of the file each one came
+from, and the text of your rules. Nothing else: no repo name, no history, no file the diff
+does not touch. In team mode the same request goes to your own server, which adds the Jev key
+and forwards it.
 
 Kept on your machine and never committed, in `<git dir>/stop-rules/`: `state.json` (the
 baseline tree, which findings were delivered, per-session counters), `cache.json` (claim
-hashes and their scores), `run.log` (one JSON line per run, capped at 1 MB) and `lock`.
-Your key or token lives in `~/.config/stop-rules/` with mode 0600. Neither is ever written
-into the repo, printed, or included in an error message.
+hashes and their scores), `run.log` (one JSON line per run, capped at 1 MB) and `lock`. The
+machine wide slots are small files in your cache folder (`$XDG_CACHE_HOME/stop-rules/slots`,
+or `~/Library/Caches/stop-rules/slots` on a Mac), each holding a process id and a time. Your
+key or token lives in `~/.config/stop-rules/` with mode 0600. Neither is ever written into
+the repo, printed, or included in an error message.
 
 ## Commands
 
@@ -176,7 +238,7 @@ stop-rules baseline --reset
 - **baseline --reset** forgets what was checked, so the next run starts from HEAD.
 
 Shared flags: `--rules <path>` (default `<repo root>/.stop-rules.md`), `--threshold <0..1>`
-(default 0.5), `--max-calls <n>` (default 60), `--help`, `--version`.
+(default 0.6), `--max-calls <n>` (default 60), `--help`, `--version`.
 
 Environment: `TYPESAFE_API_KEY` or `TYPESAFE_API_KEY_FILE` for your own key,
 `STOP_RULES_ENDPOINT` and `STOP_RULES_TOKEN` for team mode,
@@ -186,8 +248,12 @@ that is set but empty is an error, not a shrug.
 ## Limits, honestly
 
 - You need a Jev API key from TypeSafe.
-- Each chunk is judged on its own, so rules about cross-file architecture or consistency
+- Each piece is judged on its own, so rules about cross-file architecture or consistency
   across a codebase are weak.
+- A piece is whole functions, so a rule about how two functions fit together is only seen
+  when both of them are in the same piece.
+- A file in a language with no grammar here is cut by diff hunk, which is blunter. A file
+  that will not parse is reported as not checked, never checked half way.
 - Only Claude Code can run the check in the background. Everywhere else the hook blocks
   for about a second.
 - In `claude -p` (print mode) background hooks are killed when the process exits, so use
@@ -196,27 +262,32 @@ that is set but empty is an error, not a shrug.
   and nothing tells you. We hit this ourselves.
 - The check reads added lines. A rule about something deleted, such as a test being
   removed, is only seen if the same change also adds lines to that file.
-- `npx github:haystackeditor/stop-rules` may work once the repo is public, but we cannot
-  test it while it is private, and npm rebuilds a package installed from git when a `build`
-  script exists, which this one has. The tested path is a clone plus
-  `node bin/stop-rules.mjs`.
+- `npx github:haystackeditor/stop-rules` is untested until this repo is public, so we cannot
+  say whether it works. There is no `build` script and no install script, so npm has nothing
+  to rebuild, but the only path we have run is a clone plus `node bin/stop-rules.mjs`.
 
 ## Contributing
 
-`bin/stop-rules.mjs` is a build output that is committed on purpose, so a clone needs no
-build. It must be committed together with any source change:
+Everything in `bin/` is a build output that is committed on purpose, so a clone needs no
+build: the bundle, the tree-sitter runtime and one wasm file per grammar. It must be
+committed together with any source change:
 
 ```bash
 npm install
 npm run typecheck
-npm run build        # compiles, bundles, refreshes bin/stop-rules.mjs, checks the AWS template
-npm run verify:bin   # fails if bin/stop-rules.mjs is not a fresh build
+npm run compile      # compiles, bundles, refreshes bin/, checks the tables and the AWS template
+npm run verify:bin   # fails if anything in bin/ is not a fresh copy
 ```
 
-`npm run build` also fails when `VERSION` in `src/version.ts` or `SERVER_VERSION` in
-`src/server/handler.ts` has drifted from the version in `package.json`. Run
-`npm run build:aws` after changing the server, so the committed CloudFormation template
-keeps matching the code.
+The script is called `compile` and not `build` on purpose: npm rebuilds a package installed
+from a repository when a `build` script exists, and the committed `bin/` must be used as it
+is.
+
+`npm run compile` also fails when `VERSION` in `src/version.ts` or `SERVER_VERSION` in
+`src/server/handler.ts` has drifted from the version in `package.json`, when a node type
+named in `src/languages.ts` is not in that grammar, or when the language table above is not
+the one in the code. Run `npm run build:aws` after changing the server, so the committed
+CloudFormation template keeps matching the code.
 
 There are no tests on purpose. Changes are verified by running the thing: see the specs in
 [docs/specs/](docs/specs/) for what was verified and how.

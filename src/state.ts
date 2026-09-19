@@ -219,8 +219,14 @@ export async function acquireLock(stateDir: string, timeoutMs = 60_000): Promise
 export interface RunLogLine {
   at: string;
   mode: string;
+  /** Which report was written: piece, or the old lines report. */
+  report: string;
   files: number;
-  chunks: number;
+  pieces: number;
+  /** How many pieces rode in each call, in call order. */
+  piecesPerCall: number[];
+  /** How many files had no grammar and were cut by diff hunk. */
+  cutByHunk: number;
   skipped: number;
   calls: number;
   cacheHits: number;

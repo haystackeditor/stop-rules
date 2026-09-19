@@ -3,8 +3,9 @@
 You are a coding agent. This file tells you how to install `stop-rules` in the human's
 repository, end to end, and how to prove it works before you say you are done.
 
-`stop-rules` runs after a coding agent finishes a turn, sends the code that changed to Jev
-with the team's rules, and hands back any rule the change breaks so the agent fixes it.
+`stop-rules` runs after a coding agent finishes a turn. It cuts the code that changed into
+pieces, one or more whole functions each, asks Jev whether any piece breaks one of the team's
+rules, and hands the piece that broke it back to the agent so the agent fixes it.
 
 ## 1. Ask the human these questions, all at once, before you do anything
 
@@ -32,7 +33,8 @@ git clone https://github.com/haystackeditor/stop-rules /tmp/stop-rules
 ```
 
 That is all. There is no `npm install` and no build step: `/tmp/stop-rules/bin/stop-rules.mjs`
-is a committed, ready to run file. Node 20 or newer.
+is a committed, ready to run file, and `bin/` also holds the parser and one grammar file per
+language. Node 20 or newer.
 
 If that clone fails because the repository is not public yet, ask the human where their copy
 is and clone from there. Any path works: the file you need is `bin/stop-rules.mjs`.
@@ -55,6 +57,9 @@ Read the JSON it prints. The fields you need:
 
 - `ok`: false means nothing was installed. `errors` says why.
 - `mode`: `team` or `local`. It decides which secret the human stores in step 6.
+- `grammars`: which languages this repo has, which grammar files were copied into
+  `.stop-rules/`, and how big that folder now is. A language with no grammar here is cut by
+  diff hunk instead, which still works.
 - `agents[]`: one entry per agent, with `files` (what was written), `changed`, `ok`,
   `notes`, and `effect` in plain words. `feedback` is `continues-agent` when that agent can
   be told to fix violations, or `shown-to-user-only` when it can only show them.
@@ -175,7 +180,11 @@ Claude Code settings, no hook runs at all and nothing warns them.
 Commit:
 
 - `.stop-rules.md`, the rules.
-- `.stop-rules/stop-rules.mjs`, the checker, so teammates and cloud agents get it from git.
+- `.stop-rules/`, the checker, the parser and the grammars, so teammates and cloud agents get
+  the check with nothing to install. It is a few megabytes of wasm. If the team would rather
+  not keep binaries in their history, commit only `.stop-rules/stop-rules.mjs` and tell them
+  that each person runs `init` again once on their own machine; until they do, files in that
+  language are reported as not checked and nothing else breaks.
 - The agent config files `init` wrote or changed, listed in `agents[].files`.
 - `.stop-rules.json` in team mode. It holds the endpoint and no secret.
 
@@ -215,7 +224,11 @@ Never commit, and never print:
 | `<path>/cache.json is not a stop-rules cache. Delete it and run again.` | Delete that one file. Answers are re-fetched. |
 | `the <agent> hook input has no <field>` | The agent sent a payload without a field its own docs promise. Check you are on a current version of that agent, and report it. |
 | `in <config file>, "hooks" is not an object. Nothing was changed: fix the file and run init again.` | That config file has a hand written value where a list or an object belongs. Fix the file; `init` never overwrites it. |
-| `could not reach Jev for any chunk of this diff.` | Network or server problem. Nothing was marked as checked, so the next run tries the same code again. |
+| `could not reach Jev for any piece of this diff.` | Network or server problem. Nothing was marked as checked, so the next run tries the same code again. |
 | `still N violations after 3 rounds, leaving them for the user` | The agent has had three tries at the same findings. They are for the human now. |
 | `stop-rules: no changes to check.` | Nothing changed since the last check. Not an error. |
+| `Jev is busy on this machine, this change will be checked on the next run` | Eight Jev calls from other stop-rules runs on this machine were in flight for a minute. Nothing was marked as checked, so the next turn checks the same code. Nothing to fix. |
+| `no grammar installed for .go, run stop-rules init again to add it` | This repo gained a language after `init` ran. Run `init` again in the repo; it copies the missing grammar and leaves everything else alone. |
+| `<file> lines 10-40: could not be parsed as TypeScript` | The file does not parse, so it was not cut into pieces and not checked. Usually the file really is broken: open it. |
+| `the tree-sitter runtime is missing at <path>` | The `.stop-rules/` folder is half there, most likely because only the bundle was committed. Run `init` again in the repo. |
 | Nothing happens at all in Claude Code | Check `disableAllHooks` in their settings, and that `.claude/settings.json` has the Stop entry `init` wrote. |

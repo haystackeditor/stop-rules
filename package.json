@@ -18,7 +18,7 @@
   },
   "scripts": {
     "start": "node dist/server/start.js",
-    "build": "tsc -p tsconfig.json && node scripts/check-versions.mjs && node scripts/bundle.mjs && node scripts/bin.mjs && node deploy/aws/generate-template.ts --check",
+    "compile": "tsc -p tsconfig.json && node scripts/check-versions.mjs && node scripts/bundle.mjs && node scripts/bin.mjs && node scripts/check-languages.mjs && node deploy/aws/generate-template.ts --check",
     "build:aws": "node deploy/aws/generate-template.ts",
     "build:server": "tsc -p tsconfig.json",
     "bundle": "node scripts/bundle.mjs",
@@ -26,8 +26,12 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "devDependencies": {
+    "@tree-sitter-grammars/tree-sitter-kotlin": "1.1.0",
     "@types/node": "^22.10.2",
     "esbuild": "^0.25.0",
-    "typescript": "^5.7.2"
+    "tree-sitter-python": "0.25.0",
+    "tree-sitter-wasms": "0.1.13",
+    "typescript": "^5.7.2",
+    "web-tree-sitter": "0.25.10"
   }
 }

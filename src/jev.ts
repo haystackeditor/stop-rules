@@ -33,7 +33,8 @@ export type FailureClass =
   | "billing"
   | "client"
   | "too_large"
-  | "budget";
+  | "budget"
+  | "busy";
 
 /** A failure the next run could still succeed at, so the baseline must not advance. */
 export function holdsBaseline(failure: FailureClass): boolean {
@@ -43,9 +44,18 @@ export function holdsBaseline(failure: FailureClass): boolean {
     failure === "rate_limit" ||
     failure === "auth" ||
     failure === "billing" ||
-    failure === "budget"
+    failure === "budget" ||
+    failure === "busy"
   );
 }
+
+/**
+ * The machine wide gate. One slot is held for one HTTP attempt. Implemented in slots.ts,
+ * which is Node only; this module stays runtime free.
+ */
+export type SlotGate = () => Promise<
+  { ok: true; release: () => Promise<void> } | { ok: false; reason: string }
+>;
 
 export type SendOutcome =
   | { ok: true; answers: Record<string, number>; usage: JevUsage }
@@ -88,11 +98,15 @@ export interface JevClientOptions {
   note: (message: string) => void;
   /** Injected in verification so retry timing does not slow a run down. */
   sleep?: (ms: number) => Promise<void>;
+  /** The machine wide slot gate, when the caller has one. */
+  slot?: SlotGate;
 }
 
 const MAX_ATTEMPTS = 3;
 const BACKOFF_START_MS = 1000;
 const BACKOFF_CAP_MS = 16_000;
+/** Successes in a row before the in-flight ceiling goes back up by one. */
+const STEP_UP_AFTER = 4;
 
 function defaultSleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
@@ -137,17 +151,41 @@ function readUsage(body: unknown): JevUsage {
 
 export class JevClient {
   private callsUsed = 0;
+  /** The in-flight ceiling for this run. Halved on a 429, one step back up after four wins. */
   private limit: number;
+  private readonly ceiling: number;
+  private successStreak = 0;
   private readonly sleep: (ms: number) => Promise<void>;
   readonly usage: JevUsage = { inputTokens: 0, outputTokens: 0 };
 
   constructor(private readonly options: JevClientOptions) {
-    this.limit = options.concurrency ?? 4;
+    this.ceiling = options.concurrency ?? 4;
+    this.limit = this.ceiling;
     this.sleep = options.sleep ?? defaultSleep;
   }
 
   get calls(): number {
     return this.callsUsed;
+  }
+
+  /** The current in-flight ceiling, for the run log. */
+  get inFlightLimit(): number {
+    return this.limit;
+  }
+
+  /** A 429 means slow down: halve the ceiling, never below one. */
+  private slowDown(): void {
+    this.limit = Math.max(1, Math.floor(this.limit / 2));
+    this.successStreak = 0;
+  }
+
+  /** Four answers in a row without a 429 buy back one slot. */
+  private speedUp(): void {
+    if (this.limit >= this.ceiling) return;
+    this.successStreak += 1;
+    if (this.successStreak < STEP_UP_AFTER) return;
+    this.limit += 1;
+    this.successStreak = 0;
   }
 
   /** Removes the key from any text that is about to be shown or logged. */
@@ -156,19 +194,24 @@ export class JevClient {
     return text.split(this.options.apiKey).join("[redacted]");
   }
 
-  /** One logical request, including retries. Every attempt costs one unit of budget. */
-  async send(state: unknown, questions: Record<string, JevQuestion>): Promise<SendOutcome> {
-    const body = JSON.stringify({ state, model: this.options.model, questions });
-    let attempt = 0;
-    let backoff = BACKOFF_START_MS;
-
-    for (;;) {
-      if (this.callsUsed >= this.options.maxCalls) {
-        return { ok: false, failure: "budget", message: "call budget exhausted" };
-      }
-      this.callsUsed += 1;
-      attempt += 1;
-
+  /**
+   * One HTTP attempt, with a machine wide slot held for its whole length, so all the
+   * stop-rules processes on this machine together stay inside Jev's per account limit.
+   */
+  private async fetchOnce(
+    body: string,
+  ): Promise<
+    | { kind: "busy"; reason: string }
+    | { kind: "error"; message: string }
+    | { kind: "response"; status: number; text: string; retryAfter: string | null }
+  > {
+    let free: (() => Promise<void>) | null = null;
+    if (this.options.slot !== undefined) {
+      const gate = await this.options.slot();
+      if (!gate.ok) return { kind: "busy", reason: gate.reason };
+      free = gate.release;
+    }
+    try {
       let response: Response;
       try {
         response = await this.options.fetchImpl(this.options.endpoint, {
@@ -182,31 +225,60 @@ export class JevClient {
         });
       } catch (error) {
         const message = this.redact(error instanceof Error ? error.message : String(error));
-        if (attempt < MAX_ATTEMPTS) {
-          this.options.note(`network error, retrying: ${message}`);
-          await this.sleep(backoff);
-          backoff = Math.min(backoff * 2, BACKOFF_CAP_MS);
-          continue;
-        }
-        this.options.note(`network error, giving up: ${message}`);
-        return { ok: false, failure: "network", message: `network error: ${message}` };
+        return { kind: "error", message: `network error: ${message}` };
       }
-
       let text: string;
       try {
         text = await response.text();
       } catch (error) {
         const message = this.redact(error instanceof Error ? error.message : String(error));
+        return { kind: "error", message: `unreadable response: ${message}` };
+      }
+      return {
+        kind: "response",
+        status: response.status,
+        text,
+        retryAfter: response.headers.get("retry-after"),
+      };
+    } finally {
+      if (free !== null) await free();
+    }
+  }
+
+  /** One logical request, including retries. Every attempt costs one unit of budget. */
+  async send(state: unknown, questions: Record<string, JevQuestion>): Promise<SendOutcome> {
+    const body = JSON.stringify({ state, model: this.options.model, questions });
+    let attempt = 0;
+    let backoff = BACKOFF_START_MS;
+
+    for (;;) {
+      if (this.callsUsed >= this.options.maxCalls) {
+        return { ok: false, failure: "budget", message: "call budget exhausted" };
+      }
+      attempt += 1;
+
+      const sent = await this.fetchOnce(body);
+      if (sent.kind === "busy") {
+        // Nothing was sent, so this costs no budget. The whole run stops here.
+        return { ok: false, failure: "busy", message: sent.reason };
+      }
+      this.callsUsed += 1;
+
+      if (sent.kind === "error") {
         if (attempt < MAX_ATTEMPTS) {
-          this.options.note(`could not read response body, retrying: ${message}`);
+          this.options.note(`${sent.message}, retrying`);
           await this.sleep(backoff);
           backoff = Math.min(backoff * 2, BACKOFF_CAP_MS);
           continue;
         }
-        return { ok: false, failure: "network", message: `unreadable response: ${message}` };
+        this.options.note(`${sent.message}, giving up`);
+        return { ok: false, failure: "network", message: sent.message };
       }
 
-      if (response.status === 200) {
+      const status = sent.status;
+      const text = sent.text;
+
+      if (status === 200) {
         let parsed: unknown;
         try {
           parsed = JSON.parse(text);
@@ -233,20 +305,21 @@ export class JevClient {
         const usage = readUsage(parsed);
         this.usage.inputTokens += usage.inputTokens;
         this.usage.outputTokens += usage.outputTokens;
+        this.speedUp();
         return { ok: true, answers, usage };
       }
 
       // Out of credits. 402 is what TypeSafe answers with today, and the body names the
       // reason, so a platform that rewrites the status is still recognised.
-      if (response.status === 402 || text.includes('"billing_error"')) {
+      if (status === 402 || text.includes('"billing_error"')) {
         return { ok: false, failure: "billing", message: BILLING_EXHAUSTED };
       }
 
-      if (response.status === 429) {
-        this.limit = 1;
-        const wait = parseRetryAfter(response.headers.get("retry-after")) ?? backoff;
+      if (status === 429) {
+        this.slowDown();
+        const wait = parseRetryAfter(sent.retryAfter) ?? backoff;
         if (attempt < MAX_ATTEMPTS) {
-          this.options.note(`rate limited, waiting ${wait} ms`);
+          this.options.note(`rate limited, waiting ${wait} ms, ${this.limit} calls in flight from now on`);
           await this.sleep(wait);
           backoff = Math.min(backoff * 2, BACKOFF_CAP_MS);
           continue;
@@ -254,29 +327,29 @@ export class JevClient {
         return { ok: false, failure: "rate_limit", message: "rate limited by Jev" };
       }
 
-      if (response.status === 400 && text.includes("max_tokens_exceeded")) {
+      if (status === 400 && text.includes("max_tokens_exceeded")) {
         return { ok: false, failure: "too_large", message: "max_tokens_exceeded" };
       }
 
-      if (response.status === 401 || response.status === 403) {
+      if (status === 401 || status === 403) {
         return { ok: false, failure: "auth", message: AUTH_REJECTED };
       }
 
-      if (response.status >= 500) {
+      if (status >= 500) {
         if (attempt < MAX_ATTEMPTS) {
-          this.options.note(`Jev returned ${response.status}, retrying`);
+          this.options.note(`Jev returned ${status}, retrying`);
           await this.sleep(backoff);
           backoff = Math.min(backoff * 2, BACKOFF_CAP_MS);
           continue;
         }
-        return { ok: false, failure: "server", message: `Jev returned ${response.status}` };
+        return { ok: false, failure: "server", message: `Jev returned ${status}` };
       }
 
       const snippet = this.redact(text.slice(0, 200).replace(/\s+/g, " ").trim());
       return {
         ok: false,
         failure: "client",
-        message: `Jev returned ${response.status}: ${snippet}`,
+        message: `Jev returned ${status}: ${snippet}`,
       };
     }
   }
@@ -290,6 +363,11 @@ export class JevClient {
     const results: NodeOutcome<T>[] = [];
     let active = 0;
     let settled = false;
+
+    // A rejected key, an empty account and a busy machine end the whole run, so the work
+    // still queued is given the same answer instead of asking again and again.
+    const stopsEverything = (failure: FailureClass): boolean =>
+      failure === "busy" || failure === "billing" || failure === "auth";
 
     return new Promise<NodeOutcome<T>[]>((resolve) => {
       const pump = (): void => {
@@ -323,6 +401,12 @@ export class JevClient {
                 return;
               }
               results.push({ node, outcome });
+              if (!outcome.ok && stopsEverything(outcome.failure)) {
+                while (queue.length > 0) {
+                  const waiting = queue.shift();
+                  if (waiting !== undefined) results.push({ node: waiting, outcome });
+                }
+              }
             })
             .catch((error: unknown) => {
               const message = this.redact(error instanceof Error ? error.message : String(error));

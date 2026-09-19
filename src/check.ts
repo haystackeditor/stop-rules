@@ -5,8 +5,9 @@
 
 import * as path from "node:path";
 import { resolveCredentials, TOKEN_REJECTED, type Credentials } from "./credentials.js";
-import { chunkFile, parseDiff } from "./diff.js";
-import { runEngine, type CacheLike } from "./engine.js";
+import { cutFiles } from "./cut.js";
+import { parseDiff } from "./diff.js";
+import { runEngine, type CacheLike, type ReportMode } from "./engine.js";
 import {
   diffTrees,
   emptyTree,
@@ -19,6 +20,7 @@ import {
 import { AUTH_REJECTED, BILLING_EXHAUSTED, type FetchLike } from "./jev.js";
 import { renderReport } from "./report.js";
 import { loadRules } from "./rules.js";
+import { acquireSlot, MACHINE_BUSY, slotsDir } from "./slots.js";
 import {
   acquireLock,
   appendRunLog,
@@ -36,6 +38,20 @@ import type { CheckReport, NotChecked, Rule, RunStats } from "./types.js";
 
 const LOOP_GUARD_ROUNDS = 3;
 const MAX_SESSIONS_KEPT = 100;
+
+/**
+ * Which report to write. `piece` hands the failing piece to the agent and is the product.
+ * `lines` is the old line finding report, kept only so the owner's "test it both ways"
+ * measurement can run. It is not a feature and it is not documented, and both it and this
+ * switch are removed once that test is done.
+ */
+function reportMode(env: NodeJS.ProcessEnv): ReportMode {
+  const raw = env["STOP_RULES_REPORT"];
+  if (raw === undefined) return "piece";
+  const value = raw.trim();
+  if (value === "piece" || value === "lines") return value;
+  throw new Error(`STOP_RULES_REPORT must be piece or lines, not ${JSON.stringify(raw)}.`);
+}
 
 export interface RunOptions {
   cwd: string;
@@ -116,6 +132,16 @@ export async function run(options: RunOptions): Promise<RunOutcome> {
   const credentials = await resolveCredentials(repo.root, env);
   if (!credentials.ok) return cannotRun(credentials.reason);
 
+  // Both of these read the environment, so a bad value is reported before any work.
+  let slotDir: string;
+  let mode: ReportMode;
+  try {
+    slotDir = slotsDir(env);
+    mode = reportMode(env);
+  } catch (error) {
+    return cannotRun(error instanceof Error ? error.message : String(error));
+  }
+
   const stateDir = stateDirFor(repo.gitDir);
   const release = await acquireLock(stateDir);
   if (release === null) {
@@ -129,6 +155,8 @@ export async function run(options: RunOptions): Promise<RunOutcome> {
       rules: rulesLoad.rules,
       credentials: credentials.credentials,
       stateDir,
+      slotDir,
+      mode,
       notes,
       note,
       started,
@@ -145,6 +173,9 @@ interface LockedArgs {
   rules: Rule[];
   credentials: Credentials;
   stateDir: string;
+  /** Where the machine wide Jev slots live. */
+  slotDir: string;
+  mode: ReportMode;
   notes: string[];
   note: (message: string) => void;
   started: number;
@@ -196,17 +227,28 @@ async function runLocked(args: LockedArgs): Promise<RunOutcome> {
   // name here is for a rules file the user pointed somewhere else with --rules.
   const parsed = parseDiff(await diffTrees(repo.root, baseline, snapshot), [rulesRelative]);
   const files = parsed.files;
-  const chunks = files.flatMap(chunkFile);
   // Files the parser could not name are failures, not skips, and they are reported.
   const parseFailures: NotChecked[] = parsed.failures.map((failure) => ({
     file: failure.file,
     reason: failure.reason,
   }));
 
+  // Cut each file into pieces: whole syntactic units, or diff hunks when there is no grammar.
+  let cut;
+  try {
+    cut = await cutFiles(repo.root, snapshot, files);
+  } catch (error) {
+    // A broken install, or the "every added line lands in exactly one piece" check failing.
+    return cannotRun(error instanceof Error ? error.message : String(error));
+  }
+  const pieces = cut.pieces;
+
   const alreadyReported = state.reported;
   const engineResult = await runEngine({
-    chunks,
+    pieces,
     rules,
+    reportMode: args.mode,
+    slot: () => acquireSlot(args.slotDir),
     threshold: options.threshold,
     maxCalls: options.maxCalls,
     model,
@@ -217,8 +259,8 @@ async function runLocked(args: LockedArgs): Promise<RunOutcome> {
     note,
     ...(options.mode === "hook"
       ? {
-          skipFinding: (ruleId: string, chunkText: string) =>
-            alreadyReported[reportedKey(ruleId, chunkText)] !== undefined,
+          skipFinding: (ruleId: string, pieceText: string) =>
+            alreadyReported[reportedKey(ruleId, pieceText)] !== undefined,
         }
       : {}),
     ...(options.sleep ? { sleep: options.sleep } : {}),
@@ -230,23 +272,26 @@ async function runLocked(args: LockedArgs): Promise<RunOutcome> {
   if (engineResult.blocked !== null) {
     await saveCache(stateDir, cache);
     if (engineResult.blocked === "billing") return cannotRun(BILLING_EXHAUSTED);
+    if (engineResult.blocked === "busy") return cannotRun(MACHINE_BUSY);
     return cannotRun(credentials.mode === "team" ? TOKEN_REJECTED : `${AUTH_REJECTED}.`);
   }
 
-  if (chunks.length > 0 && engineResult.answered === 0 && engineResult.transportFailed) {
+  if (pieces.length > 0 && engineResult.answered === 0 && engineResult.transportFailed) {
     await saveCache(stateDir, cache);
-    return cannotRun("could not reach Jev for any chunk of this diff.");
+    return cannotRun("could not reach Jev for any piece of this diff.");
   }
 
-  const notChecked = [...parseFailures, ...engineResult.notChecked];
+  const notChecked = [...parseFailures, ...cut.notChecked, ...engineResult.notChecked];
   const stats: RunStats = {
     files: files.length,
-    chunks: chunks.length,
+    pieces: pieces.length,
     skipped: parsed.skipped.length,
     calls: engineResult.calls,
+    piecesPerCall: engineResult.piecesPerCall,
     cacheHits: engineResult.cacheHits,
     violations: engineResult.violations.length,
     notChecked: notChecked.length,
+    cutByHunk: cut.cutByHunk,
     inputTokens: engineResult.usage.inputTokens,
     outputTokens: engineResult.usage.outputTokens,
     durationMs: Date.now() - started,
@@ -258,14 +303,25 @@ async function runLocked(args: LockedArgs): Promise<RunOutcome> {
     stats,
   };
 
-  const outcome = decide(options, report, state, engineResult.findings, snapshot, engineResult.holdBaseline);
+  const outcome = decide(
+    options,
+    args.mode,
+    report,
+    state,
+    engineResult.findings,
+    snapshot,
+    engineResult.holdBaseline,
+  );
   if (options.mode === "hook") await saveState(stateDir, state);
   await saveCache(stateDir, cache);
   await appendRunLog(stateDir, {
     at: new Date().toISOString(),
     mode: options.mode + (options.stopHookActive === true ? " (stop_hook_active)" : ""),
+    report: args.mode,
     files: stats.files,
-    chunks: stats.chunks,
+    pieces: stats.pieces,
+    piecesPerCall: stats.piecesPerCall,
+    cutByHunk: stats.cutByHunk.length,
     skipped: stats.skipped,
     calls: stats.calls,
     cacheHits: stats.cacheHits,
@@ -283,13 +339,14 @@ async function runLocked(args: LockedArgs): Promise<RunOutcome> {
 /** Applies the hook's session policy and mutates state accordingly. */
 function decide(
   options: RunOptions,
+  mode: ReportMode,
   report: CheckReport,
   state: StopRulesState,
-  findings: readonly { ruleId: string; chunkText: string }[],
+  findings: readonly { ruleId: string; pieceText: string }[],
   snapshot: string,
   holdBaseline: boolean,
 ): RunOutcome {
-  const text = renderReport(report);
+  const text = renderReport(report, mode);
   const hasViolations = report.violations.length > 0;
 
   if (options.mode !== "hook") {
@@ -333,7 +390,7 @@ function decide(
   }
 
   for (const finding of findings) {
-    state.reported[reportedKey(finding.ruleId, finding.chunkText)] = Date.now();
+    state.reported[reportedKey(finding.ruleId, finding.pieceText)] = Date.now();
   }
   if (!holdBaseline) state.lastTree = snapshot;
 

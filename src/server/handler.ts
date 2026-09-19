@@ -14,6 +14,16 @@ export const DEFAULT_UPSTREAM = "https://api.typesafe.ai/v1/systemone";
 export const DEFAULT_MODEL = "jev-latest";
 export const MAX_BODY_BYTES = 1000000;
 export const UPSTREAM_TIMEOUT_MS = 30000;
+/**
+ * How many calls this server instance keeps open to Jev at once. Jev's limit is per account:
+ * measured, 16 in flight is fine and 32 gets about half refused, so one server stays under
+ * it with room for the developers who also run their own key. Past this the server answers
+ * 429 with Retry-After: 1 and the client backs off through the same code path it uses for a
+ * 429 from Jev itself. On a serverless platform this count is per instance.
+ */
+export const MAX_UPSTREAM_IN_FLIGHT = 12;
+
+let inFlight = 0;
 /** The two secrets a deploy has to set. Values are never echoed, only these names. */
 export const REQUIRED_ENV = ["TYPESAFE_API_KEY", "STOP_RULES_TOKEN"];
 
@@ -109,6 +119,7 @@ async function forward(env: ServerEnv, payload: string): Promise<Response> {
   const timer = setTimeout(() => {
     controller.abort();
   }, UPSTREAM_TIMEOUT_MS);
+  inFlight += 1;
   try {
     const response = await fetch(upstream, {
       method: "POST",
@@ -136,6 +147,7 @@ async function forward(env: ServerEnv, payload: string): Promise<Response> {
     });
   } finally {
     clearTimeout(timer);
+    inFlight -= 1;
   }
 }
 
@@ -178,6 +190,17 @@ async function systemone(request: Request, env: ServerEnv): Promise<Response> {
   }
   const reason = rejectPayload(body);
   if (reason !== null) return json(400, { error: "invalid_request", message: reason });
+
+  // Hold the line at the account wide limit: tell the client to come back in a second.
+  if (inFlight >= MAX_UPSTREAM_IN_FLIGHT) {
+    return new Response(
+      JSON.stringify({
+        error: "too_many_requests",
+        message: `this server already has ${MAX_UPSTREAM_IN_FLIGHT} questions open with Jev. Try again in a second.`,
+      }),
+      { status: 429, headers: { "content-type": "application/json", "retry-after": "1" } },
+    );
+  }
 
   const asked = body as { state: unknown; questions: unknown };
   // The model is the server's choice, not the client's.
