@@ -14,7 +14,7 @@ function isRecord(value2) {
   return typeof value2 === "object" && value2 !== null && !Array.isArray(value2);
 }
 function hasViolations(result) {
-  return result.violations.length > 0;
+  return result.pieces.length > 0;
 }
 function parseJsonPayload(stdinText) {
   const trimmed = stdinText.trim();
@@ -2519,6 +2519,18 @@ function isTopLevelAssignedLambda(node, table, root) {
   }
   return false;
 }
+function isFunctionUnit(node, table, depth = 0) {
+  if (table.fn.includes(node.type)) return true;
+  if (table.lambda.includes(node.type)) return true;
+  if (depth > 4) return false;
+  const carrier = table.wrappers.includes(node.type) || table.member.includes(node.type) || node.type === "variable_declarator" || node.type === "assignment";
+  if (!carrier) return false;
+  for (let i2 = 0; i2 < node.namedChildCount; i2 += 1) {
+    const child = node.namedChild(i2);
+    if (child !== null && isFunctionUnit(child, table, depth + 1)) return true;
+  }
+  return false;
+}
 function qualifies(node, table, root) {
   if (table.fn.includes(node.type)) return "fn";
   if (table.member.includes(node.type)) {
@@ -2566,8 +2578,10 @@ function findUnit(root, table, row, column) {
     if (sibling !== null) node = sibling;
   }
   for (let candidate = node; candidate !== null; candidate = candidate.parent) {
-    const kind = qualifies(candidate, table, root);
-    if (kind !== null) return { node: promote(candidate, table), kind };
+    if (qualifies(candidate, table, root) !== null) {
+      const unit2 = promote(candidate, table);
+      return { node: unit2, fn: isFunctionUnit(unit2, table) };
+    }
   }
   let current = node;
   if (current.id === root.id) {
@@ -2583,7 +2597,7 @@ function findUnit(root, table, row, column) {
     }
   }
   const unit = promote(current, table);
-  return { node: unit, kind: `toplevel:${unit.type}` };
+  return { node: unit, fn: isFunctionUnit(unit, table) };
 }
 var NAME_FIELDS = ["name", "declarator", "pattern", "property"];
 var NAME_DEPTH = 2;
@@ -2643,6 +2657,7 @@ function countIn(numbers, from, to) {
   return n;
 }
 var SUBSTANTIVE = /[A-Za-z0-9_]/;
+var TOP_LEVEL_NAME = "top-level code";
 function errorRows(root) {
   const rows = [];
   const walk = (node) => {
@@ -2700,9 +2715,9 @@ function buildPieces(file, source, table, root) {
     const key = `${found.node.startIndex}:${found.node.endPosition.row}:${found.node.type}`;
     if (!units.has(key)) units.set(key, found);
   }
-  if (units.size === 0) units.set("whole", { node: root, kind: `toplevel:${root.type}` });
+  if (units.size === 0) units.set("whole", { node: root, fn: false });
   const base = [...units.values()].map((unit) => ({
-    kind: unit.kind,
+    fn: unit.fn,
     node: unit.node,
     name: unitName(unit.node),
     start: extendedStartRow(unit.node, table) + 1,
@@ -2847,12 +2862,14 @@ function buildPieces(file, source, table, root) {
   const groups = [];
   for (const atom of atoms) {
     const last = groups[groups.length - 1];
-    if (last !== void 0 && last.added.length + atom.added.length <= MAX_ADDED_PER_PIECE) {
+    const fn = atom.span.fn;
+    const merge = last !== void 0 && !fn && !last.fn && last.added.length + atom.added.length <= MAX_ADDED_PER_PIECE;
+    if (merge && last !== void 0) {
       last.atoms.push(atom);
       last.added.push(...atom.added);
       last.indexes.push(...atom.indexes);
     } else {
-      groups.push({ atoms: [atom], added: [...atom.added], indexes: [...atom.indexes] });
+      groups.push({ atoms: [atom], added: [...atom.added], indexes: [...atom.indexes], fn });
     }
   }
   const pieces = [];
@@ -2892,7 +2909,9 @@ function buildPieces(file, source, table, root) {
       file: file.file,
       header: file.header,
       hunks,
-      unitName: firstAtom.span.name,
+      // A run of statements is named by what it is, never by its first line: "import json"
+      // tells the reader nothing about the piece.
+      unitName: group.fn ? firstAtom.span.name : TOP_LEVEL_NAME,
       fromLine: Math.min(...group.atoms.map((atom) => atom.span.start)),
       toLine: Math.max(...group.atoms.map((atom) => atom.span.end)),
       cut: "unit"
@@ -7288,12 +7307,22 @@ async function runEngine(input) {
   }
   const fresh = input.skipFinding === void 0 ? hits : hits.filter((hit) => !input.skipFinding?.(hit.rule.id, chunkText(hit.piece)));
   const findings = fresh.map((hit) => ({ ruleId: hit.rule.id, pieceText: chunkText(hit.piece) }));
-  const violations = input.reportMode === "piece" ? pieceViolations(fresh) : await lineViolations({ client, cache, fresh, model, threshold, note, onFailure: (failure2) => {
-    if (holdsBaseline(failure2)) holdBaseline = true;
-    noteFailure(failure2);
-  }, countCacheHit: () => {
-    cacheHits += 1;
-  } });
+  const localised = input.reportMode === "lines" ? await localiseLines({
+    client,
+    cache,
+    fresh,
+    model,
+    threshold,
+    note,
+    onFailure: (failure2) => {
+      if (holdsBaseline(failure2)) holdBaseline = true;
+      noteFailure(failure2);
+    },
+    countCacheHit: () => {
+      cacheHits += 1;
+    }
+  }) : /* @__PURE__ */ new Map();
+  const pieces = groupByPiece(fresh, localised);
   const fromLineOf = (entry) => entry.fromLine === void 0 ? 0 : entry.fromLine;
   notChecked.sort((a, b) => {
     const fileA = a.file ?? "";
@@ -7301,7 +7330,7 @@ async function runEngine(input) {
     return fileA === fileB ? fromLineOf(a) - fromLineOf(b) : fileA < fileB ? -1 : 1;
   });
   return {
-    violations,
+    pieces,
     notChecked,
     calls: client.calls,
     cacheHits,
@@ -7314,30 +7343,47 @@ async function runEngine(input) {
     findings
   };
 }
-function pieceViolations(fresh) {
-  const violations = fresh.map((hit) => ({
-    file: hit.piece.file,
-    unitName: hit.piece.unitName,
-    fromLine: hit.piece.fromLine,
-    toLine: hit.piece.toLine,
-    diff: chunkText(hit.piece),
-    lines: [],
-    unlocalised: null,
-    ruleId: hit.rule.id,
-    rule: hit.rule.text,
-    confidence: hit.score
-  }));
-  violations.sort(
-    (a, b) => a.file === b.file ? a.fromLine - b.fromLine : a.file < b.file ? -1 : 1
-  );
-  return violations;
+function hitKey(rule, piece) {
+  return `${rule.id}\0${chunkText(piece)}`;
 }
-async function lineViolations(args2) {
+function groupByPiece(fresh, localised) {
+  const byPiece = /* @__PURE__ */ new Map();
+  for (const hit of fresh) {
+    const text = chunkText(hit.piece);
+    const found = localised.get(hitKey(hit.rule, hit.piece));
+    const broken = {
+      ruleId: hit.rule.id,
+      rule: hit.rule.text,
+      confidence: hit.score,
+      lines: found?.lines ?? [],
+      unlocalised: found?.unlocalised ?? null
+    };
+    const existing = byPiece.get(text);
+    if (existing !== void 0) {
+      existing.rules.push(broken);
+      continue;
+    }
+    byPiece.set(text, {
+      file: hit.piece.file,
+      unit: hit.piece.unitName,
+      fromLine: hit.piece.fromLine,
+      toLine: hit.piece.toLine,
+      diff: text,
+      rules: [broken]
+    });
+  }
+  const pieces = [...byPiece.values()];
+  for (const piece of pieces) {
+    piece.rules.sort((a, b) => b.confidence - a.confidence);
+  }
+  pieces.sort((a, b) => a.file === b.file ? a.fromLine - b.fromLine : a.file < b.file ? -1 : 1);
+  return pieces;
+}
+async function localiseLines(args2) {
   const { client, cache, fresh, model, threshold, note } = args2;
   const nodes = [];
   const scores = /* @__PURE__ */ new Map();
   const failures = /* @__PURE__ */ new Map();
-  const hitKey = (rule, piece) => `${rule.id}\0${chunkText(piece)}`;
   for (const hit of fresh) {
     const state = { file: hit.piece.file, diff: chunkText(hit.piece), rule: hit.rule.text };
     const perLine = /* @__PURE__ */ new Map();
@@ -7375,7 +7421,7 @@ async function lineViolations(args2) {
       target?.set(line.line, noul);
     }
   }
-  const entries = /* @__PURE__ */ new Map();
+  const out3 = /* @__PURE__ */ new Map();
   for (const hit of fresh) {
     const key = hitKey(hit.rule, hit.piece);
     const perLine = scores.get(key);
@@ -7385,9 +7431,17 @@ async function lineViolations(args2) {
     const textByLine = new Map(addedLines(hit.piece).map((line) => [line.line, line.text.trim()]));
     const byScore = [...perLine.entries()].sort((a, b) => b[1] - a[1]);
     const above = byScore.filter(([, score]) => score >= threshold).slice(0, MAX_LINES_PER_VIOLATION);
-    const range = chunkRange(hit.piece);
+    const lines = [];
+    for (const [lineNo] of above) {
+      const text = textByLine.get(lineNo);
+      if (text === void 0) {
+        throw new Error(`internal error: line ${lineNo} is not an added line of ${hit.piece.file}`);
+      }
+      lines.push({ line: lineNo, text });
+    }
+    lines.sort((a, b) => a.line - b.line);
     let unlocalised = null;
-    if (above.length === 0) {
+    if (lines.length === 0) {
       const failed2 = failures.get(key);
       if (failed2 !== void 0) unlocalised = failed2;
       else if (byScore.length > 0) unlocalised = `no added line reached the ${threshold} cutoff`;
@@ -7395,66 +7449,9 @@ async function lineViolations(args2) {
         unlocalised = "no added line in this block has text to point at";
       } else unlocalised = "no line scores came back for this block";
     }
-    const entryKey = `${hit.piece.file}\0${hit.rule.id}`;
-    let entry = entries.get(entryKey);
-    if (entry === void 0) {
-      entry = {
-        file: hit.piece.file,
-        unitName: hit.piece.unitName,
-        diff: chunkText(hit.piece),
-        ruleId: hit.rule.id,
-        rule: hit.rule.text,
-        confidence: hit.score,
-        fromLine: range.from,
-        toLine: range.to,
-        unlocalised: [],
-        candidates: /* @__PURE__ */ new Map()
-      };
-      entries.set(entryKey, entry);
-    }
-    entry.confidence = Math.max(entry.confidence, hit.score);
-    entry.fromLine = Math.min(entry.fromLine, range.from);
-    entry.toLine = Math.max(entry.toLine, range.to);
-    if (unlocalised !== null) entry.unlocalised.push(unlocalised);
-    for (const [lineNo, score] of above) {
-      const text = textByLine.get(lineNo);
-      if (text === void 0) {
-        throw new Error(`internal error: line ${lineNo} is not an added line of ${hit.piece.file}`);
-      }
-      const existing = entry.candidates.get(lineNo);
-      if (existing === void 0 || existing.score < score) {
-        entry.candidates.set(lineNo, { text, score });
-      }
-    }
+    out3.set(key, { lines, unlocalised });
   }
-  const violations = [...entries.values()].map((entry) => ({
-    file: entry.file,
-    unitName: entry.unitName,
-    diff: entry.diff,
-    lines: [...entry.candidates.entries()].sort((a, b) => b[1].score - a[1].score).slice(0, MAX_LINES_PER_VIOLATION).map(([line, value2]) => ({ line, text: value2.text })).sort((a, b) => a.line - b.line),
-    fromLine: entry.fromLine,
-    toLine: entry.toLine,
-    unlocalised: unlocalisedFor(entry),
-    ruleId: entry.ruleId,
-    rule: entry.rule,
-    confidence: entry.confidence
-  }));
-  const firstLine = (violation) => {
-    const first = violation.lines[0];
-    return first === void 0 ? violation.fromLine : first.line;
-  };
-  violations.sort(
-    (a, b) => a.file === b.file ? firstLine(a) - firstLine(b) : a.file < b.file ? -1 : 1
-  );
-  return violations;
-}
-function unlocalisedFor(entry) {
-  if (entry.candidates.size > 0) return null;
-  const first = entry.unlocalised[0];
-  if (first === void 0) {
-    throw new Error(`internal error: ${entry.file} has neither a line nor a reason for having none`);
-  }
-  return first;
+  return out3;
 }
 
 // src/report.ts
@@ -7477,55 +7474,59 @@ function notCheckedLine(entry) {
   }
   return `${entry.file} ${where(entry.fromLine, entry.toLine)}: ${entry.reason}`;
 }
-function pieceDiff(violation) {
-  const lines = violation.diff.split("\n").filter((line) => line.length > 0);
+function isDiffHeader(line) {
+  return line.startsWith("diff --git ") || line.startsWith("index ") || line.startsWith("--- ") || line.startsWith("+++ ") || line.startsWith("old mode ") || line.startsWith("new mode ") || line.startsWith("new file mode ") || line.startsWith("deleted file mode ") || line.startsWith("similarity index ") || line.startsWith("rename from ") || line.startsWith("rename to ");
+}
+function pieceDiff(piece) {
+  const lines = piece.diff.split("\n").filter((line) => line.length > 0 && !isDiffHeader(line));
   const shown = lines.slice(0, MAX_PIECE_LINES).map((line) => `   ${line}`);
   const left = lines.length - MAX_PIECE_LINES;
   if (left > 0) shown.push(`   ... ${left} more lines in this piece`);
   return shown;
 }
-function pieceBlock(violation, index) {
-  const unit = violation.unitName === null ? "" : ` in ${violation.unitName}`;
+function ruleLines(rule) {
+  return [`   Rule: ${rule.rule}`, `   Confidence: ${confidence(rule.confidence)}`];
+}
+function pieceBlock(piece, index) {
+  const unit = piece.unit === null ? "" : ` in ${piece.unit}`;
+  const heading = piece.rules.length === 1 ? `${index}. ${piece.file} ${where(piece.fromLine, piece.toLine)}${unit} breaks 1 rule` : `${index}. ${piece.file} ${where(piece.fromLine, piece.toLine)}${unit} breaks ${piece.rules.length} rules`;
   return [
-    `${index}. ${violation.file} ${where(violation.fromLine, violation.toLine)}${unit}`,
-    `   Rule: ${violation.rule}`,
-    `   Confidence: ${confidence(violation.confidence)}`,
+    heading,
+    ...piece.rules.flatMap(ruleLines),
     "   The change this is about:",
-    ...pieceDiff(violation)
+    ...pieceDiff(piece)
   ].join("\n");
 }
-function linesBlock(violation, index) {
-  if (violation.unlocalised !== null) {
-    return [
-      `${index}. ${violation.file} ${where(violation.fromLine, violation.toLine)}`,
-      `   Rule: ${violation.rule}`,
-      `   No single line identified: ${violation.unlocalised}`,
-      `   Confidence: ${confidence(violation.confidence)}`
-    ].join("\n");
+function linesBlock(piece, index) {
+  const out3 = [`${index}. ${piece.file} ${where(piece.fromLine, piece.toLine)}`];
+  for (const rule of piece.rules) {
+    out3.push(`   Rule: ${rule.rule}`);
+    if (rule.unlocalised !== null) {
+      out3.push(`   No single line identified: ${rule.unlocalised}`);
+    } else {
+      for (const line of rule.lines) out3.push(`   Line ${line.line}: ${trimQuoted(line.text)}`);
+    }
+    out3.push(`   Confidence: ${confidence(rule.confidence)}`);
   }
-  const at = violation.lines.map((line) => line.line).join(", ");
-  return [
-    `${index}. ${violation.file}:${at}`,
-    `   Rule: ${violation.rule}`,
-    ...violation.lines.map((line) => `   Line: ${trimQuoted(line.text)}`),
-    `   Confidence: ${confidence(violation.confidence)}`
-  ].join("\n");
+  return out3.join("\n");
 }
 function renderReport(report, mode = "piece") {
-  const { violations, notChecked, stats } = report;
+  const { pieces, notChecked, stats } = report;
   const sections = [];
   const block = mode === "piece" ? pieceBlock : linesBlock;
-  if (violations.length === 0) {
+  if (pieces.length === 0) {
     sections.push(
       stats.pieces === 0 ? "stop-rules: no changes to check." : "stop-rules: no rule violations in your latest changes."
     );
   } else {
-    const count = violations.length === 1 ? "1 rule violation" : `${violations.length} rule violations`;
+    const broken = pieces.reduce((total, piece) => total + piece.rules.length, 0);
+    const count = broken === 1 ? "1 rule violation" : `${broken} rule violations`;
+    const places = pieces.length === 1 ? "1 place" : `${pieces.length} places`;
     sections.push(
-      `stop-rules: ${count} in your latest changes.
+      `stop-rules: ${count} in ${places} in your latest changes.
 Fix each one. If a rule truly should not apply here, leave the code and tell the user why.`
     );
-    sections.push(violations.map((violation, i2) => block(violation, i2 + 1)).join("\n\n"));
+    sections.push(pieces.map((piece, i2) => block(piece, i2 + 1)).join("\n\n"));
   }
   if (notChecked.length === 1) {
     const only = notChecked[0];
@@ -8080,7 +8081,8 @@ async function runLocked(args2) {
     calls: engineResult.calls,
     piecesPerCall: engineResult.piecesPerCall,
     cacheHits: engineResult.cacheHits,
-    violations: engineResult.violations.length,
+    violations: engineResult.pieces.reduce((total, piece) => total + piece.rules.length, 0),
+    places: engineResult.pieces.length,
     notChecked: notChecked.length,
     cutByHunk: cut.cutByHunk,
     inputTokens: engineResult.usage.inputTokens,
@@ -8088,7 +8090,7 @@ async function runLocked(args2) {
     durationMs: Date.now() - started2
   };
   const report = {
-    violations: engineResult.violations,
+    pieces: engineResult.pieces,
     notChecked,
     skipped: parsed.skipped,
     stats
@@ -8127,7 +8129,7 @@ async function runLocked(args2) {
 }
 function decide(options, mode, report, state, findings, snapshot, holdBaseline) {
   const text = renderReport(report, mode);
-  const hasViolations2 = report.violations.length > 0;
+  const hasViolations2 = report.pieces.length > 0;
   if (options.mode !== "hook") {
     return hasViolations2 ? { kind: "violations", report, text } : { kind: "clean", report, text };
   }
@@ -8153,7 +8155,7 @@ function decide(options, mode, report, state, findings, snapshot, holdBaseline) 
     });
   }
   if (handoff) {
-    const headline = `stop-rules: still ${report.violations.length} violations after ${LOOP_GUARD_ROUNDS} rounds, leaving them for the user`;
+    const headline = `stop-rules: still ${report.stats.violations} violations after ${LOOP_GUARD_ROUNDS} rounds, leaving them for the user`;
     return { kind: "handoff", report, text: `${headline}
 
 ${text}` };

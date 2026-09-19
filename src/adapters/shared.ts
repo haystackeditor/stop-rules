@@ -9,7 +9,7 @@ export function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 export function hasViolations(result: CheckResult): boolean {
-  return result.violations.length > 0;
+  return result.pieces.length > 0;
 }
 
 /** Parses the hook payload. Throws a plain Error the CLI can print. */

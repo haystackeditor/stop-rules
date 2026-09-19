@@ -101,11 +101,14 @@ export interface Chunk {
 }
 
 /**
- * A piece: one or more whole syntactic units of one file, or one diff hunk when the file has
- * no grammar. This is what a question is asked about.
+ * A piece: one whole function, a run of statements and declarations, or one diff hunk when the
+ * file has no grammar. This is what a question is asked about.
  */
 export interface Piece extends Chunk {
-  /** The name of the first unit in the piece. Null when the piece was cut by hunk. */
+  /**
+   * The function's name, or "top-level code" for a run of statements and declarations. Null
+   * when the piece was cut by hunk.
+   */
   unitName: string | null;
   /** The new file lines this piece covers. */
   fromLine: number;

@@ -4,8 +4,8 @@ You are a coding agent. This file tells you how to install `stop-rules` in the h
 repository, end to end, and how to prove it works before you say you are done.
 
 `stop-rules` runs after a coding agent finishes a turn. It cuts the code that changed into
-pieces, one or more whole functions each, asks Jev whether any piece breaks one of the team's
-rules, and hands the piece that broke it back to the agent so the agent fixes it.
+pieces, normally one function each, asks Jev whether any piece breaks one of the team's rules,
+and hands the function that broke it back to the agent so the agent fixes it.
 
 ## 1. Ask the human these questions, all at once, before you do anything
 
@@ -166,8 +166,8 @@ rm throwaway-stop-rules-check.ts
 node .stop-rules/stop-rules.mjs check
 ```
 
-Step 1 prints `jev: pass`. Step 3 prints the finding with the file, the line and the rule,
-and exits 2. Step 5 prints "no rule violations" and exits 0.
+Step 1 prints `jev: pass`. Step 3 prints one entry for the function at fault, with the rules
+it breaks and its diff, and exits 2. Step 5 prints "no rule violations" and exits 0.
 
 Match the throwaway file to a rule the team actually has, and to the language of the repo.
 The example above breaks "do not silently swallow errors".

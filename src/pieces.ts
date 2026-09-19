@@ -3,10 +3,14 @@
  *
  * A piece is one or more whole syntactic units of one file: a function, a method, a
  * constructor, a top level assigned lambda, a class member, or, when an added line sits in
- * none of those, the enclosing top level statement. Units are walked in file order and
- * merged with their neighbours until the next one would push the piece past 40 added lines.
- * A unit is never split to make a piece fit; a unit that is itself over 40 added lines is cut
- * at the boundaries between its direct child statements first.
+ * none of those, the enclosing top level statement.
+ *
+ * A callable unit is always a piece on its own, whatever its size, so a rule one function
+ * breaks never drags the function next to it into the report. The other units, meaning
+ * imports, statements, constants, type declarations and plain fields, merge with the units
+ * beside them up to 40 added lines, and a callable between them ends that run. A unit is
+ * never split to make a piece fit; a unit that is itself over 40 added lines is cut at the
+ * boundaries between its direct child statements first.
  *
  * Two rules here were found the hard way on 240 real agent written changes and must stay:
  *
@@ -101,6 +105,35 @@ function isTopLevelAssignedLambda(node: Node, table: UnitTable, root: Node): boo
 
 type UnitKind = "fn" | "member" | "lambda";
 
+/**
+ * Is this unit a callable: a function, a method, a constructor, an accessor, a lambda
+ * assigned at the top level, or a member whose value is one of those? Such a unit is always a
+ * piece of its own, whatever its size, because handing the agent a neighbouring function it
+ * did not break a rule in is noise.
+ *
+ * This asks the node, not the added line that found it. `export function two()` is reached
+ * through the export when the added line is its doc comment and through the function itself
+ * when the added line is in its body, and both have to give the same answer.
+ */
+function isFunctionUnit(node: Node, table: UnitTable, depth = 0): boolean {
+  if (table.fn.includes(node.type)) return true;
+  if (table.lambda.includes(node.type)) return true;
+  if (depth > 4) return false;
+  // Look inside the things that only ever wrap a value: `export`, a decorator, `const x =`,
+  // a field. A statement that merely contains a call is not a function.
+  const carrier =
+    table.wrappers.includes(node.type) ||
+    table.member.includes(node.type) ||
+    node.type === "variable_declarator" ||
+    node.type === "assignment";
+  if (!carrier) return false;
+  for (let i = 0; i < node.namedChildCount; i += 1) {
+    const child = node.namedChild(i);
+    if (child !== null && isFunctionUnit(child, table, depth + 1)) return true;
+  }
+  return false;
+}
+
 function qualifies(node: Node, table: UnitTable, root: Node): UnitKind | null {
   if (table.fn.includes(node.type)) return "fn";
   if (table.member.includes(node.type)) {
@@ -145,7 +178,8 @@ function nearestChild(parent: Node, row: number): Node | null {
 
 interface FoundUnit {
   node: Node;
-  kind: string;
+  /** True when this unit is a callable, which always stands alone as its own piece. */
+  fn: boolean;
 }
 
 /** The unit an added line belongs to. */
@@ -167,8 +201,10 @@ function findUnit(root: Node, table: UnitTable, row: number, column: number): Fo
   }
 
   for (let candidate: Node | null = node; candidate !== null; candidate = candidate.parent) {
-    const kind = qualifies(candidate, table, root);
-    if (kind !== null) return { node: promote(candidate, table), kind };
+    if (qualifies(candidate, table, root) !== null) {
+      const unit = promote(candidate, table);
+      return { node: unit, fn: isFunctionUnit(unit, table) };
+    }
   }
 
   // No enclosing function or member: the enclosing top level statement or declaration.
@@ -186,7 +222,7 @@ function findUnit(root: Node, table: UnitTable, row: number, column: number): Fo
     }
   }
   const unit = promote(current, table);
-  return { node: unit, kind: `toplevel:${unit.type}` };
+  return { node: unit, fn: isFunctionUnit(unit, table) };
 }
 
 const NAME_FIELDS = ["name", "declarator", "pattern", "property"];
@@ -262,7 +298,8 @@ interface Span {
   end: number;
   unitStart: number;
   name: string;
-  kind: string;
+  /** True when the unit this span came from is a callable. */
+  fn: boolean;
   node: Node;
 }
 
@@ -273,6 +310,9 @@ function countIn(numbers: readonly number[], from: number, to: number): number {
 }
 
 const SUBSTANTIVE = /[A-Za-z0-9_]/;
+
+/** What a piece of statements, imports, constants and fields is called in the report. */
+export const TOP_LEVEL_NAME = "top-level code";
 
 /** Every ERROR or missing node's row range, so a caller can see what failed to parse. */
 export function errorRows(root: Node): number[] {
@@ -354,11 +394,11 @@ export function buildPieces(
     const key = `${found.node.startIndex}:${found.node.endPosition.row}:${found.node.type}`;
     if (!units.has(key)) units.set(key, found);
   }
-  if (units.size === 0) units.set("whole", { node: root, kind: `toplevel:${root.type}` });
+  if (units.size === 0) units.set("whole", { node: root, fn: false });
 
   // 2. Spans, with inner unit spans subtracted from the units that contain them.
   const base = [...units.values()].map((unit) => ({
-    kind: unit.kind,
+    fn: unit.fn,
     node: unit.node,
     name: unitName(unit.node),
     start: extendedStartRow(unit.node, table) + 1,
@@ -528,16 +568,24 @@ export function buildPieces(
     });
   }
 
-  // 7. Greedy merge of neighbouring whole units, at most 40 added lines per piece.
-  const groups: { atoms: Atom[]; added: number[]; indexes: number[] }[] = [];
+  // 7. A function stands alone. Neighbouring non-function units merge up to 40 added lines,
+  // and a function between them ends the run, so a piece is either one function or a run of
+  // statements and declarations.
+  const groups: { atoms: Atom[]; added: number[]; indexes: number[]; fn: boolean }[] = [];
   for (const atom of atoms) {
     const last = groups[groups.length - 1];
-    if (last !== undefined && last.added.length + atom.added.length <= MAX_ADDED_PER_PIECE) {
+    const fn = atom.span.fn;
+    const merge =
+      last !== undefined &&
+      !fn &&
+      !last.fn &&
+      last.added.length + atom.added.length <= MAX_ADDED_PER_PIECE;
+    if (merge && last !== undefined) {
       last.atoms.push(atom);
       last.added.push(...atom.added);
       last.indexes.push(...atom.indexes);
     } else {
-      groups.push({ atoms: [atom], added: [...atom.added], indexes: [...atom.indexes] });
+      groups.push({ atoms: [atom], added: [...atom.added], indexes: [...atom.indexes], fn });
     }
   }
 
@@ -587,7 +635,9 @@ export function buildPieces(
       file: file.file,
       header: file.header,
       hunks,
-      unitName: firstAtom.span.name,
+      // A run of statements is named by what it is, never by its first line: "import json"
+      // tells the reader nothing about the piece.
+      unitName: group.fn ? firstAtom.span.name : TOP_LEVEL_NAME,
       fromLine: Math.min(...group.atoms.map((atom) => atom.span.start)),
       toLine: Math.max(...group.atoms.map((atom) => atom.span.end)),
       cut: "unit",

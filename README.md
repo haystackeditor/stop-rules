@@ -1,10 +1,10 @@
 # stop-rules
 
 `stop-rules` holds your coding agent to your team's written coding rules. When the agent
-finishes a turn, it cuts the code changed since the last check into pieces, one or more whole
-functions each, and asks [Jev](https://typesafe.ai) one yes or no question per piece and per
-rule. If a rule is likely broken, it hands the piece that broke it back to the agent so it
-fixes it before you see it.
+finishes a turn, it cuts the code changed since the last check into pieces, normally one
+function each, and asks [Jev](https://typesafe.ai) one yes or no question per piece and per
+rule. If a rule is likely broken, it hands that one function back to the agent so it fixes it
+before you see it.
 
 Using a coding agent? Point it at [AGENT-SETUP.md](AGENT-SETUP.md) and let it do the
 install.
@@ -97,7 +97,7 @@ contract, so if your Cline never runs it, that is why.
 
 ## Which languages it can cut into pieces
 
-A change is judged one piece at a time, and a piece is one or more whole functions. That
+A change is judged one piece at a time, and a piece is normally one whole function. That
 needs a parser, so these are the languages it has one for:
 
 <!-- languages -->
@@ -147,18 +147,20 @@ one piece of a change cannot show ("keep the service boundaries tidy").
 1. **What changed.** The working tree is written to a git tree object through a temporary
    index, so your own index and staged changes are never touched. That snapshot is diffed
    against the tree from the last check, so each turn only pays for new work.
-2. **Pieces.** Each changed file is parsed, and its diff is cut into pieces. A piece is one
-   or more whole functions: the function, method, constructor or class member each added line
-   sits in, with neighbours merged in until the piece holds 40 added lines. A file with no
-   grammar is cut by diff hunk instead. Lock files, minified bundles, data and log files,
-   binaries and deletions are skipped.
+2. **Pieces.** Each changed file is parsed, and its diff is cut into pieces. A function,
+   method, constructor or accessor is always a piece of its own, whatever its size, so a rule
+   one function breaks never drags a neighbour in with it. Everything else, meaning imports,
+   top level statements, constants, type declarations and plain fields, groups with the
+   neighbours next to it into a piece of up to 40 added lines, and a function between them
+   ends that group. A file with no grammar is cut by diff hunk instead. Lock files, minified
+   bundles, data and log files, binaries and deletions are skipped.
 3. **One yes or no score per rule.** Every piece is asked about every rule: does the added
    code break this rule. Jev answers each claim with a probability. At or above the cutoff
    (0.6 by default) it is a finding. Up to four pieces ride in one request, and a request is
    also bounded at 60,000 bytes, so a normal turn is one or two requests.
-4. **Tell the agent.** Each finding is the file, the line range, the name of the function,
-   the rule in full, the score, and the piece's own diff. The agent gets the code that broke
-   the rule, not a line number to go and find.
+4. **Tell the agent.** One entry per piece: the file, the line range, the name of the
+   function, then every rule that piece broke with its score, and then the piece's diff once.
+   The agent gets the code that broke the rule, not a line number to go and find.
 
 It never nags twice: a finding the hook has already delivered in this repo is not delivered
 again. A second run over the same code costs nothing, because every answer is cached in the
@@ -250,8 +252,7 @@ that is set but empty is an error, not a shrug.
 - You need a Jev API key from TypeSafe.
 - Each piece is judged on its own, so rules about cross-file architecture or consistency
   across a codebase are weak.
-- A piece is whole functions, so a rule about how two functions fit together is only seen
-  when both of them are in the same piece.
+- A piece is one function, so a rule about how two functions fit together is not seen at all.
 - A file in a language with no grammar here is cut by diff hunk, which is blunter. A file
   that will not parse is reported as not checked, never checked half way.
 - Only Claude Code can run the check in the background. Everywhere else the hook blocks

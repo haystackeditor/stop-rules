@@ -289,7 +289,8 @@ async function runLocked(args: LockedArgs): Promise<RunOutcome> {
     calls: engineResult.calls,
     piecesPerCall: engineResult.piecesPerCall,
     cacheHits: engineResult.cacheHits,
-    violations: engineResult.violations.length,
+    violations: engineResult.pieces.reduce((total, piece) => total + piece.rules.length, 0),
+    places: engineResult.pieces.length,
     notChecked: notChecked.length,
     cutByHunk: cut.cutByHunk,
     inputTokens: engineResult.usage.inputTokens,
@@ -297,7 +298,7 @@ async function runLocked(args: LockedArgs): Promise<RunOutcome> {
     durationMs: Date.now() - started,
   };
   const report: CheckReport = {
-    violations: engineResult.violations,
+    pieces: engineResult.pieces,
     notChecked,
     skipped: parsed.skipped,
     stats,
@@ -347,7 +348,7 @@ function decide(
   holdBaseline: boolean,
 ): RunOutcome {
   const text = renderReport(report, mode);
-  const hasViolations = report.violations.length > 0;
+  const hasViolations = report.pieces.length > 0;
 
   if (options.mode !== "hook") {
     // check is read only: it advances nothing and remembers nothing.
@@ -385,7 +386,7 @@ function decide(
   if (handoff) {
     // Leave the findings unreported and the baseline where it is, so the user still sees
     // them and a later run picks the same changes up again.
-    const headline = `stop-rules: still ${report.violations.length} violations after ${LOOP_GUARD_ROUNDS} rounds, leaving them for the user`;
+    const headline = `stop-rules: still ${report.stats.violations} violations after ${LOOP_GUARD_ROUNDS} rounds, leaving them for the user`;
     return { kind: "handoff", report, text: `${headline}\n\n${text}` };
   }
 

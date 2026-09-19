@@ -21,26 +21,36 @@ export interface ViolationLine {
   text: string;
 }
 
-export interface Violation {
-  file: string;
-  /** The name of the unit the piece starts at. Null when the piece was cut by diff hunk. */
-  unitName: string | null;
-  /** First and last new file line of the piece this finding came from. */
-  fromLine: number;
-  toLine: number;
-  /** The piece's diff text, which the report hands to the agent as it is. */
-  diff: string;
+/** One rule a piece broke. */
+export interface BrokenRule {
+  ruleId: string;
+  /** The rule in full. Never shortened. */
+  rule: string;
+  confidence: number;
   /**
    * Only filled by the old line finding report: the lines that reached the cutoff, at most
    * 3, ascending. Empty in the piece report, which names no line.
    */
   lines: ViolationLine[];
-  /** Why no line is named, in plain words. Null when `lines` holds them. */
+  /** Why no line is named, in plain words. Null in the piece report and when lines holds them. */
   unlocalised: string | null;
-  ruleId: string;
-  rule: string;
-  /** The score for this (piece, rule). */
-  confidence: number;
+}
+
+/** One piece and every rule it broke. This is one entry of the report. */
+export interface PieceFinding {
+  file: string;
+  /**
+   * The function this piece is, or "top-level code" for a piece of statements and
+   * declarations. Null when the file has no grammar and was cut by diff hunk.
+   */
+  unit: string | null;
+  /** First and last new file line of the piece. */
+  fromLine: number;
+  toLine: number;
+  /** The piece's diff text, printed once for the whole entry. */
+  diff: string;
+  /** The rules this piece broke, highest confidence first. */
+  rules: BrokenRule[];
 }
 
 export interface NotChecked {
@@ -67,7 +77,10 @@ export interface RunStats {
   /** How many pieces rode in each call, in call order. */
   piecesPerCall: number[];
   cacheHits: number;
+  /** Rules broken, counted per (piece, rule) pair. */
   violations: number;
+  /** Pieces that broke at least one rule, which is how many entries the report has. */
+  places: number;
   notChecked: number;
   /** Files cut by diff hunk instead of by syntax, and why. */
   cutByHunk: CutByHunk[];
@@ -83,7 +96,8 @@ export interface CutByHunk {
 }
 
 export interface CheckReport {
-  violations: Violation[];
+  /** One entry per piece that broke a rule, in file then line order. */
+  pieces: PieceFinding[];
   notChecked: NotChecked[];
   skipped: SkippedFile[];
   stats: RunStats;
