@@ -1,0 +1,26 @@
+{
+  "name": "stop-rules",
+  "version": "0.1.0",
+  "description": "Claude Code Stop hook that checks each turn's diff against your team's coding rules using Jev.",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "stop-rules": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "typescript": "^5.7.2"
+  }
+}
