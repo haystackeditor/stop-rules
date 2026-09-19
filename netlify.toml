@@ -1,5 +1,5 @@
 [build]
-  command = "npm run build"
+  command = "npm run build:server"
   publish = "public"
 
 # The Deploy to Netlify button turns these placeholders into labelled prompts.

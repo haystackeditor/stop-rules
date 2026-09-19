@@ -66,20 +66,19 @@ click-tested until the owner makes the repository public.
 | Target | How | Prompts for | Endpoint afterwards | Status |
 |---|---|---|---|---|
 | Cloudflare Workers | Deploy button, or `npx wrangler deploy` | both secrets, from `.dev.vars.example` | `https://stop-rules.<subdomain>.workers.dev` | ran locally in the platform's own runtime (workerd) |
-| Deno Deploy | New app from the repo, entrypoint `deploy/deno/main.ts` | both secrets, in the dashboard | the app's URL | ran locally in the platform's own runtime (Deno 2.9.7) |
-| Supabase Edge Functions | `supabase functions deploy stop-rules` | `supabase secrets set` | `https://<ref>.functions.supabase.co/stop-rules` | ran locally in Deno, which is the runtime Supabase uses; the Supabase CLI was not available here |
-| Any Docker host, VM or laptop | `docker build` then `docker run`, or `npm start`, or `stop-rules serve` | env vars you pass | wherever you publish port 8080 | ran locally (image built and served real traffic) |
-| Google Cloud Run | Run on Google Cloud button | both secrets, from `app.json` | the Cloud Run service URL | image ran locally, `app.json` config validated only |
-| Render | Deploy to Render button | both secrets, from `render.yaml` `sync: false` | the Render service URL | image ran locally, `render.yaml` config validated only |
-| Fly.io | `fly launch` then `fly secrets set` | nothing, you set secrets by command | `https://<app>.fly.dev` | image ran locally, `fly.toml` config validated only |
-| DigitalOcean App Platform | Deploy to DO button | both secrets, from `.do/deploy.template.yaml` | the App Platform URL | image ran locally, template config validated only |
-| Heroku | Deploy to Heroku button | both secrets, from `app.json` | `https://<app>-<hash>.herokuapp.com` | image ran locally, `app.json` and `heroku.yml` config validated only |
-| Railway | `railway up`, or a template the owner publishes | env vars you set | the Railway service URL | docs-confirmed only |
-| AWS Lambda | CloudFormation Launch Stack, function inlined in the template | both secrets, as `NoEcho` parameters | the function URL, from the stack output | the generated inline function ran locally under Node 22 against Function URL events; template config validated only |
 | Vercel | Deploy button | both secrets, from the `env` query parameter | `https://<app>.vercel.app/api` | config validated only, wrapper executed under Node |
 | Netlify | Deploy to Netlify button | both secrets, from `netlify.toml` | the site URL | config validated only, wrapper executed under Node |
+| Render | Deploy to Render button | both secrets, from `render.yaml` `sync: false` | the Render service URL | image ran locally, `render.yaml` config validated only |
+| Google Cloud Run | Run on Google Cloud button | both secrets, from `app.json` | the Cloud Run service URL | image ran locally, `app.json` config validated only |
+| Heroku | Deploy to Heroku button | both secrets, from `app.json` | `https://<app>-<hash>.herokuapp.com` | image ran locally, `app.json` and `heroku.yml` config validated only |
+| DigitalOcean App Platform | Deploy to DO button | both secrets, from `.do/deploy.template.yaml` | the App Platform URL | image ran locally, template config validated only |
+| AWS Lambda | CloudFormation Launch Stack, function inlined in the template | both secrets, as `NoEcho` parameters | the function URL, from the stack output | the generated inline function ran locally under Node 22 against Function URL events; template config validated only |
+| Deno Deploy | New app from the repo, entrypoint `deploy/deno/main.ts` | both secrets, in the dashboard | the app's URL | ran locally in the platform's own runtime (Deno 2.9.7) |
+| Supabase Edge Functions | `supabase functions deploy stop-rules` | `supabase secrets set` | `https://<ref>.functions.supabase.co/stop-rules` | ran locally in Deno, which is the runtime Supabase uses; the Supabase CLI was not available here |
+| Fly.io | `fly launch` then `fly secrets set` | nothing, you set secrets by command | `https://<app>.fly.dev` | image ran locally, `fly.toml` config validated only |
+| Any Docker host, VM or laptop | `docker build` then `docker run`, or `npm start`, or `stop-rules serve` | env vars you pass | wherever you publish port 8080 | ran locally (image built and served real traffic) |
+| Railway | `railway up`, or a template the owner publishes | env vars you set | the Railway service URL | docs-confirmed only |
 | Azure Container Apps | Deploy to Azure button, on a published image | both secrets, as `secureString` parameters | the container app FQDN | config validated only, and it needs a published image first |
-
 ### Cloudflare Workers
 
 ```markdown
@@ -99,40 +98,43 @@ The Worker entry module is `src/server/cloudflare.ts`, not `handler.ts`, because
 refuses to start a Worker whose entry module has a named export that is not a handler. That
 is a real failure this was caught on, not a precaution.
 
-### Deno Deploy
+### Vercel
 
-Create an app from the repository and set the entrypoint to `deploy/deno/main.ts`. There is
-no build step: Deno runs the TypeScript directly. Set both secrets as environment variables
-in the dashboard. A `deno.json` is optional, so this repository does not ship one.
-
-### Supabase Edge Functions
-
-```bash
-supabase secrets set TYPESAFE_API_KEY=... STOP_RULES_TOKEN=...
-supabase functions deploy stop-rules
+```markdown
+[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/clone?repository-url=https%3A%2F%2Fgithub.com%2Fhaystackeditor%2Fstop-rules&env=TYPESAFE_API_KEY,STOP_RULES_TOKEN&envDescription=Your%20Jev%20API%20key%20and%20a%20team%20token)
 ```
 
-`supabase/config.toml` sets `verify_jwt = false` for this function, because it
-authenticates with your team token rather than a Supabase JWT. The function strips its own
-`/functions/v1/stop-rules` mount prefix, so the endpoint to give `stop-rules team` is the
-function's own URL.
+The endpoint to give `stop-rules team` is `https://<app>.vercel.app/api`. Vercel routes by
+file name, so `api/health.ts` and `api/v1/systemone.ts` are the two routes and no rewrite
+rule is involved. `vercel.json` sets `buildCommand` to `npm run build:server`, which is the
+TypeScript compile on its own, and serves `public/`
+as the site.
 
-### Any Docker host, VM or laptop
+Unconfirmed: the button image URL `https://vercel.com/button` is the one everyone uses but
+it does not appear in the documentation pages that were read.
 
-```bash
-docker build -t stop-rules .
-docker run -p 8080:8080 \
-  -e TYPESAFE_API_KEY=... -e STOP_RULES_TOKEN=... stop-rules
+### Netlify
+
+```markdown
+[![Deploy to Netlify](https://www.netlify.com/img/deploy/button.svg)](https://app.netlify.com/start/deploy?repository=https://github.com/haystackeditor/stop-rules)
 ```
 
-Or with Node 20 or newer and no container:
+`netlify.toml` builds with `npm run build:server`, publishes `public/`, and lists both secrets
+under `[template.environment]`, whose placeholder strings become the labels the button
+shows. `netlify/functions/stop-rules.mts` declares
+`config = { path: ["/health", "/v1/systemone"] }`, so those two paths go to the function and
+the site root stays a static page. The endpoint to give `stop-rules team` is the site URL.
 
-```bash
-npm ci && npm run build
-TYPESAFE_API_KEY=... STOP_RULES_TOKEN=... npm start        # or: stop-rules serve --port 8080
+### Render
+
+```markdown
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/haystackeditor/stop-rules)
 ```
 
-The image is `node:22-alpine`, listens on `$PORT` (default 8080) and binds `0.0.0.0`.
+`render.yaml` declares a Docker web service with `healthCheckPath: /health` and both secrets
+as `sync: false`, which is what makes Render prompt for them while creating the blueprint.
+It also sets `autoDeployTrigger: "off"`, so a button deploy does not redeploy itself on
+every push to this repository. Add `/tree/<branch>` to the `repo` parameter for a branch.
 
 ### Google Cloud Run
 
@@ -149,27 +151,15 @@ accept. See the source notes: the Cloud Run button rejects unknown keys but deli
 accepts Heroku's `description`, `keywords`, `logo`, `repository`, `website`, `stack` and
 `formation`.
 
-### Render
+### Heroku
 
 ```markdown
-[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/haystackeditor/stop-rules)
+[![Deploy to Heroku](https://www.herokucdn.com/deploy/button.svg)](https://www.heroku.com/deploy?template=https://github.com/haystackeditor/stop-rules)
 ```
 
-`render.yaml` declares a Docker web service with `healthCheckPath: /health` and both secrets
-as `sync: false`, which is what makes Render prompt for them while creating the blueprint.
-It also sets `autoDeployTrigger: "off"`, so a button deploy does not redeploy itself on
-every push to this repository. Add `/tree/<branch>` to the `repo` parameter for a branch.
-
-### Fly.io
-
-```bash
-fly launch                      # rewrites app and primary_region in fly.toml for you
-fly secrets set TYPESAFE_API_KEY=... STOP_RULES_TOKEN=...
-fly deploy
-```
-
-`fly.toml` builds the `Dockerfile`, serves `internal_port = 8080`, forces HTTPS and health
-checks `/health`. Fly has no deploy button: its documented path is the CLI.
+Root `app.json` provides the two prompts and sets `"stack": "container"`, so Heroku builds
+`heroku.yml`, which builds the same `Dockerfile`. Heroku sets `$PORT` itself. Buttons do not
+work on Heroku's Fir generation.
 
 ### DigitalOcean App Platform
 
@@ -181,29 +171,6 @@ checks `/health`. Fly has no deploy button: its documented path is the CLI.
 button requires. The two env vars are declared with `type: SECRET` and **no** value, which
 is what makes App Platform prompt for them. The deploy button supports public repositories
 only.
-
-### Heroku
-
-```markdown
-[![Deploy to Heroku](https://www.herokucdn.com/deploy/button.svg)](https://www.heroku.com/deploy?template=https://github.com/haystackeditor/stop-rules)
-```
-
-Root `app.json` provides the two prompts and sets `"stack": "container"`, so Heroku builds
-`heroku.yml`, which builds the same `Dockerfile`. Heroku sets `$PORT` itself. Buttons do not
-work on Heroku's Fir generation.
-
-### Railway
-
-Railway's deploy button needs a template that the repository owner publishes from the
-Railway dashboard first, at `https://railway.com/new/template/<code>`. That is an owner
-action and this repository does not fake it. Until then:
-
-```bash
-railway up                      # Railway builds the Dockerfile it finds at the root
-```
-
-Then set both variables on the service. This repository ships no `railway.json`, because
-Railway's config as code is deprecated and new services cannot opt into it.
 
 ### AWS Lambda
 
@@ -223,9 +190,8 @@ purpose, so the two boxes are filled in by hand in the console.
 The inline code is generated, never hand written:
 
 ```bash
-npm run build
-node deploy/aws/generate-template.ts            # rewrite the template
-node deploy/aws/generate-template.ts --check    # fail if the committed template is stale
+npm run build          # compiles, bundles, and checks that the template below is current
+npm run build:aws      # rewrite deploy/aws/template.yaml after changing the server
 ```
 
 Unconfirmed: whether the console accepts a `raw.githubusercontent.com` URL as
@@ -233,31 +199,64 @@ Unconfirmed: whether the console accepts a `raw.githubusercontent.com` URL as
 example uses an S3 URL, so copying `template.yaml` into a public S3 bucket is the safe way
 to publish the link.
 
-### Vercel
+### Deno Deploy
 
-```markdown
-[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/clone?repository-url=https%3A%2F%2Fgithub.com%2Fhaystackeditor%2Fstop-rules&env=TYPESAFE_API_KEY,STOP_RULES_TOKEN&envDescription=Your%20Jev%20API%20key%20and%20a%20team%20token)
+Create an app from the repository and set the entrypoint to `deploy/deno/main.ts`. There is
+no build step: Deno runs the TypeScript directly. Set both secrets as environment variables
+in the dashboard. A `deno.json` is optional, so this repository does not ship one.
+
+### Supabase Edge Functions
+
+```bash
+supabase secrets set TYPESAFE_API_KEY=... STOP_RULES_TOKEN=...
+supabase functions deploy stop-rules
 ```
 
-The endpoint to give `stop-rules team` is `https://<app>.vercel.app/api`. Vercel routes by
-file name, so `api/health.ts` and `api/v1/systemone.ts` are the two routes and no rewrite
-rule is involved. `vercel.json` sets `buildCommand` to `npm run build` and serves `public/`
-as the site.
+`supabase/config.toml` sets `verify_jwt = false` for this function, because it
+authenticates with your team token rather than a Supabase JWT. The function strips its own
+`/functions/v1/stop-rules` mount prefix, so the endpoint to give `stop-rules team` is the
+function's own URL.
 
-Unconfirmed: the button image URL `https://vercel.com/button` is the one everyone uses but
-it does not appear in the documentation pages that were read.
+### Fly.io
 
-### Netlify
-
-```markdown
-[![Deploy to Netlify](https://www.netlify.com/img/deploy/button.svg)](https://app.netlify.com/start/deploy?repository=https://github.com/haystackeditor/stop-rules)
+```bash
+fly launch                      # rewrites app and primary_region in fly.toml for you
+fly secrets set TYPESAFE_API_KEY=... STOP_RULES_TOKEN=...
+fly deploy
 ```
 
-`netlify.toml` builds with `npm run build`, publishes `public/`, and lists both secrets
-under `[template.environment]`, whose placeholder strings become the labels the button
-shows. `netlify/functions/stop-rules.mts` declares
-`config = { path: ["/health", "/v1/systemone"] }`, so those two paths go to the function and
-the site root stays a static page. The endpoint to give `stop-rules team` is the site URL.
+`fly.toml` builds the `Dockerfile`, serves `internal_port = 8080`, forces HTTPS and health
+checks `/health`. Fly has no deploy button: its documented path is the CLI.
+
+### Any Docker host, VM or laptop
+
+```bash
+docker build -t stop-rules .
+docker run -p 8080:8080 \
+  -e TYPESAFE_API_KEY=... -e STOP_RULES_TOKEN=... stop-rules
+```
+
+Or with Node 20 or newer and no container:
+
+```bash
+npm ci && npm run build:server
+TYPESAFE_API_KEY=... STOP_RULES_TOKEN=... npm start        # or: stop-rules serve --port 8080
+```
+
+The image is `node:22-alpine`, listens on `$PORT` (default 8080) and binds `0.0.0.0`.
+
+### Railway
+
+Railway's deploy button needs a template that the repository owner publishes from the
+Railway dashboard first, at `https://railway.com/new/template/<code>`. That is an owner
+action and this repository does not fake it. Until then:
+
+```bash
+railway up                      # Railway builds the Dockerfile it finds at the root
+```
+
+Then set both variables on the service. This repository ships no `railway.json`, because
+Railway's config as code is deprecated and new services cannot opt into it.
 
 ### Azure Container Apps
 
