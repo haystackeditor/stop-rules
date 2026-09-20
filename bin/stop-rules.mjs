@@ -1546,7 +1546,7 @@ async function resolveApiKey(env) {
 import { promises as fs8 } from "node:fs";
 import * as path14 from "node:path";
 var SETTINGS_FILE = ".stop-rules.json";
-var DEFAULT_CUT = "functions";
+var DEFAULT_CUT = "hunks";
 var KNOWN_KEYS = ["endpoint", "cut", "threshold", "maxCalls"];
 function parseSettings(file, raw) {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
@@ -7154,7 +7154,7 @@ async function cutFiles(files, options) {
 }
 
 // src/engine.ts
-var DEFAULT_THRESHOLD = 0.6;
+var DEFAULT_THRESHOLD = 0.5;
 var DEFAULT_MAX_CALLS = 60;
 var PIECES_PER_CALL = 4;
 var PACK_MAX_BYTES = 6e4;
@@ -8599,7 +8599,10 @@ function renderInit(report) {
   const megabytes = (grammars.bytes / 1e6).toFixed(1);
   if (report.cut !== "functions") {
     lines.push(
-      `  cut: ${report.cut}, so no parser and no grammars were copied (${VENDOR_DIR} is ${megabytes} MB)`
+      report.cut === "hunks" ? `  cutting by git diff hunk, no grammar files needed (${VENDOR_DIR} is ${megabytes} MB)` : `  cutting by groups of git diff hunks, no grammar files needed (${VENDOR_DIR} is ${megabytes} MB)`
+    );
+    lines.push(
+      "  run init --cut functions to cut by whole function with tree-sitter"
     );
   } else {
     lines.push(
@@ -8964,7 +8967,7 @@ Options:
   --dir <path>         the repository to work on (default: the one holding the current folder)
   --team <endpoint>    init mode only: use your team's stop-rules server, not your own key
   --rules <path>       rules file (default <repo root>/.stop-rules.md)
-  --cut <mode>         functions (tree-sitter), hunks or chunks (no parser) (default ${DEFAULT_CUT})
+  --cut <mode>         hunks or chunks (no parser), functions (tree-sitter) (default ${DEFAULT_CUT})
   --threshold <0..1>   score at or above which a rule counts as violated (default ${DEFAULT_THRESHOLD})
   --max-calls <n>      hard ceiling on requests to Jev in one run (default ${DEFAULT_MAX_CALLS})
   --base <rev>         check and score modes: diff this revision against the working tree

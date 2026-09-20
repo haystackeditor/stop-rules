@@ -394,8 +394,15 @@ export function renderInit(report: InitReport): string[] {
   const grammars = report.grammars;
   const megabytes = (grammars.bytes / 1_000_000).toFixed(1);
   if (report.cut !== "functions") {
+    // The default install. Say what it does and what the other mode would add, because a
+    // line that only says "no grammars were copied" reads as something that went wrong.
     lines.push(
-      `  cut: ${report.cut}, so no parser and no grammars were copied (${VENDOR_DIR} is ${megabytes} MB)`,
+      report.cut === "hunks"
+        ? `  cutting by git diff hunk, no grammar files needed (${VENDOR_DIR} is ${megabytes} MB)`
+        : `  cutting by groups of git diff hunks, no grammar files needed (${VENDOR_DIR} is ${megabytes} MB)`,
+    );
+    lines.push(
+      "  run init --cut functions to cut by whole function with tree-sitter",
     );
   } else {
     lines.push(

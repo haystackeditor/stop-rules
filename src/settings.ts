@@ -3,7 +3,7 @@
  * It is committed and holds no secret. Every key is optional. A flag on the command line
  * beats the file.
  *
- * Keys: `endpoint` (the team server), `cut` (functions, hunks or chunks), `threshold` (0 to 1),
+ * Keys: `endpoint` (the team server), `cut` (hunks, functions or chunks), `threshold` (0 to 1),
  * `maxCalls` (whole number of Jev requests per run). Anything else in the file, a value of
  * the wrong type, and a value out of range are all errors that name the key.
  */
@@ -14,8 +14,16 @@ import type { CutMode } from "./types.js";
 
 export const SETTINGS_FILE = ".stop-rules.json";
 
-/** The default way to cut a change into pieces. The one place this default is written. */
-export const DEFAULT_CUT: CutMode = "functions";
+/**
+ * The default way to cut a change into pieces, and the one place this default is written.
+ *
+ * It is `hunks`: one git diff hunk per piece. Nothing is parsed, so an install is one file,
+ * every language is covered, and a file that will not parse is still checked. A team that
+ * wants a whole function per piece switches to `functions` with `init --cut functions` or
+ * `"cut": "functions"` in this file, which copies the tree-sitter runtime and the grammars
+ * for the ten languages it knows. Nothing switches mode on its own.
+ */
+export const DEFAULT_CUT: CutMode = "hunks";
 
 export interface Settings {
   /** The team server every developer's hook sends questions to. */

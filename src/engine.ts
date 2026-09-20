@@ -18,10 +18,16 @@ import {
 import type { BrokenRule, NotChecked, PieceFinding, PieceScore, Rule } from "./types.js";
 
 /**
- * The one cutoff. Measured on 240 real agent written changes: whole functions as pieces
- * score higher than big chunks, so 0.6 on pieces matches 0.5 on chunks.
+ * The one cutoff, and the one place this default is written. It is a default to look at, not
+ * a recommendation: run `stop-rules score` on your own code and pick your own bar.
+ *
+ * Measured on 240 real agent written changes, cut one hunk per piece, which is the default
+ * cut. At 0.5 it caught 22 of the 29 real problems in that sample, with 6 flags that are
+ * plainly false and 5 that are arguable. At 0.6 it caught 11 of the 29, with 1 plainly false
+ * flag. So 0.5 costs about five more flags to look at and finds twice as much. A team that
+ * would rather be told less sets `threshold` to 0.6. docs/TUNING.md has both tables.
  */
-export const DEFAULT_THRESHOLD = 0.6;
+export const DEFAULT_THRESHOLD = 0.5;
 
 /** The one ceiling on Jev requests in one run. Raise it with `maxCalls` or `--max-calls`. */
 export const DEFAULT_MAX_CALLS = 60;

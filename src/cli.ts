@@ -32,7 +32,7 @@ Options:
   --dir <path>         the repository to work on (default: the one holding the current folder)
   --team <endpoint>    init mode only: use your team's stop-rules server, not your own key
   --rules <path>       rules file (default <repo root>/.stop-rules.md)
-  --cut <mode>         functions (tree-sitter), hunks or chunks (no parser) (default ${DEFAULT_CUT})
+  --cut <mode>         hunks or chunks (no parser), functions (tree-sitter) (default ${DEFAULT_CUT})
   --threshold <0..1>   score at or above which a rule counts as violated (default ${DEFAULT_THRESHOLD})
   --max-calls <n>      hard ceiling on requests to Jev in one run (default ${DEFAULT_MAX_CALLS})
   --base <rev>         check and score modes: diff this revision against the working tree
