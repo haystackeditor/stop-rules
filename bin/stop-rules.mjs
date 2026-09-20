@@ -1205,6 +1205,516 @@ function getAdapter(name2) {
 import { promises as fs15 } from "node:fs";
 import * as path20 from "node:path";
 
+// src/types.ts
+var NO_CONTEXT = { kind: "none" };
+
+// src/diff.ts
+var CHUNK_MAX_BYTES = 12e3;
+var LONG_LINE_LIMIT = 1e3;
+function longLineMarker(chars) {
+  return `<stop-rules left out a ${chars} character line here: data, not code>`;
+}
+var LONG_LINE_MARKER_RE = /^<stop-rules left out a \d+ character line here: data, not code>$/;
+function isLongLineMarker(text) {
+  return LONG_LINE_MARKER_RE.test(text);
+}
+var encoder = new TextEncoder();
+function utf8Bytes(text) {
+  return encoder.encode(text).length;
+}
+function baseName(filePath) {
+  const cut = filePath.lastIndexOf("/");
+  return cut === -1 ? filePath : filePath.slice(cut + 1);
+}
+var SKIP_BASENAMES = /* @__PURE__ */ new Set([
+  "package-lock.json",
+  "pnpm-lock.yaml",
+  "yarn.lock",
+  "Cargo.lock",
+  "go.sum",
+  "poetry.lock",
+  "uv.lock",
+  "Gemfile.lock",
+  "composer.lock",
+  // Our own two files: the rules being checked and the team endpoint. Configuration, not
+  // code any rule is about.
+  ".stop-rules.md",
+  ".stop-rules.json"
+]);
+var SKIP_SUFFIXES = [
+  ".min.js",
+  ".min.css",
+  ".map",
+  ".snap",
+  ".log",
+  ".jsonl",
+  ".ndjson",
+  ".csv",
+  ".tsv",
+  ".svg",
+  ".lock"
+];
+var OWN_DIR = ".stop-rules/";
+var OWN_FILES = /* @__PURE__ */ new Set([".opencode/plugins/stop-rules.ts", ".amp/plugins/stop-rules.ts"]);
+function isSkippedPath(filePath, extraSkip = []) {
+  if (filePath.startsWith(OWN_DIR) || OWN_FILES.has(filePath)) return true;
+  const base = baseName(filePath);
+  if (SKIP_BASENAMES.has(base)) return true;
+  if (SKIP_SUFFIXES.some((suffix) => base.endsWith(suffix))) return true;
+  return extraSkip.includes(filePath);
+}
+function gitOldStart(cursor, oldCount) {
+  if (oldCount > 0) return cursor;
+  return Math.max(cursor - 1, 0);
+}
+function countOld(lines) {
+  let n = 0;
+  for (const line of lines) {
+    if (line.startsWith(" ") || line.startsWith("-")) n += 1;
+  }
+  return n;
+}
+function countNew(lines) {
+  let n = 0;
+  for (const line of lines) {
+    if (line.startsWith(" ") || line.startsWith("+")) n += 1;
+  }
+  return n;
+}
+function hunkHeader(hunk) {
+  const oldCount = countOld(hunk.lines);
+  const newCount = countNew(hunk.lines);
+  return `@@ -${hunk.oldStart},${oldCount} +${hunk.newStart},${newCount} @@${hunk.context}`;
+}
+function hunkText(hunk) {
+  return `${hunkHeader(hunk)}
+${hunk.lines.join("\n")}
+`;
+}
+function chunkText(chunk) {
+  return `${chunk.header.join("\n")}
+${chunk.hunks.map(hunkText).join("")}`;
+}
+function shortenBodyLine(body2) {
+  const marker = body2[0];
+  if (marker === void 0) throw new Error("internal error: an empty diff body line");
+  const text = body2.slice(1);
+  if (text.length <= LONG_LINE_LIMIT) return body2;
+  return `${marker}${longLineMarker(text.length)}`;
+}
+function addedLines(chunk) {
+  const out3 = [];
+  for (const hunk of chunk.hunks) {
+    let lineNo = hunk.newStart;
+    for (const line of hunk.lines) {
+      if (line.startsWith("+")) {
+        out3.push({ line: lineNo, text: line.slice(1) });
+        lineNo += 1;
+      } else if (line.startsWith(" ")) {
+        lineNo += 1;
+      }
+    }
+  }
+  return out3;
+}
+function chunkRange(chunk) {
+  let from = Number.POSITIVE_INFINITY;
+  let to = 0;
+  for (const hunk of chunk.hunks) {
+    const newCount = countNew(hunk.lines);
+    from = Math.min(from, hunk.newStart);
+    to = Math.max(to, hunk.newStart + Math.max(newCount, 1) - 1);
+  }
+  if (!Number.isFinite(from)) return { from: 0, to: 0 };
+  return { from, to };
+}
+var SIMPLE_ESCAPES = {
+  '"': 34,
+  "\\": 92,
+  a: 7,
+  b: 8,
+  f: 12,
+  n: 10,
+  r: 13,
+  t: 9,
+  v: 11
+};
+function decodeQuotedPath(raw) {
+  if (!raw.startsWith('"')) return { ok: true, path: raw };
+  if (raw.length < 2 || !raw.endsWith('"')) {
+    return { ok: false, reason: "git quoted this path but the closing quote is missing" };
+  }
+  const body2 = raw.slice(1, -1);
+  const bytes = [];
+  let plain = "";
+  const flush = () => {
+    if (plain.length === 0) return;
+    for (const byte of encoder.encode(plain)) bytes.push(byte);
+    plain = "";
+  };
+  for (let i2 = 0; i2 < body2.length; i2 += 1) {
+    const char = body2[i2];
+    if (char === void 0) break;
+    if (char !== "\\") {
+      plain += char;
+      continue;
+    }
+    i2 += 1;
+    const escape = body2[i2];
+    if (escape === void 0) {
+      return { ok: false, reason: "git quoted this path but a backslash escape is cut short" };
+    }
+    const simple = SIMPLE_ESCAPES[escape];
+    if (simple !== void 0) {
+      flush();
+      bytes.push(simple);
+      continue;
+    }
+    if (escape >= "0" && escape <= "7") {
+      const digits = body2.slice(i2, i2 + 3);
+      if (!/^[0-7]{3}$/.test(digits)) {
+        return { ok: false, reason: `git quoted this path with an octal escape stop-rules cannot read: \\${digits}` };
+      }
+      flush();
+      bytes.push(Number.parseInt(digits, 8));
+      i2 += 2;
+      continue;
+    }
+    return { ok: false, reason: `git quoted this path with an escape stop-rules does not know: \\${escape}` };
+  }
+  flush();
+  try {
+    return { ok: true, path: new TextDecoder("utf-8", { fatal: true }).decode(new Uint8Array(bytes)) };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return { ok: false, reason: `this path is not valid UTF-8, so stop-rules cannot name it (${message})` };
+  }
+}
+function stripPrefix(raw) {
+  const read = decodeQuotedPath(raw);
+  if (!read.ok) return read;
+  if (read.path.startsWith("a/") || read.path.startsWith("b/")) {
+    return { ok: true, path: read.path.slice(2) };
+  }
+  return read;
+}
+var HUNK_RE = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)$/;
+function parseDiff(diff, extraSkip = []) {
+  const lines = diff.split("\n");
+  const files = [];
+  const skipped = [];
+  const failures = [];
+  let i2 = 0;
+  while (i2 < lines.length) {
+    const line = lines[i2] ?? "";
+    if (!line.startsWith("diff --git ")) {
+      i2 += 1;
+      continue;
+    }
+    const header = [line];
+    let binary2 = false;
+    let newPath = null;
+    let deleted = false;
+    let unreadablePath = null;
+    i2 += 1;
+    while (i2 < lines.length) {
+      const current = lines[i2] ?? "";
+      if (current.startsWith("diff --git ") || current.startsWith("@@ ")) break;
+      header.push(current);
+      i2 += 1;
+      if (current.startsWith("Binary files ") || current.startsWith("GIT binary patch")) {
+        binary2 = true;
+        break;
+      }
+      if (current.startsWith("+++ ")) {
+        const target = current.slice(4).trim();
+        if (target === "/dev/null") {
+          deleted = true;
+        } else {
+          const read = stripPrefix(target);
+          if (read.ok) newPath = read.path;
+          else unreadablePath = { file: target, reason: read.reason };
+        }
+        break;
+      }
+    }
+    const hunks = [];
+    while (i2 < lines.length) {
+      const current = lines[i2] ?? "";
+      if (current.startsWith("diff --git ")) break;
+      const match = HUNK_RE.exec(current);
+      if (!match) {
+        i2 += 1;
+        continue;
+      }
+      const hunk = {
+        oldStart: Number(match[1]),
+        newStart: Number(match[3]),
+        context: match[5] ?? "",
+        lines: []
+      };
+      i2 += 1;
+      while (i2 < lines.length) {
+        const body2 = lines[i2] ?? "";
+        if (body2.startsWith("diff --git ") || HUNK_RE.test(body2)) break;
+        if (body2.startsWith(" ") || body2.startsWith("+") || body2.startsWith("-") || body2.startsWith("\\")) {
+          hunk.lines.push(shortenBodyLine(body2));
+          i2 += 1;
+          continue;
+        }
+        if (body2.length === 0) {
+          if (i2 === lines.length - 1) {
+            i2 += 1;
+            break;
+          }
+          hunk.lines.push(" ");
+          i2 += 1;
+          continue;
+        }
+        break;
+      }
+      hunks.push(hunk);
+    }
+    if (unreadablePath !== null) {
+      failures.push(unreadablePath);
+      continue;
+    }
+    if (binary2) {
+      skipped.push({ file: newPath ?? headerPath(line, failures), reason: "binary file" });
+      continue;
+    }
+    if (deleted || newPath === null) continue;
+    if (isSkippedPath(newPath, extraSkip)) {
+      skipped.push({ file: newPath, reason: "generated or data file" });
+      continue;
+    }
+    const added = hunks.flatMap((hunk) => hunk.lines.filter((l) => l.startsWith("+")));
+    if (added.length === 0) continue;
+    if (added.every((l) => isLongLineMarker(l.slice(1)))) {
+      skipped.push({ file: newPath, reason: "every added line is data, not code" });
+      continue;
+    }
+    files.push({ file: newPath, header, hunks });
+  }
+  return { files, skipped, failures };
+}
+function headerPath(headerLine, failures) {
+  const rest = headerLine.slice("diff --git ".length);
+  const cut = rest.lastIndexOf(" b/");
+  if (cut === -1) {
+    failures.push({ file: rest, reason: "stop-rules could not find a file name in this diff header" });
+    return rest;
+  }
+  const read = stripPrefix(rest.slice(cut + 1));
+  if (read.ok) return read.path;
+  failures.push({ file: rest, reason: read.reason });
+  return rest;
+}
+function splitHunk(hunk, pieces) {
+  if (pieces < 2 || hunk.lines.length < 2) return [hunk];
+  const per = Math.ceil(hunk.lines.length / pieces);
+  const out3 = [];
+  let oldCursor = hunk.oldStart;
+  let newCursor = hunk.newStart;
+  for (let start3 = 0; start3 < hunk.lines.length; start3 += per) {
+    const slice = hunk.lines.slice(start3, start3 + per);
+    out3.push({ oldStart: oldCursor, newStart: newCursor, context: hunk.context, lines: slice });
+    oldCursor += countOld(slice);
+    newCursor += countNew(slice);
+  }
+  return out3;
+}
+function splitHunkToFit(hunk, headerBytes) {
+  const budget = Math.max(CHUNK_MAX_BYTES - headerBytes, 1);
+  if (utf8Bytes(hunkText(hunk)) <= budget) return [hunk];
+  if (hunk.lines.length < 2) return [hunk];
+  let pieces = 2;
+  for (; ; ) {
+    const parts2 = splitHunk(hunk, pieces);
+    const tooBig = parts2.some((part) => utf8Bytes(hunkText(part)) > budget);
+    if (!tooBig || pieces >= hunk.lines.length) return parts2;
+    pieces *= 2;
+  }
+}
+function chunkFile(file) {
+  const headerBytes = utf8Bytes(`${file.header.join("\n")}
+`);
+  const fitted = [];
+  for (const hunk of file.hunks) {
+    fitted.push(...splitHunkToFit(hunk, headerBytes));
+  }
+  const chunks = [];
+  let current = [];
+  let currentBytes = headerBytes;
+  for (const hunk of fitted) {
+    const size = utf8Bytes(hunkText(hunk));
+    if (current.length > 0 && currentBytes + size > CHUNK_MAX_BYTES) {
+      chunks.push({ file: file.file, header: file.header, hunks: current });
+      current = [];
+      currentBytes = headerBytes;
+    }
+    current.push(hunk);
+    currentBytes += size;
+  }
+  if (current.length > 0) chunks.push({ file: file.file, header: file.header, hunks: current });
+  return chunks.filter((chunk) => chunk.hunks.some((h) => h.lines.some((l) => l.startsWith("+"))));
+}
+function halvePiece(piece) {
+  const halves = halveChunk(piece);
+  if (halves === null) return null;
+  return [asPiece(piece, halves[0]), asPiece(piece, halves[1])];
+}
+function asPiece(original, part) {
+  const range = chunkRange(part);
+  return {
+    file: part.file,
+    header: part.header,
+    hunks: part.hunks,
+    unitName: original.unitName,
+    fromLine: range.from,
+    toLine: range.to,
+    cut: original.cut,
+    context: NO_CONTEXT
+  };
+}
+function halveChunk(chunk) {
+  if (chunk.hunks.length > 1) {
+    const mid = Math.ceil(chunk.hunks.length / 2);
+    return [
+      { file: chunk.file, header: chunk.header, hunks: chunk.hunks.slice(0, mid) },
+      { file: chunk.file, header: chunk.header, hunks: chunk.hunks.slice(mid) }
+    ];
+  }
+  const only = chunk.hunks[0];
+  if (only === void 0 || only.lines.length < 2) return null;
+  const parts2 = splitHunk(only, 2);
+  const first = parts2[0];
+  const second = parts2[1];
+  if (first === void 0 || second === void 0) return null;
+  return [
+    { file: chunk.file, header: chunk.header, hunks: [first] },
+    { file: chunk.file, header: chunk.header, hunks: [second] }
+  ];
+}
+
+// src/context.ts
+var CONTEXT_LINES = 25;
+function fileLines(fileText) {
+  const lines = fileText.split("\n");
+  if (lines[lines.length - 1] === "") lines.pop();
+  return lines;
+}
+function shorten(text) {
+  return text.length <= LONG_LINE_LIMIT ? text : longLineMarker(text.length);
+}
+function contextLine(text) {
+  return ` ${shorten(text)}`;
+}
+function codeText(lines, fromLine, toLine) {
+  return lines.slice(fromLine - 1, toLine).map(shorten).join("\n");
+}
+function functionContext(functions) {
+  return { kind: "function", functions: [...functions] };
+}
+function coreOf(hunk) {
+  let oldAt = hunk.oldStart;
+  let newAt = hunk.newStart;
+  const rows = hunk.lines.map((text) => {
+    const marker = text.charAt(0);
+    const oldBefore = oldAt;
+    const newBefore = newAt;
+    if (marker === " ") {
+      oldAt += 1;
+      newAt += 1;
+    } else if (marker === "-") {
+      oldAt += 1;
+    } else if (marker === "+") {
+      newAt += 1;
+    }
+    return { marker, text, oldBefore, newBefore, newAfter: newAt };
+  });
+  let first = -1;
+  let last = -1;
+  rows.forEach((row, index) => {
+    if (row.marker !== "+" && row.marker !== "-") return;
+    if (first < 0) first = index;
+    last = index;
+  });
+  if (first < 0) return null;
+  while (last + 1 < rows.length && rows[last + 1]?.marker === "\\") last += 1;
+  const head = rows[first];
+  const tail = rows[last];
+  if (head === void 0 || tail === void 0) return null;
+  return {
+    lines: rows.slice(first, last + 1).map((row) => row.text),
+    newStart: head.newBefore,
+    oldStart: head.oldBefore,
+    newEnd: tail.newAfter,
+    context: hunk.context
+  };
+}
+function render(window2) {
+  const oldCount = window2.body.filter((line) => line.startsWith(" ") || line.startsWith("-")).length;
+  const newCount = window2.body.filter((line) => line.startsWith(" ") || line.startsWith("+")).length;
+  const oldStart = oldCount === 0 ? Math.max(window2.oldStart - 1, 0) : window2.oldStart;
+  const header = `@@ -${oldStart},${oldCount} +${window2.newStart},${newCount} @@${window2.context}`;
+  return `${header}
+${window2.body.join("\n")}
+`;
+}
+function widePieceText(piece, fileText) {
+  const lines = fileLines(fileText);
+  const cores = piece.hunks.map(coreOf);
+  const rendered = [];
+  let open = null;
+  let shownTo = 1;
+  const flush = () => {
+    if (open === null) return;
+    rendered.push(render(open));
+    open = null;
+  };
+  piece.hunks.forEach((hunk, index) => {
+    const core = cores[index];
+    if (core === null || core === void 0) {
+      flush();
+      rendered.push(hunkText(hunk));
+      return;
+    }
+    let nextChange = lines.length + 1;
+    for (let after = index + 1; after < cores.length; after += 1) {
+      const later = cores[after];
+      if (later === null || later === void 0) continue;
+      nextChange = later.newStart;
+      break;
+    }
+    const aboveFrom = Math.max(core.newStart - CONTEXT_LINES, shownTo, 1);
+    const belowTo = Math.min(core.newEnd + CONTEXT_LINES, nextChange, lines.length + 1);
+    const above = lines.slice(aboveFrom - 1, core.newStart - 1).map(contextLine);
+    const below = lines.slice(core.newEnd - 1, belowTo - 1).map(contextLine);
+    const held = open;
+    if (held !== null && held.newEnd === aboveFrom) {
+      held.body.push(...above, ...core.lines, ...below);
+      held.newEnd = belowTo;
+    } else {
+      flush();
+      open = {
+        oldStart: core.oldStart - above.length,
+        newStart: aboveFrom,
+        body: [...above, ...core.lines, ...below],
+        newEnd: belowTo,
+        context: core.context
+      };
+    }
+    shownTo = belowTo;
+  });
+  flush();
+  return `${piece.header.join("\n")}
+${rendered.join("")}`;
+}
+function wideContext(piece, fileText) {
+  return { kind: "wide", diff: widePieceText(piece, fileText) };
+}
+
 // src/credentials.ts
 import { promises as fs9 } from "node:fs";
 import { homedir } from "node:os";
@@ -1862,394 +2372,6 @@ async function loginCheck(repoRoot, env, fetchImpl = (url, init3) => fetch(url, 
   return { ok, lines };
 }
 
-// src/diff.ts
-var CHUNK_MAX_BYTES = 12e3;
-var LONG_LINE_LIMIT = 1e3;
-function longLineMarker(chars) {
-  return `<stop-rules left out a ${chars} character line here: data, not code>`;
-}
-var LONG_LINE_MARKER_RE = /^<stop-rules left out a \d+ character line here: data, not code>$/;
-function isLongLineMarker(text) {
-  return LONG_LINE_MARKER_RE.test(text);
-}
-var encoder = new TextEncoder();
-function utf8Bytes(text) {
-  return encoder.encode(text).length;
-}
-function baseName(filePath) {
-  const cut = filePath.lastIndexOf("/");
-  return cut === -1 ? filePath : filePath.slice(cut + 1);
-}
-var SKIP_BASENAMES = /* @__PURE__ */ new Set([
-  "package-lock.json",
-  "pnpm-lock.yaml",
-  "yarn.lock",
-  "Cargo.lock",
-  "go.sum",
-  "poetry.lock",
-  "uv.lock",
-  "Gemfile.lock",
-  "composer.lock",
-  // Our own two files: the rules being checked and the team endpoint. Configuration, not
-  // code any rule is about.
-  ".stop-rules.md",
-  ".stop-rules.json"
-]);
-var SKIP_SUFFIXES = [
-  ".min.js",
-  ".min.css",
-  ".map",
-  ".snap",
-  ".log",
-  ".jsonl",
-  ".ndjson",
-  ".csv",
-  ".tsv",
-  ".svg",
-  ".lock"
-];
-var OWN_DIR = ".stop-rules/";
-var OWN_FILES = /* @__PURE__ */ new Set([".opencode/plugins/stop-rules.ts", ".amp/plugins/stop-rules.ts"]);
-function isSkippedPath(filePath, extraSkip = []) {
-  if (filePath.startsWith(OWN_DIR) || OWN_FILES.has(filePath)) return true;
-  const base = baseName(filePath);
-  if (SKIP_BASENAMES.has(base)) return true;
-  if (SKIP_SUFFIXES.some((suffix) => base.endsWith(suffix))) return true;
-  return extraSkip.includes(filePath);
-}
-function gitOldStart(cursor, oldCount) {
-  if (oldCount > 0) return cursor;
-  return Math.max(cursor - 1, 0);
-}
-function countOld(lines) {
-  let n = 0;
-  for (const line of lines) {
-    if (line.startsWith(" ") || line.startsWith("-")) n += 1;
-  }
-  return n;
-}
-function countNew(lines) {
-  let n = 0;
-  for (const line of lines) {
-    if (line.startsWith(" ") || line.startsWith("+")) n += 1;
-  }
-  return n;
-}
-function hunkHeader(hunk) {
-  const oldCount = countOld(hunk.lines);
-  const newCount = countNew(hunk.lines);
-  return `@@ -${hunk.oldStart},${oldCount} +${hunk.newStart},${newCount} @@${hunk.context}`;
-}
-function hunkText(hunk) {
-  return `${hunkHeader(hunk)}
-${hunk.lines.join("\n")}
-`;
-}
-function chunkText(chunk) {
-  return `${chunk.header.join("\n")}
-${chunk.hunks.map(hunkText).join("")}`;
-}
-function shortenBodyLine(body2) {
-  const marker = body2[0];
-  if (marker === void 0) throw new Error("internal error: an empty diff body line");
-  const text = body2.slice(1);
-  if (text.length <= LONG_LINE_LIMIT) return body2;
-  return `${marker}${longLineMarker(text.length)}`;
-}
-function addedLines(chunk) {
-  const out3 = [];
-  for (const hunk of chunk.hunks) {
-    let lineNo = hunk.newStart;
-    for (const line of hunk.lines) {
-      if (line.startsWith("+")) {
-        out3.push({ line: lineNo, text: line.slice(1) });
-        lineNo += 1;
-      } else if (line.startsWith(" ")) {
-        lineNo += 1;
-      }
-    }
-  }
-  return out3;
-}
-function chunkRange(chunk) {
-  let from = Number.POSITIVE_INFINITY;
-  let to = 0;
-  for (const hunk of chunk.hunks) {
-    const newCount = countNew(hunk.lines);
-    from = Math.min(from, hunk.newStart);
-    to = Math.max(to, hunk.newStart + Math.max(newCount, 1) - 1);
-  }
-  if (!Number.isFinite(from)) return { from: 0, to: 0 };
-  return { from, to };
-}
-var SIMPLE_ESCAPES = {
-  '"': 34,
-  "\\": 92,
-  a: 7,
-  b: 8,
-  f: 12,
-  n: 10,
-  r: 13,
-  t: 9,
-  v: 11
-};
-function decodeQuotedPath(raw) {
-  if (!raw.startsWith('"')) return { ok: true, path: raw };
-  if (raw.length < 2 || !raw.endsWith('"')) {
-    return { ok: false, reason: "git quoted this path but the closing quote is missing" };
-  }
-  const body2 = raw.slice(1, -1);
-  const bytes = [];
-  let plain = "";
-  const flush = () => {
-    if (plain.length === 0) return;
-    for (const byte of encoder.encode(plain)) bytes.push(byte);
-    plain = "";
-  };
-  for (let i2 = 0; i2 < body2.length; i2 += 1) {
-    const char = body2[i2];
-    if (char === void 0) break;
-    if (char !== "\\") {
-      plain += char;
-      continue;
-    }
-    i2 += 1;
-    const escape = body2[i2];
-    if (escape === void 0) {
-      return { ok: false, reason: "git quoted this path but a backslash escape is cut short" };
-    }
-    const simple = SIMPLE_ESCAPES[escape];
-    if (simple !== void 0) {
-      flush();
-      bytes.push(simple);
-      continue;
-    }
-    if (escape >= "0" && escape <= "7") {
-      const digits = body2.slice(i2, i2 + 3);
-      if (!/^[0-7]{3}$/.test(digits)) {
-        return { ok: false, reason: `git quoted this path with an octal escape stop-rules cannot read: \\${digits}` };
-      }
-      flush();
-      bytes.push(Number.parseInt(digits, 8));
-      i2 += 2;
-      continue;
-    }
-    return { ok: false, reason: `git quoted this path with an escape stop-rules does not know: \\${escape}` };
-  }
-  flush();
-  try {
-    return { ok: true, path: new TextDecoder("utf-8", { fatal: true }).decode(new Uint8Array(bytes)) };
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    return { ok: false, reason: `this path is not valid UTF-8, so stop-rules cannot name it (${message})` };
-  }
-}
-function stripPrefix(raw) {
-  const read = decodeQuotedPath(raw);
-  if (!read.ok) return read;
-  if (read.path.startsWith("a/") || read.path.startsWith("b/")) {
-    return { ok: true, path: read.path.slice(2) };
-  }
-  return read;
-}
-var HUNK_RE = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)$/;
-function parseDiff(diff, extraSkip = []) {
-  const lines = diff.split("\n");
-  const files = [];
-  const skipped = [];
-  const failures = [];
-  let i2 = 0;
-  while (i2 < lines.length) {
-    const line = lines[i2] ?? "";
-    if (!line.startsWith("diff --git ")) {
-      i2 += 1;
-      continue;
-    }
-    const header = [line];
-    let binary2 = false;
-    let newPath = null;
-    let deleted = false;
-    let unreadablePath = null;
-    i2 += 1;
-    while (i2 < lines.length) {
-      const current = lines[i2] ?? "";
-      if (current.startsWith("diff --git ") || current.startsWith("@@ ")) break;
-      header.push(current);
-      i2 += 1;
-      if (current.startsWith("Binary files ") || current.startsWith("GIT binary patch")) {
-        binary2 = true;
-        break;
-      }
-      if (current.startsWith("+++ ")) {
-        const target = current.slice(4).trim();
-        if (target === "/dev/null") {
-          deleted = true;
-        } else {
-          const read = stripPrefix(target);
-          if (read.ok) newPath = read.path;
-          else unreadablePath = { file: target, reason: read.reason };
-        }
-        break;
-      }
-    }
-    const hunks = [];
-    while (i2 < lines.length) {
-      const current = lines[i2] ?? "";
-      if (current.startsWith("diff --git ")) break;
-      const match = HUNK_RE.exec(current);
-      if (!match) {
-        i2 += 1;
-        continue;
-      }
-      const hunk = {
-        oldStart: Number(match[1]),
-        newStart: Number(match[3]),
-        context: match[5] ?? "",
-        lines: []
-      };
-      i2 += 1;
-      while (i2 < lines.length) {
-        const body2 = lines[i2] ?? "";
-        if (body2.startsWith("diff --git ") || HUNK_RE.test(body2)) break;
-        if (body2.startsWith(" ") || body2.startsWith("+") || body2.startsWith("-") || body2.startsWith("\\")) {
-          hunk.lines.push(shortenBodyLine(body2));
-          i2 += 1;
-          continue;
-        }
-        if (body2.length === 0) {
-          if (i2 === lines.length - 1) {
-            i2 += 1;
-            break;
-          }
-          hunk.lines.push(" ");
-          i2 += 1;
-          continue;
-        }
-        break;
-      }
-      hunks.push(hunk);
-    }
-    if (unreadablePath !== null) {
-      failures.push(unreadablePath);
-      continue;
-    }
-    if (binary2) {
-      skipped.push({ file: newPath ?? headerPath(line, failures), reason: "binary file" });
-      continue;
-    }
-    if (deleted || newPath === null) continue;
-    if (isSkippedPath(newPath, extraSkip)) {
-      skipped.push({ file: newPath, reason: "generated or data file" });
-      continue;
-    }
-    const added = hunks.flatMap((hunk) => hunk.lines.filter((l) => l.startsWith("+")));
-    if (added.length === 0) continue;
-    if (added.every((l) => isLongLineMarker(l.slice(1)))) {
-      skipped.push({ file: newPath, reason: "every added line is data, not code" });
-      continue;
-    }
-    files.push({ file: newPath, header, hunks });
-  }
-  return { files, skipped, failures };
-}
-function headerPath(headerLine, failures) {
-  const rest = headerLine.slice("diff --git ".length);
-  const cut = rest.lastIndexOf(" b/");
-  if (cut === -1) {
-    failures.push({ file: rest, reason: "stop-rules could not find a file name in this diff header" });
-    return rest;
-  }
-  const read = stripPrefix(rest.slice(cut + 1));
-  if (read.ok) return read.path;
-  failures.push({ file: rest, reason: read.reason });
-  return rest;
-}
-function splitHunk(hunk, pieces) {
-  if (pieces < 2 || hunk.lines.length < 2) return [hunk];
-  const per = Math.ceil(hunk.lines.length / pieces);
-  const out3 = [];
-  let oldCursor = hunk.oldStart;
-  let newCursor = hunk.newStart;
-  for (let start3 = 0; start3 < hunk.lines.length; start3 += per) {
-    const slice = hunk.lines.slice(start3, start3 + per);
-    out3.push({ oldStart: oldCursor, newStart: newCursor, context: hunk.context, lines: slice });
-    oldCursor += countOld(slice);
-    newCursor += countNew(slice);
-  }
-  return out3;
-}
-function splitHunkToFit(hunk, headerBytes) {
-  const budget = Math.max(CHUNK_MAX_BYTES - headerBytes, 1);
-  if (utf8Bytes(hunkText(hunk)) <= budget) return [hunk];
-  if (hunk.lines.length < 2) return [hunk];
-  let pieces = 2;
-  for (; ; ) {
-    const parts2 = splitHunk(hunk, pieces);
-    const tooBig = parts2.some((part) => utf8Bytes(hunkText(part)) > budget);
-    if (!tooBig || pieces >= hunk.lines.length) return parts2;
-    pieces *= 2;
-  }
-}
-function chunkFile(file) {
-  const headerBytes = utf8Bytes(`${file.header.join("\n")}
-`);
-  const fitted = [];
-  for (const hunk of file.hunks) {
-    fitted.push(...splitHunkToFit(hunk, headerBytes));
-  }
-  const chunks = [];
-  let current = [];
-  let currentBytes = headerBytes;
-  for (const hunk of fitted) {
-    const size = utf8Bytes(hunkText(hunk));
-    if (current.length > 0 && currentBytes + size > CHUNK_MAX_BYTES) {
-      chunks.push({ file: file.file, header: file.header, hunks: current });
-      current = [];
-      currentBytes = headerBytes;
-    }
-    current.push(hunk);
-    currentBytes += size;
-  }
-  if (current.length > 0) chunks.push({ file: file.file, header: file.header, hunks: current });
-  return chunks.filter((chunk) => chunk.hunks.some((h) => h.lines.some((l) => l.startsWith("+"))));
-}
-function halvePiece(piece) {
-  const halves = halveChunk(piece);
-  if (halves === null) return null;
-  return [asPiece(piece, halves[0]), asPiece(piece, halves[1])];
-}
-function asPiece(original, part) {
-  const range = chunkRange(part);
-  return {
-    file: part.file,
-    header: part.header,
-    hunks: part.hunks,
-    unitName: original.unitName,
-    fromLine: range.from,
-    toLine: range.to,
-    cut: original.cut
-  };
-}
-function halveChunk(chunk) {
-  if (chunk.hunks.length > 1) {
-    const mid = Math.ceil(chunk.hunks.length / 2);
-    return [
-      { file: chunk.file, header: chunk.header, hunks: chunk.hunks.slice(0, mid) },
-      { file: chunk.file, header: chunk.header, hunks: chunk.hunks.slice(mid) }
-    ];
-  }
-  const only = chunk.hunks[0];
-  if (only === void 0 || only.lines.length < 2) return null;
-  const parts2 = splitHunk(only, 2);
-  const first = parts2[0];
-  const second = parts2[1];
-  if (first === void 0 || second === void 0) return null;
-  return [
-    { file: chunk.file, header: chunk.header, hunks: [first] },
-    { file: chunk.file, header: chunk.header, hunks: [second] }
-  ];
-}
-
 // src/languages.ts
 var MAX_ADDED_PER_PIECE = 40;
 var EXTENSIONS = {
@@ -2461,6 +2583,11 @@ var TABLES = {
 };
 
 // src/pieces.ts
+function widened(pieces, source) {
+  if (source === null) return pieces;
+  for (const piece of pieces) piece.context = wideContext(piece, source);
+  return pieces;
+}
 function flatten(file) {
   const out3 = [];
   file.hunks.forEach((hunk, hunkIndex) => {
@@ -2891,7 +3018,7 @@ function buildPieces(file, source, table, root) {
     }
     const firstAtom = group.atoms[0];
     if (firstAtom === void 0) throw new Error("internal error: a piece group with no unit");
-    pieces.push({
+    const piece = {
       file: file.file,
       header: file.header,
       hunks,
@@ -2900,11 +3027,31 @@ function buildPieces(file, source, table, root) {
       unitName: group.fn ? firstAtom.span.name : TOP_LEVEL_NAME,
       fromLine: Math.min(...group.atoms.map((atom) => atom.span.start)),
       toLine: Math.max(...group.atoms.map((atom) => atom.span.end)),
-      cut: "unit"
-    });
+      cut: "unit",
+      // A piece that is one function goes to Jev with that whole function after the change.
+      // A run of statements and declarations is no function, so it gets the wide form, which
+      // is what the parser-free modes use.
+      context: group.fn ? functionContext(wholeFunctions(group.atoms, sourceLines)) : wideContext({ file: file.file, header: file.header, hunks }, source)
+    };
+    pieces.push(piece);
   }
   assertEveryAddedLineOnce(file.file, addedNumbers, pieces);
   return pieces;
+}
+function wholeFunctions(atoms, sourceLines) {
+  const out3 = [];
+  for (const atom of atoms) {
+    const fromLine = atom.span.unitStart;
+    const toLine = atom.span.node.endPosition.row + 1;
+    if (out3.some((held) => held.fromLine === fromLine && held.toLine === toLine)) continue;
+    out3.push({
+      name: atom.span.name,
+      fromLine,
+      toLine,
+      text: codeText(sourceLines, fromLine, toLine)
+    });
+  }
+  return out3;
 }
 function addedOf(piece) {
   const out3 = [];
@@ -2941,7 +3088,7 @@ function assertEveryAddedLineOnce(file, addedNumbers, pieces) {
 }
 var HUNK_MAX_ADDED = 30;
 var HUNK_TRAILING_CONTEXT = 3;
-function piecesByHunk(file) {
+function piecesByHunk(file, source) {
   const pieces = [];
   const addedNumbers = [];
   for (const hunk of file.hunks) {
@@ -2968,7 +3115,8 @@ function piecesByHunk(file) {
           unitName: null,
           fromLine: segmentNewStart,
           toLine: segmentNewStart + Math.max(countNew(segment), 1) - 1,
-          cut: "hunk"
+          cut: "hunk",
+          context: NO_CONTEXT
         });
       }
       segment = [];
@@ -3014,9 +3162,9 @@ function piecesByHunk(file) {
     flush();
   }
   assertEveryAddedLineOnce(file.file, addedNumbers, pieces);
-  return pieces;
+  return widened(pieces, source);
 }
-function chunkPieces(file) {
+function chunkPieces(file, source) {
   const pieces = chunkFile(file).map((chunk) => {
     const range = chunkRange(chunk);
     return {
@@ -3026,7 +3174,8 @@ function chunkPieces(file) {
       unitName: null,
       fromLine: range.from,
       toLine: range.to,
-      cut: "chunk"
+      cut: "chunk",
+      context: NO_CONTEXT
     };
   });
   const added = [];
@@ -3043,7 +3192,7 @@ function chunkPieces(file) {
     }
   }
   assertEveryAddedLineOnce(file.file, added, pieces);
-  return pieces;
+  return widened(pieces, source);
 }
 
 // src/treesitter.ts
@@ -7091,24 +7240,14 @@ async function cutFiles(files, options) {
   const notChecked = [];
   const cutByHunk = [];
   const missing = /* @__PURE__ */ new Set();
-  if (options.cut === "hunks") {
-    for (const file of files) pieces.push(...piecesByHunk(file));
-    return { pieces, notChecked, cutByHunk };
-  }
-  if (options.cut === "chunks") {
-    for (const file of files) pieces.push(...chunkPieces(file));
-    return { pieces, notChecked, cutByHunk };
+  const read = options.readSource;
+  if (options.cut === "functions" && read === null) {
+    throw new Error("internal error: functions mode needs the file content and got none");
   }
   for (const file of files) {
-    const key = grammarForPath(file.file);
-    if (key === null) {
-      pieces.push(...piecesByHunk(file));
-      cutByHunk.push({ file: file.file, reason: `no grammar for ${describeExtension(file.file)}` });
-      continue;
-    }
     const range = chunkRange(file);
-    const source = await options.readSource(file.file);
-    if (source === null) {
+    const source = read === null ? null : await read(file.file);
+    if (read !== null && source === null) {
       notChecked.push({
         file: file.file,
         fromLine: range.from,
@@ -7116,6 +7255,23 @@ async function cutFiles(files, options) {
         reason: "stop-rules could not read this file out of the snapshot it took"
       });
       continue;
+    }
+    if (options.cut === "hunks") {
+      pieces.push(...piecesByHunk(file, source));
+      continue;
+    }
+    if (options.cut === "chunks") {
+      pieces.push(...chunkPieces(file, source));
+      continue;
+    }
+    const key = grammarForPath(file.file);
+    if (key === null) {
+      pieces.push(...piecesByHunk(file, source));
+      cutByHunk.push({ file: file.file, reason: `no grammar for ${describeExtension(file.file)}` });
+      continue;
+    }
+    if (source === null) {
+      throw new Error("internal error: functions mode reached a file with no content");
     }
     const parsed = await parseSource(key, source);
     if (!parsed.ok) {
@@ -7162,7 +7318,7 @@ var MAX_RULES_PER_CALL = 200;
 var CACHE_KEY_VERSION = "v1";
 var CACHE_PIECE_KEY = "p0";
 function stage1Claim(rule, key) {
-  return `The added lines in the diff state.pieces.${key} violate this coding rule: ${rule.text}`;
+  return `Using everything in state (the diff and the code around it), the added lines in the diff state.pieces.${key} violate this coding rule: ${rule.text}`;
 }
 var encoder2 = new TextEncoder();
 async function sha256Hex(parts2) {
@@ -7175,8 +7331,18 @@ async function sha256Hex(parts2) {
 function cacheKey(model, claim, state) {
   return sha256Hex([CACHE_KEY_VERSION, model, claim, JSON.stringify(state)]);
 }
-function soloState(piece) {
-  return { pieces: { [CACHE_PIECE_KEY]: { file: piece.file, diff: chunkText(piece) } } };
+function pieceState(piece, context) {
+  switch (context.kind) {
+    case "none":
+      return { file: piece.file, diff: chunkText(piece) };
+    case "wide":
+      return { file: piece.file, diff: context.diff };
+    case "function":
+      return { file: piece.file, diff: chunkText(piece), function: context.functions };
+  }
+}
+function soloState(piece, context) {
+  return { pieces: { [CACHE_PIECE_KEY]: pieceState(piece, context) } };
 }
 function reasonFor(failure2, message) {
   return failure2 === "budget" ? "call budget exhausted" : message;
@@ -7190,7 +7356,7 @@ function packQuestions(work) {
   const byQuestion = {};
   work.forEach((item, index) => {
     const key = `p${index}`;
-    pieces[key] = { file: item.piece.file, diff: chunkText(item.piece) };
+    pieces[key] = pieceState(item.piece, item.context);
     item.rules.forEach((rule, ruleIndex) => {
       const id = `q${index}_${ruleIndex}`;
       questions[id] = { type: "noul", instructions: stage1Claim(rule, key) };
@@ -7219,8 +7385,8 @@ function makePackNode(model, work) {
       const halves = halvePiece(only.piece);
       if (halves === null) return null;
       return [
-        makePackNode(model, [{ piece: halves[0], rules: only.rules }]),
-        makePackNode(model, [{ piece: halves[1], rules: only.rules }])
+        makePackNode(model, [{ piece: halves[0], context: halves[0].context, rules: only.rules }]),
+        makePackNode(model, [{ piece: halves[1], context: halves[1].context, rules: only.rules }])
       ];
     }
   };
@@ -7244,6 +7410,17 @@ function packWork(model, work) {
   if (current.length > 0) packs.push(current);
   return packs;
 }
+function contextThatFits(model, piece, rules, refused, note) {
+  const context = piece.context;
+  if (context.kind === "none") return context;
+  const bytes = packBytes(model, [{ piece, context, rules: [...rules] }]);
+  if (bytes <= PACK_MAX_BYTES) return context;
+  refused.push({ file: piece.file, fromLine: piece.fromLine, toLine: piece.toLine, bytes });
+  note(
+    `${piece.file} lines ${piece.fromLine}-${piece.toLine}: too big to widen, a call with the ${CONTEXT_LINES} lines around it would be ${bytes} bytes, over the ${PACK_MAX_BYTES} byte cap, so Jev saw the diff alone`
+  );
+  return NO_CONTEXT;
+}
 async function runEngine(input) {
   const { cache, note, threshold, model } = input;
   const client = new JevClient({
@@ -7260,6 +7437,9 @@ async function runEngine(input) {
   const notChecked = [];
   const scored = [];
   const piecesPerCall = [];
+  const tooBigToWiden = [];
+  let widened2 = 0;
+  let withFunction = 0;
   let cacheHits = 0;
   let answered = 0;
   let holdBaseline = false;
@@ -7273,7 +7453,10 @@ async function runEngine(input) {
   };
   const work = [];
   for (const piece of input.pieces) {
-    const state = soloState(piece);
+    const context = contextThatFits(model, piece, input.rules, tooBigToWiden, note);
+    if (context.kind === "wide") widened2 += 1;
+    if (context.kind === "function") withFunction += 1;
+    const state = soloState(piece, context);
     const uncached = [];
     for (const rule of input.rules) {
       const cached = cache.get(await cacheKey(model, stage1Claim(rule, CACHE_PIECE_KEY), state));
@@ -7283,10 +7466,10 @@ async function runEngine(input) {
       }
       cacheHits += 1;
       answered += 1;
-      scored.push({ piece, rule, score: cached });
+      scored.push({ piece, context, rule, score: cached });
     }
     for (let i2 = 0; i2 < uncached.length; i2 += MAX_RULES_PER_CALL) {
-      work.push({ piece, rules: uncached.slice(i2, i2 + MAX_RULES_PER_CALL) });
+      work.push({ piece, context, rules: uncached.slice(i2, i2 + MAX_RULES_PER_CALL) });
     }
   }
   const stage1Nodes = packWork(model, work).map((pack) => makePackNode(model, pack));
@@ -7313,11 +7496,19 @@ async function runEngine(input) {
         continue;
       }
       answered += 1;
+      const item = sent.find((candidate) => candidate.piece === target.piece);
+      if (item === void 0) {
+        throw new Error("internal error: an answer for a piece that was not in the pack");
+      }
       cache.set(
-        await cacheKey(model, stage1Claim(target.rule, CACHE_PIECE_KEY), soloState(target.piece)),
+        await cacheKey(
+          model,
+          stage1Claim(target.rule, CACHE_PIECE_KEY),
+          soloState(target.piece, item.context)
+        ),
         noul
       );
-      scored.push({ piece: target.piece, rule: target.rule, score: noul });
+      scored.push({ piece: target.piece, context: item.context, rule: target.rule, score: noul });
     }
   }
   const hits = scored.filter((hit) => hit.score >= threshold);
@@ -7332,12 +7523,15 @@ async function runEngine(input) {
   });
   return {
     pieces,
-    scores: groupScores(scored),
+    scores: groupScores(scored, input.showContext === true),
     notChecked,
     calls: client.calls,
     cacheHits,
     answered,
     piecesPerCall,
+    widened: widened2,
+    withFunction,
+    tooBigToWiden,
     transportFailed,
     holdBaseline,
     blocked,
@@ -7375,7 +7569,7 @@ function groupByPiece(fresh) {
   pieces.sort((a, b) => a.file === b.file ? a.fromLine - b.fromLine : a.file < b.file ? -1 : 1);
   return pieces;
 }
-function groupScores(scored) {
+function groupScores(scored, showContext) {
   const byPiece = /* @__PURE__ */ new Map();
   for (const hit of scored) {
     const text = chunkText(hit.piece);
@@ -7394,7 +7588,8 @@ function groupScores(scored) {
       unit: hit.piece.unitName,
       fromLine: hit.piece.fromLine,
       toLine: hit.piece.toLine,
-      rules: [entry]
+      rules: [entry],
+      ...showContext ? { jevSaw: pieceState(hit.piece, hit.context) } : {}
     });
   }
   const pieces = [...byPiece.values()];
@@ -7584,17 +7779,38 @@ function headline(report) {
 This does not say your code is clean. The reasons are below.`;
   }
 }
+function whatJevSaw(stats) {
+  const parts2 = [];
+  const lines = stats.contextLines;
+  if (stats.withFunction > 0 && stats.widened > 0) {
+    parts2.push(
+      `Jev saw the whole function for ${plural(stats.withFunction, "piece")} and ${lines} lines around the other ${stats.widened}.`
+    );
+  } else if (stats.withFunction > 0) {
+    parts2.push("Jev saw the whole function each piece is.");
+  } else if (stats.widened > 0) {
+    parts2.push(`Jev saw ${lines} lines around it.`);
+  }
+  const refused = stats.tooBigToWiden.length;
+  if (refused > 0) {
+    parts2.push(
+      `${plural(refused, "piece")} ${refused === 1 ? "was" : "were"} too big to widen, so Jev saw ${refused === 1 ? "it" : "them"} without the code around ${refused === 1 ? "it" : "them"}.`
+    );
+  }
+  return parts2.length === 0 ? null : parts2.join(" ");
+}
 function renderReport(report) {
   const { pieces, notChecked } = report;
   const sections = [];
+  const saw = whatJevSaw(report.stats);
   if (pieces.length === 0) {
-    sections.push(headline(report));
+    sections.push(saw === null ? headline(report) : `${headline(report)} ${saw}`);
   } else {
     const broken = pieces.reduce((total, piece) => total + piece.rules.length, 0);
     const count = broken === 1 ? "1 rule violation" : `${broken} rule violations`;
     const places = pieces.length === 1 ? "1 place" : `${pieces.length} places`;
     sections.push(
-      `stop-rules: ${count} in ${places} in your latest changes.
+      `stop-rules: ${count} in ${places} in your latest changes.${saw === null ? "" : ` ${saw}`}
 Fix each one. If a rule truly should not apply here, leave the code and tell the user why.`
     );
     sections.push(pieces.map((piece, i2) => pieceBlock(piece, i2 + 1)).join("\n\n"));
@@ -7607,10 +7823,22 @@ function cutWords(cut) {
   if (cut === "hunks") return "one diff hunk each, with no parser";
   return "diff hunks grouped into 12,000 byte chunks, with no parser";
 }
+function jevSawLines(saw) {
+  const lines = ["   What Jev saw:", `     file: ${saw.file}`, "     diff:"];
+  for (const line of saw.diff.split("\n")) {
+    if (line.length > 0) lines.push(`       ${line}`);
+  }
+  for (const unit of saw.function ?? []) {
+    lines.push(`     function ${unit.name}, lines ${unit.fromLine}-${unit.toLine}:`);
+    for (const line of unit.text.split("\n")) lines.push(`       ${line}`);
+  }
+  return lines;
+}
 function scoreBlock(piece, index) {
   const unit = piece.unit === null ? "" : ` in ${piece.unit}`;
   const lines = [`${index}. ${piece.file} ${where(piece.fromLine, piece.toLine)}${unit}`];
   for (const rule of piece.rules) lines.push(`   ${confidence(rule.score)}  ${rule.rule}`);
+  if (piece.jevSaw !== void 0) lines.push(...jevSawLines(piece.jevSaw));
   return lines.join("\n");
 }
 function renderScores(report) {
@@ -8106,10 +8334,11 @@ async function diffFileWork(args2, diffFile) {
       files: parsed.files,
       skipped: parsed.skipped,
       failures: parsed.failures.map((failure2) => ({ file: failure2.file, reason: failure2.reason })),
-      readSource: async () => null,
+      readSource: null,
       snapshot: null,
       cut,
-      source: `${diffFile}, cut into ${cutWords(cut)}${why}`,
+      // A diff file has no file content, so there is no code around a piece to send either.
+      source: `${diffFile}, cut into ${cutWords(cut)}${why}, with Jev shown the diff alone (a diff file has no file content, so the code around a change cannot be read)`,
       against: diffFile
     }
   };
@@ -8190,6 +8419,7 @@ async function runLocked(args2) {
     fetchImpl: options.fetchImpl ?? ((url, init3) => fetch(url, init3)),
     cache: fileCache(cache),
     note,
+    ...options.showContext === true ? { showContext: true } : {},
     ...options.mode === "hook" ? {
       skipFinding: (ruleId2, pieceText) => alreadyReported[reportedKey(ruleId2, pieceText)] !== void 0
     } : {},
@@ -8219,6 +8449,10 @@ async function runLocked(args2) {
     places: engineResult.pieces.length,
     notChecked: notChecked.length,
     cutByHunk: cut.cutByHunk,
+    contextLines: CONTEXT_LINES,
+    widened: engineResult.widened,
+    withFunction: engineResult.withFunction,
+    tooBigToWiden: engineResult.tooBigToWiden,
     inputTokens: engineResult.usage.inputTokens,
     outputTokens: engineResult.usage.outputTokens,
     durationMs: Date.now() - started2
@@ -8263,6 +8497,9 @@ async function runLocked(args2) {
     checked: stats.checked,
     piecesPerCall: stats.piecesPerCall,
     cutByHunk: stats.cutByHunk.length,
+    widened: stats.widened,
+    withFunction: stats.withFunction,
+    tooBigToWiden: stats.tooBigToWiden.length,
     skipped: stats.skipped,
     calls: stats.calls,
     cacheHits: stats.cacheHits,
@@ -8972,6 +9209,7 @@ Options:
   --max-calls <n>      hard ceiling on requests to Jev in one run (default ${DEFAULT_MAX_CALLS})
   --base <rev>         check and score modes: diff this revision against the working tree
   --diff <path>        score mode only: score a unified diff file instead of the working tree
+  --show-context       score mode only: print exactly what Jev saw for each piece
   --json               print the findings, or the init result, as JSON
   --port <n>           serve mode only: port to listen on (default PORT or 8080)
   --reset              baseline mode only: clear the saved baseline
@@ -9008,6 +9246,7 @@ function parseArgs(argv) {
   const parsed = {
     command: "",
     json: false,
+    showContext: false,
     agent: DEFAULT_AGENT,
     tokenStdin: false,
     jevKeyStdin: false,
@@ -9036,6 +9275,9 @@ function parseArgs(argv) {
         break;
       case "--json":
         parsed.json = true;
+        break;
+      case "--show-context":
+        parsed.showContext = true;
         break;
       case "--token-stdin":
         parsed.tokenStdin = true;
@@ -9241,7 +9483,8 @@ async function runScoreCommand(args2) {
     mode: "score",
     ...knobArgs(args2),
     ...args2.base !== void 0 ? { base: args2.base } : {},
-    ...args2.diff !== void 0 ? { diffFile: args2.diff } : {}
+    ...args2.diff !== void 0 ? { diffFile: args2.diff } : {},
+    ...args2.showContext ? { showContext: true } : {}
   });
   if (outcome.kind === "cannot-run") {
     process.stderr.write(`stop-rules: ${outcome.reason}

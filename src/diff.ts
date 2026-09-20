@@ -1,4 +1,4 @@
-import type { AddedLine, SkippedFile } from "./types.js";
+import { NO_CONTEXT, type AddedLine, type PieceContext, type SkippedFile } from "./types.js";
 
 export const CHUNK_MAX_BYTES = 12_000;
 
@@ -114,6 +114,11 @@ export interface Piece extends Chunk {
   fromLine: number;
   toLine: number;
   cut: "unit" | "hunk" | "chunk";
+  /**
+   * The code around this piece that rides to Jev with it, built at cut time out of the new
+   * file in the snapshot. The report always hands the agent the piece's own diff instead.
+   */
+  context: PieceContext;
 }
 
 /**
@@ -477,7 +482,9 @@ export function chunkFile(file: FileDiff): Chunk[] {
 
 /**
  * Halves a piece for a resend after max_tokens_exceeded, the same way a chunk is halved.
- * Null when it cannot shrink any further.
+ * Null when it cannot shrink any further. A half carries no code around it: the whole point
+ * of the halving is that the call was too long for Jev, and half a piece's window belongs to
+ * the piece, not to the half.
  */
 export function halvePiece(piece: Piece): [Piece, Piece] | null {
   const halves = halveChunk(piece);
@@ -495,6 +502,7 @@ function asPiece(original: Piece, part: Chunk): Piece {
     fromLine: range.from,
     toLine: range.to,
     cut: original.cut,
+    context: NO_CONTEXT,
   };
 }
 

@@ -37,6 +37,7 @@ Options:
   --max-calls <n>      hard ceiling on requests to Jev in one run (default ${DEFAULT_MAX_CALLS})
   --base <rev>         check and score modes: diff this revision against the working tree
   --diff <path>        score mode only: score a unified diff file instead of the working tree
+  --show-context       score mode only: print exactly what Jev saw for each piece
   --json               print the findings, or the init result, as JSON
   --port <n>           serve mode only: port to listen on (default PORT or 8080)
   --reset              baseline mode only: clear the saved baseline
@@ -80,6 +81,7 @@ interface ParsedArgs {
   base?: string;
   diff?: string;
   json: boolean;
+  showContext: boolean;
   agent: string;
   agents?: string[];
   dir?: string;
@@ -99,6 +101,7 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
   const parsed: ParsedArgs = {
     command: "",
     json: false,
+    showContext: false,
     agent: DEFAULT_AGENT,
     tokenStdin: false,
     jevKeyStdin: false,
@@ -131,6 +134,9 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
         break;
       case "--json":
         parsed.json = true;
+        break;
+      case "--show-context":
+        parsed.showContext = true;
         break;
       case "--token-stdin":
         parsed.tokenStdin = true;
@@ -361,6 +367,7 @@ async function runScoreCommand(args: ParsedArgs): Promise<number> {
     ...knobArgs(args),
     ...(args.base !== undefined ? { base: args.base } : {}),
     ...(args.diff !== undefined ? { diffFile: args.diff } : {}),
+    ...(args.showContext ? { showContext: true } : {}),
   });
   if (outcome.kind === "cannot-run") {
     process.stderr.write(`stop-rules: ${outcome.reason}\n`);

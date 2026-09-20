@@ -2,9 +2,11 @@ import type {
   BrokenRule,
   CheckReport,
   CutMode,
+  JevView,
   NotChecked,
   PieceFinding,
   PieceScore,
+  RunStats,
   ScoreReport,
 } from "./types.js";
 
@@ -135,19 +137,46 @@ function headline(report: CheckReport): string {
   }
 }
 
+/**
+ * What Jev was shown beside each piece, in one sentence, read off the run's own counts. It
+ * goes in the header line because the piece printed below is the narrower one: the report
+ * hands the agent the piece's own diff, whatever Jev saw.
+ */
+export function whatJevSaw(stats: RunStats): string | null {
+  const parts: string[] = [];
+  const lines = stats.contextLines;
+  if (stats.withFunction > 0 && stats.widened > 0) {
+    parts.push(
+      `Jev saw the whole function for ${plural(stats.withFunction, "piece")} and ${lines} lines around the other ${stats.widened}.`,
+    );
+  } else if (stats.withFunction > 0) {
+    parts.push("Jev saw the whole function each piece is.");
+  } else if (stats.widened > 0) {
+    parts.push(`Jev saw ${lines} lines around it.`);
+  }
+  const refused = stats.tooBigToWiden.length;
+  if (refused > 0) {
+    parts.push(
+      `${plural(refused, "piece")} ${refused === 1 ? "was" : "were"} too big to widen, so Jev saw ${refused === 1 ? "it" : "them"} without the code around ${refused === 1 ? "it" : "them"}.`,
+    );
+  }
+  return parts.length === 0 ? null : parts.join(" ");
+}
+
 /** Plain text for the agent. No colours, no em dashes. */
 export function renderReport(report: CheckReport): string {
   const { pieces, notChecked } = report;
   const sections: string[] = [];
+  const saw = whatJevSaw(report.stats);
 
   if (pieces.length === 0) {
-    sections.push(headline(report));
+    sections.push(saw === null ? headline(report) : `${headline(report)} ${saw}`);
   } else {
     const broken = pieces.reduce((total, piece) => total + piece.rules.length, 0);
     const count = broken === 1 ? "1 rule violation" : `${broken} rule violations`;
     const places = pieces.length === 1 ? "1 place" : `${pieces.length} places`;
     sections.push(
-      `stop-rules: ${count} in ${places} in your latest changes.\n` +
+      `stop-rules: ${count} in ${places} in your latest changes.${saw === null ? "" : ` ${saw}`}\n` +
         "Fix each one. If a rule truly should not apply here, leave the code and tell the user why.",
     );
     sections.push(pieces.map((piece, i) => pieceBlock(piece, i + 1)).join("\n\n"));
@@ -164,10 +193,24 @@ export function cutWords(cut: CutMode): string {
   return "diff hunks grouped into 12,000 byte chunks, with no parser";
 }
 
+/** `--show-context`: exactly what Jev was sent for this piece, printed in full. */
+function jevSawLines(saw: JevView): string[] {
+  const lines = ["   What Jev saw:", `     file: ${saw.file}`, "     diff:"];
+  for (const line of saw.diff.split("\n")) {
+    if (line.length > 0) lines.push(`       ${line}`);
+  }
+  for (const unit of saw.function ?? []) {
+    lines.push(`     function ${unit.name}, lines ${unit.fromLine}-${unit.toLine}:`);
+    for (const line of unit.text.split("\n")) lines.push(`       ${line}`);
+  }
+  return lines;
+}
+
 function scoreBlock(piece: PieceScore, index: number): string {
   const unit = piece.unit === null ? "" : ` in ${piece.unit}`;
   const lines = [`${index}. ${piece.file} ${where(piece.fromLine, piece.toLine)}${unit}`];
   for (const rule of piece.rules) lines.push(`   ${confidence(rule.score)}  ${rule.rule}`);
+  if (piece.jevSaw !== undefined) lines.push(...jevSawLines(piece.jevSaw));
   return lines.join("\n");
 }
 

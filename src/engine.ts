@@ -6,6 +6,7 @@
  */
 
 import { chunkText, halvePiece, utf8Bytes, type Piece } from "./diff.js";
+import { CONTEXT_LINES } from "./context.js";
 import {
   JevClient,
   holdsBaseline,
@@ -15,7 +16,17 @@ import {
   type JevUsage,
   type SlotGate,
 } from "./jev.js";
-import type { BrokenRule, NotChecked, PieceFinding, PieceScore, Rule } from "./types.js";
+import {
+  NO_CONTEXT,
+  type BrokenRule,
+  type JevView,
+  type NotChecked,
+  type PieceContext,
+  type PieceFinding,
+  type PieceScore,
+  type Rule,
+  type WidenRefused,
+} from "./types.js";
 
 /**
  * The one cutoff, and the one place this default is written. It is a default to look at, not
@@ -26,6 +37,11 @@ import type { BrokenRule, NotChecked, PieceFinding, PieceScore, Rule } from "./t
  * plainly false and 5 that are arguable. At 0.6 it caught 11 of the 29, with 1 plainly false
  * flag. So 0.5 costs about five more flags to look at and finds twice as much. A team that
  * would rather be told less sets `threshold` to 0.6. docs/TUNING.md has both tables.
+ *
+ * Those counts were measured before Jev was given the code around each piece. With the wide
+ * form, on 240 changes with 31 real breaks, 0.5 caught 21 with 7 plainly false flags and 0.55
+ * caught 16 with fewer doubtful flags than the piece alone. The bar stays 0.5. docs/TUNING.md
+ * has the whole table under "What Jev sees".
  */
 export const DEFAULT_THRESHOLD = 0.5;
 
@@ -64,6 +80,8 @@ export interface EngineInput {
   note: (message: string) => void;
   /** True for a (rule, piece) pair the caller has already delivered once. */
   skipFinding?: (ruleId: string, pieceText: string) => boolean;
+  /** `score --show-context`: put exactly what Jev saw on every score. */
+  showContext?: boolean;
   sleep?: (ms: number) => Promise<void>;
   concurrency?: number;
   slot?: SlotGate;
@@ -80,6 +98,12 @@ export interface EngineResult {
   answered: number;
   /** Pieces that rode in each call, in call order, for the run log. */
   piecesPerCall: number[];
+  /** Pieces Jev saw with their diff widened. */
+  widened: number;
+  /** Pieces Jev saw with the whole function after the change. */
+  withFunction: number;
+  /** Pieces whose wide form would not fit a call of its own. */
+  tooBigToWiden: WidenRefused[];
   /** A transport failure that was not just the call budget running out. */
   transportFailed: boolean;
   /** A failure the next run could still succeed at. */
@@ -94,9 +118,18 @@ export interface EngineResult {
   findings: { ruleId: string; pieceText: string }[];
 }
 
-/** The stage 1 claim. `key` names the piece inside the call's state. */
+/**
+ * The stage 1 claim. `key` names the piece inside the call's state.
+ *
+ * This wording is the one the code around each piece was measured with on the workbench on
+ * 20 September 2026. Against the older wording, which named only the diff, answers moved by
+ * 0.011 on the same sample, so the measured one is what ships.
+ */
 export function stage1Claim(rule: Rule, key: string): string {
-  return `The added lines in the diff state.pieces.${key} violate this coding rule: ${rule.text}`;
+  return (
+    "Using everything in state (the diff and the code around it), the added lines in the " +
+    `diff state.pieces.${key} violate this coding rule: ${rule.text}`
+  );
 }
 
 const encoder = new TextEncoder();
@@ -114,14 +147,30 @@ export function cacheKey(model: string, claim: string, state: unknown): Promise<
   return sha256Hex([CACHE_KEY_VERSION, model, claim, JSON.stringify(state)]);
 }
 
-/** What one piece looks like in a call of its own. The cache is keyed on this shape. */
-function soloState(piece: Piece): unknown {
-  return { pieces: { [CACHE_PIECE_KEY]: { file: piece.file, diff: chunkText(piece) } } };
+/**
+ * Exactly what Jev is shown for one piece: the file, the diff, and the code around it. The
+ * report hands the agent the piece's own diff instead, whatever is here.
+ */
+export function pieceState(piece: Piece, context: PieceContext): JevView {
+  switch (context.kind) {
+    case "none":
+      return { file: piece.file, diff: chunkText(piece) };
+    case "wide":
+      return { file: piece.file, diff: context.diff };
+    case "function":
+      return { file: piece.file, diff: chunkText(piece), function: context.functions };
+  }
 }
 
-/** One piece and the rules it still needs an answer for. */
+/** What one piece looks like in a call of its own. The cache is keyed on this shape. */
+function soloState(piece: Piece, context: PieceContext): unknown {
+  return { pieces: { [CACHE_PIECE_KEY]: pieceState(piece, context) } };
+}
+
+/** One piece, the code around it that fits, and the rules it still needs an answer for. */
 interface Work {
   piece: Piece;
+  context: PieceContext;
   rules: Rule[];
 }
 
@@ -132,6 +181,8 @@ interface PackPayload {
 
 interface Hit {
   piece: Piece;
+  /** The code around the piece that actually went with it, for --show-context. */
+  context: PieceContext;
   rule: Rule;
   score: number;
 }
@@ -149,12 +200,12 @@ function packQuestions(work: readonly Work[]): {
   questions: Record<string, JevQuestion>;
   byQuestion: Record<string, { piece: Piece; rule: Rule }>;
 } {
-  const pieces: Record<string, { file: string; diff: string }> = {};
+  const pieces: Record<string, JevView> = {};
   const questions: Record<string, JevQuestion> = {};
   const byQuestion: Record<string, { piece: Piece; rule: Rule }> = {};
   work.forEach((item, index) => {
     const key = `p${index}`;
-    pieces[key] = { file: item.piece.file, diff: chunkText(item.piece) };
+    pieces[key] = pieceState(item.piece, item.context);
     item.rules.forEach((rule, ruleIndex) => {
       const id = `q${index}_${ruleIndex}`;
       questions[id] = { type: "noul", instructions: stage1Claim(rule, key) };
@@ -187,8 +238,8 @@ function makePackNode(model: string, work: Work[]): AskNode<PackPayload> {
       const halves = halvePiece(only.piece);
       if (halves === null) return null;
       return [
-        makePackNode(model, [{ piece: halves[0], rules: only.rules }]),
-        makePackNode(model, [{ piece: halves[1], rules: only.rules }]),
+        makePackNode(model, [{ piece: halves[0], context: halves[0].context, rules: only.rules }]),
+        makePackNode(model, [{ piece: halves[1], context: halves[1].context, rules: only.rules }]),
       ];
     },
   };
@@ -215,6 +266,31 @@ export function packWork(model: string, work: readonly Work[]): Work[][] {
   return packs;
 }
 
+/**
+ * The code around a piece, unless sending it would put a call carrying only this piece over
+ * the 60,000 byte cap. In that case the piece goes with its diff alone and the run says so,
+ * once in the run log and once in the stats: it is a recorded fact, not a quiet retreat.
+ */
+function contextThatFits(
+  model: string,
+  piece: Piece,
+  rules: readonly Rule[],
+  refused: WidenRefused[],
+  note: (message: string) => void,
+): PieceContext {
+  const context = piece.context;
+  if (context.kind === "none") return context;
+  const bytes = packBytes(model, [{ piece, context, rules: [...rules] }]);
+  if (bytes <= PACK_MAX_BYTES) return context;
+  refused.push({ file: piece.file, fromLine: piece.fromLine, toLine: piece.toLine, bytes });
+  note(
+    `${piece.file} lines ${piece.fromLine}-${piece.toLine}: too big to widen, ` +
+      `a call with the ${CONTEXT_LINES} lines around it would be ${bytes} bytes, over the ` +
+      `${PACK_MAX_BYTES} byte cap, so Jev saw the diff alone`,
+  );
+  return NO_CONTEXT;
+}
+
 export async function runEngine(input: EngineInput): Promise<EngineResult> {
   const { cache, note, threshold, model } = input;
   const client = new JevClient({
@@ -233,6 +309,9 @@ export async function runEngine(input: EngineInput): Promise<EngineResult> {
   /** Every (piece, rule) that got a score, whatever the score was. */
   const scored: Hit[] = [];
   const piecesPerCall: number[] = [];
+  const tooBigToWiden: WidenRefused[] = [];
+  let widened = 0;
+  let withFunction = 0;
   let cacheHits = 0;
   let answered = 0;
   let holdBaseline = false;
@@ -249,7 +328,10 @@ export async function runEngine(input: EngineInput): Promise<EngineResult> {
   // Stage 1. A piece whose every rule is already answered costs nothing and rides in no pack.
   const work: Work[] = [];
   for (const piece of input.pieces) {
-    const state = soloState(piece);
+    const context = contextThatFits(model, piece, input.rules, tooBigToWiden, note);
+    if (context.kind === "wide") widened += 1;
+    if (context.kind === "function") withFunction += 1;
+    const state = soloState(piece, context);
     const uncached: Rule[] = [];
     for (const rule of input.rules) {
       const cached = cache.get(await cacheKey(model, stage1Claim(rule, CACHE_PIECE_KEY), state));
@@ -259,10 +341,10 @@ export async function runEngine(input: EngineInput): Promise<EngineResult> {
       }
       cacheHits += 1;
       answered += 1;
-      scored.push({ piece, rule, score: cached });
+      scored.push({ piece, context, rule, score: cached });
     }
     for (let i = 0; i < uncached.length; i += MAX_RULES_PER_CALL) {
-      work.push({ piece, rules: uncached.slice(i, i + MAX_RULES_PER_CALL) });
+      work.push({ piece, context, rules: uncached.slice(i, i + MAX_RULES_PER_CALL) });
     }
   }
 
@@ -292,11 +374,19 @@ export async function runEngine(input: EngineInput): Promise<EngineResult> {
         continue;
       }
       answered += 1;
+      const item = sent.find((candidate) => candidate.piece === target.piece);
+      if (item === undefined) {
+        throw new Error("internal error: an answer for a piece that was not in the pack");
+      }
       cache.set(
-        await cacheKey(model, stage1Claim(target.rule, CACHE_PIECE_KEY), soloState(target.piece)),
+        await cacheKey(
+          model,
+          stage1Claim(target.rule, CACHE_PIECE_KEY),
+          soloState(target.piece, item.context),
+        ),
         noul,
       );
-      scored.push({ piece: target.piece, rule: target.rule, score: noul });
+      scored.push({ piece: target.piece, context: item.context, rule: target.rule, score: noul });
     }
   }
 
@@ -318,12 +408,15 @@ export async function runEngine(input: EngineInput): Promise<EngineResult> {
 
   return {
     pieces,
-    scores: groupScores(scored),
+    scores: groupScores(scored, input.showContext === true),
     notChecked,
     calls: client.calls,
     cacheHits,
     answered,
     piecesPerCall,
+    widened,
+    withFunction,
+    tooBigToWiden,
     transportFailed,
     holdBaseline,
     blocked,
@@ -372,7 +465,7 @@ function groupByPiece(fresh: readonly Hit[]): PieceFinding[] {
  * What `score` prints: one entry per piece with every rule's score, highest score first.
  * Nothing is left out, so a team can see where their own code sits on the scale.
  */
-function groupScores(scored: readonly Hit[]): PieceScore[] {
+function groupScores(scored: readonly Hit[], showContext: boolean): PieceScore[] {
   const byPiece = new Map<string, PieceScore>();
   for (const hit of scored) {
     const text = chunkText(hit.piece);
@@ -392,6 +485,7 @@ function groupScores(scored: readonly Hit[]): PieceScore[] {
       fromLine: hit.piece.fromLine,
       toLine: hit.piece.toLine,
       rules: [entry],
+      ...(showContext ? { jevSaw: pieceState(hit.piece, hit.context) } : {}),
     });
   }
 

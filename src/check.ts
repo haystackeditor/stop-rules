@@ -5,6 +5,7 @@
 
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
+import { CONTEXT_LINES } from "./context.js";
 import { resolveCredentials, TOKEN_REJECTED, type Credentials } from "./credentials.js";
 import { cutFiles } from "./cut.js";
 import { parseDiff, type FileDiff } from "./diff.js";
@@ -64,6 +65,8 @@ export interface RunOptions {
   base?: string;
   /** score mode only: score this unified diff file instead of the working tree. */
   diffFile?: string;
+  /** score mode only: put exactly what Jev saw for each piece in the output. */
+  showContext?: boolean;
   sessionId?: string;
   stopHookActive?: boolean;
   /** Rounds the agent itself reports having already looped, when it tracks that. */
@@ -201,8 +204,11 @@ interface Work {
   files: FileDiff[];
   skipped: SkippedFile[];
   failures: NotChecked[];
-  /** The new content of a changed file, for the cutting that needs to parse it. */
-  readSource: (file: string) => Promise<string | null>;
+  /**
+   * The new content of a changed file: what a piece is parsed from and what the code around
+   * it is taken from. Null when there is no file content at all, which is `score --diff`.
+   */
+  readSource: ((file: string) => Promise<string | null>) | null;
   /** The snapshot tree the baseline moves to, or null when nothing was snapshotted. */
   snapshot: string | null;
   cut: CutMode;
@@ -243,10 +249,11 @@ async function diffFileWork(args: LockedArgs, diffFile: string): Promise<WorkRes
       files: parsed.files,
       skipped: parsed.skipped,
       failures: parsed.failures.map((failure) => ({ file: failure.file, reason: failure.reason })),
-      readSource: async () => null,
+      readSource: null,
       snapshot: null,
       cut,
-      source: `${diffFile}, cut into ${cutWords(cut)}${why}`,
+      // A diff file has no file content, so there is no code around a piece to send either.
+      source: `${diffFile}, cut into ${cutWords(cut)}${why}, with Jev shown the diff alone (a diff file has no file content, so the code around a change cannot be read)`,
       against: diffFile,
     },
   };
@@ -351,6 +358,7 @@ async function runLocked(args: LockedArgs): Promise<RunOutcome> {
     fetchImpl: options.fetchImpl ?? ((url, init) => fetch(url, init)),
     cache: fileCache(cache),
     note,
+    ...(options.showContext === true ? { showContext: true } : {}),
     ...(options.mode === "hook"
       ? {
           skipFinding: (ruleId: string, pieceText: string) =>
@@ -389,6 +397,10 @@ async function runLocked(args: LockedArgs): Promise<RunOutcome> {
     places: engineResult.pieces.length,
     notChecked: notChecked.length,
     cutByHunk: cut.cutByHunk,
+    contextLines: CONTEXT_LINES,
+    widened: engineResult.widened,
+    withFunction: engineResult.withFunction,
+    tooBigToWiden: engineResult.tooBigToWiden,
     inputTokens: engineResult.usage.inputTokens,
     outputTokens: engineResult.usage.outputTokens,
     durationMs: Date.now() - started,
@@ -437,6 +449,9 @@ async function runLocked(args: LockedArgs): Promise<RunOutcome> {
     checked: stats.checked,
     piecesPerCall: stats.piecesPerCall,
     cutByHunk: stats.cutByHunk.length,
+    widened: stats.widened,
+    withFunction: stats.withFunction,
+    tooBigToWiden: stats.tooBigToWiden.length,
     skipped: stats.skipped,
     calls: stats.calls,
     cacheHits: stats.cacheHits,

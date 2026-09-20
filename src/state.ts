@@ -229,6 +229,12 @@ export interface RunLogLine {
   piecesPerCall: number[];
   /** How many files had no grammar and were cut by diff hunk. */
   cutByHunk: number;
+  /** Pieces Jev saw with their diff widened to the lines around the change. */
+  widened: number;
+  /** Pieces Jev saw with the whole function after the change. */
+  withFunction: number;
+  /** Pieces whose wide form was over the call cap, so Jev saw the diff alone. */
+  tooBigToWiden: number;
   skipped: number;
   calls: number;
   cacheHits: number;

@@ -9,6 +9,11 @@
  * In `hunks` mode no parser runs at all: every file is cut into one piece per diff hunk. In
  * `chunks` mode, also with no parser, a file's hunks are grouped into pieces of up to 12,000
  * bytes. Nothing here guesses and nothing falls back.
+ *
+ * Every mode reads the file's new text out of the snapshot, because that is what the code
+ * around each piece is built from, and a file it cannot read there is reported as not checked.
+ * The one case with no file text at all is `score --diff`, where the caller passes no reader
+ * and the output says that Jev saw the diff alone.
  */
 
 import { addedLines, chunkRange, type FileDiff, type Piece } from "./diff.js";
@@ -28,8 +33,11 @@ export type ReadSource = (file: string) => Promise<string | null>;
 
 export interface CutOptions {
   cut: CutMode;
-  /** Only used in functions mode, where a file has to be parsed to be cut. */
-  readSource: ReadSource;
+  /**
+   * The new text of a changed file. Null only when the caller has no file content at all,
+   * which is `score --diff`: then no piece carries the code around it.
+   */
+  readSource: ReadSource | null;
 }
 
 function describeExtension(filePath: string): string {
@@ -47,25 +55,17 @@ export async function cutFiles(
   /** Extensions whose grammar this install does not have, reported once for the run. */
   const missing = new Set<string>();
 
-  if (options.cut === "hunks") {
-    for (const file of files) pieces.push(...piecesByHunk(file));
-    return { pieces, notChecked, cutByHunk };
-  }
-  if (options.cut === "chunks") {
-    for (const file of files) pieces.push(...chunkPieces(file));
-    return { pieces, notChecked, cutByHunk };
+  const read = options.readSource;
+  if (options.cut === "functions" && read === null) {
+    throw new Error("internal error: functions mode needs the file content and got none");
   }
 
   for (const file of files) {
-    const key = grammarForPath(file.file);
-    if (key === null) {
-      pieces.push(...piecesByHunk(file));
-      cutByHunk.push({ file: file.file, reason: `no grammar for ${describeExtension(file.file)}` });
-      continue;
-    }
     const range = chunkRange(file);
-    const source = await options.readSource(file.file);
-    if (source === null) {
+    // Null only when the caller has no file content at all. A file the reader cannot find in
+    // the snapshot is a failure, reported below, never checked without the code around it.
+    const source = read === null ? null : await read(file.file);
+    if (read !== null && source === null) {
       notChecked.push({
         file: file.file,
         fromLine: range.from,
@@ -73,6 +73,25 @@ export async function cutFiles(
         reason: "stop-rules could not read this file out of the snapshot it took",
       });
       continue;
+    }
+
+    if (options.cut === "hunks") {
+      pieces.push(...piecesByHunk(file, source));
+      continue;
+    }
+    if (options.cut === "chunks") {
+      pieces.push(...chunkPieces(file, source));
+      continue;
+    }
+
+    const key = grammarForPath(file.file);
+    if (key === null) {
+      pieces.push(...piecesByHunk(file, source));
+      cutByHunk.push({ file: file.file, reason: `no grammar for ${describeExtension(file.file)}` });
+      continue;
+    }
+    if (source === null) {
+      throw new Error("internal error: functions mode reached a file with no content");
     }
     const parsed = await parseSource(key, source);
     if (!parsed.ok) {

@@ -26,6 +26,7 @@
  */
 
 import type { Node } from "web-tree-sitter";
+import { codeText, functionContext, wideContext } from "./context.js";
 import {
   chunkFile,
   chunkRange,
@@ -37,6 +38,17 @@ import {
   type Piece,
 } from "./diff.js";
 import { MAX_ADDED_PER_PIECE, type UnitTable } from "./languages.js";
+import { NO_CONTEXT, type PieceFunction } from "./types.js";
+
+/**
+ * Hangs the code around each piece on it, out of the new file. A null source means there is
+ * no new file to read, which happens only to `score --diff`: the output says so there.
+ */
+function widened(pieces: Piece[], source: string | null): Piece[] {
+  if (source === null) return pieces;
+  for (const piece of pieces) piece.context = wideContext(piece, source);
+  return pieces;
+}
 
 /** One line of a file's diff, placed in both the old and the new file. */
 interface DiffLine {
@@ -633,7 +645,7 @@ export function buildPieces(
     }
     const firstAtom = group.atoms[0];
     if (firstAtom === undefined) throw new Error("internal error: a piece group with no unit");
-    pieces.push({
+    const piece: Piece = {
       file: file.file,
       header: file.header,
       hunks,
@@ -643,11 +655,39 @@ export function buildPieces(
       fromLine: Math.min(...group.atoms.map((atom) => atom.span.start)),
       toLine: Math.max(...group.atoms.map((atom) => atom.span.end)),
       cut: "unit",
-    });
+      // A piece that is one function goes to Jev with that whole function after the change.
+      // A run of statements and declarations is no function, so it gets the wide form, which
+      // is what the parser-free modes use.
+      context: group.fn
+        ? functionContext(wholeFunctions(group.atoms, sourceLines))
+        : wideContext({ file: file.file, header: file.header, hunks }, source),
+    };
+    pieces.push(piece);
   }
 
   assertEveryAddedLineOnce(file.file, addedNumbers, pieces);
   return pieces;
+}
+
+/**
+ * The whole new text of every unit a piece's atoms came from. A callable stands alone, so this
+ * is one function, unless one function over 40 added lines was cut into several pieces, in
+ * which case each of them carries the same whole function.
+ */
+function wholeFunctions(atoms: readonly Atom[], sourceLines: readonly string[]): PieceFunction[] {
+  const out: PieceFunction[] = [];
+  for (const atom of atoms) {
+    const fromLine = atom.span.unitStart;
+    const toLine = atom.span.node.endPosition.row + 1;
+    if (out.some((held) => held.fromLine === fromLine && held.toLine === toLine)) continue;
+    out.push({
+      name: atom.span.name,
+      fromLine,
+      toLine,
+      text: codeText(sourceLines, fromLine, toLine),
+    });
+  }
+  return out;
 }
 
 /** Added line numbers a piece holds, read back out of the piece's own text. */
@@ -704,8 +744,11 @@ export const HUNK_TRAILING_CONTEXT = 3;
  * with more than 30 added lines is cut right after the 30th, taking up to 3 trailing context
  * lines with it, and each piece carries a recomputed `@@` header. A piece with no added line
  * is dropped, because a claim about added lines has nothing to judge in it.
+ *
+ * `source` is the file's new text out of the snapshot, which is what the wide form Jev sees
+ * is built from.
  */
-export function piecesByHunk(file: FileDiff): Piece[] {
+export function piecesByHunk(file: FileDiff, source: string | null): Piece[] {
   const pieces: Piece[] = [];
   const addedNumbers: number[] = [];
 
@@ -736,6 +779,7 @@ export function piecesByHunk(file: FileDiff): Piece[] {
           fromLine: segmentNewStart,
           toLine: segmentNewStart + Math.max(countNew(segment), 1) - 1,
           cut: "hunk",
+          context: NO_CONTEXT,
         });
       }
       segment = [];
@@ -786,7 +830,7 @@ export function piecesByHunk(file: FileDiff): Piece[] {
   }
 
   assertEveryAddedLineOnce(file.file, addedNumbers, pieces);
-  return pieces;
+  return widened(pieces, source);
 }
 
 /**
@@ -794,7 +838,7 @@ export function piecesByHunk(file: FileDiff): Piece[] {
  * to 12,000 bytes each, and a hunk bigger than that is halved until it fits. This is how
  * stop-rules cut code before it had a parser.
  */
-export function chunkPieces(file: FileDiff): Piece[] {
+export function chunkPieces(file: FileDiff, source: string | null): Piece[] {
   const pieces: Piece[] = chunkFile(file).map((chunk) => {
     const range = chunkRange(chunk);
     return {
@@ -805,6 +849,7 @@ export function chunkPieces(file: FileDiff): Piece[] {
       fromLine: range.from,
       toLine: range.to,
       cut: "chunk" as const,
+      context: NO_CONTEXT,
     };
   });
   const added: number[] = [];
@@ -821,5 +866,5 @@ export function chunkPieces(file: FileDiff): Piece[] {
     }
   }
   assertEveryAddedLineOnce(file.file, added, pieces);
-  return pieces;
+  return widened(pieces, source);
 }

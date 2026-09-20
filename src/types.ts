@@ -23,6 +23,39 @@ export interface AddedLine {
  */
 export type CutMode = "functions" | "hunks" | "chunks";
 
+/** One whole function after the change, as Jev is shown it in `functions` mode. */
+export interface PieceFunction {
+  /** The name the report uses for this unit. */
+  name: string;
+  /** First and last new file line of the function, doc comment included. */
+  fromLine: number;
+  toLine: number;
+  /** The function's full new text. */
+  text: string;
+}
+
+/**
+ * The code around a piece that goes to Jev with it.
+ *
+ * none      the piece's own diff only, with the tool's normal context.
+ * wide      the diff widened to 25 unchanged lines around each change.
+ * function  the diff plus the whole function after the change.
+ */
+export type PieceContext =
+  | { kind: "none" }
+  | { kind: "wide"; diff: string }
+  | { kind: "function"; functions: PieceFunction[] };
+
+/** The one value for "Jev sees the diff and nothing else". */
+export const NO_CONTEXT: PieceContext = { kind: "none" };
+
+/** Exactly what one piece looked like inside a call's state. What `--show-context` prints. */
+export interface JevView {
+  file: string;
+  diff: string;
+  function?: PieceFunction[];
+}
+
 /** One rule a piece broke. */
 export interface BrokenRule {
   ruleId: string;
@@ -86,6 +119,17 @@ export interface RunStats {
   notChecked: number;
   /** Files cut by diff hunk instead of by syntax, and why. */
   cutByHunk: CutByHunk[];
+  /** How many unchanged lines Jev was shown around each change. */
+  contextLines: number;
+  /** Pieces Jev saw with their diff widened to those lines. */
+  widened: number;
+  /** Pieces Jev saw with the whole function after the change. */
+  withFunction: number;
+  /**
+   * Pieces Jev saw without the code around them, because the wide form on its own would go
+   * over the 60,000 byte call cap. A recorded fact, never a silent fallback.
+   */
+  tooBigToWiden: WidenRefused[];
   inputTokens: number;
   outputTokens: number;
   durationMs: number;
@@ -95,6 +139,15 @@ export interface RunStats {
 export interface CutByHunk {
   file: string;
   reason: string;
+}
+
+/** One piece whose wide form was too big for a call of its own. */
+export interface WidenRefused {
+  file: string;
+  fromLine: number;
+  toLine: number;
+  /** What a call carrying only this piece, widened, would have weighed. */
+  bytes: number;
 }
 
 /** One rule's score for one piece, with no bar applied. What `score` prints. */
@@ -113,6 +166,8 @@ export interface PieceScore {
   fromLine: number;
   toLine: number;
   rules: RuleScore[];
+  /** Exactly what Jev saw for this piece. Only filled in by `score --show-context`. */
+  jevSaw?: JevView;
 }
 
 /** What `stop-rules score` returns: every piece, every rule, every score, no cutoff. */
