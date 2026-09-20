@@ -2,7 +2,7 @@ import { promises as fs } from "node:fs";
 import * as path from "node:path";
 import { ADAPTERS, agentNames, getAdapter } from "./adapters/index.js";
 import type { AgentAdapter, InstallResult } from "./adapters/index.js";
-import { readTeamEndpoint, TEAM_CONFIG_FILE, writeTeamConfig } from "./credentials.js";
+import { readTeamEndpoint, writeTeamConfig } from "./credentials.js";
 import { isSkippedPath } from "./diff.js";
 import { findRepo, runGit } from "./git.js";
 import {
@@ -13,7 +13,9 @@ import {
   type GrammarKey,
 } from "./languages.js";
 import { parseRules, STARTER_RULES } from "./rules.js";
+import { DEFAULT_CUT, loadSettings, SETTINGS_FILE, writeSettings } from "./settings.js";
 import { grammarWasmPath, runtimeWasmPath, vendorDir } from "./treesitter.js";
+import type { CutMode } from "./types.js";
 import { isBundled } from "./version.js";
 
 /** Where the vendored single file lands inside the target repository. */
@@ -49,6 +51,8 @@ export interface InitGrammars {
 export interface InitReport {
   ok: boolean;
   repo: string;
+  /** How this repo will cut a change into pieces. `hunks` needs no parser files. */
+  cut: CutMode;
   /** Team mode when this repo sends its questions to a team server, local mode otherwise. */
   mode: "team" | "local";
   bundle: { path: string; written: boolean };
@@ -56,6 +60,8 @@ export interface InitReport {
   rules: { path: string; created: boolean };
   /** The team server this repo now points at, and the file that says so. */
   team: { endpoint: string; path: string; written: boolean } | null;
+  /** The settings file this run wrote, and which keys went into it. */
+  settings: { path: string; wrote: string[] } | null;
   agents: InitAgentReport[];
   todo: string[];
   /** Reasons the whole run could not proceed. */
@@ -71,6 +77,8 @@ export interface InitOptions {
   selfPath: string;
   /** Team mode: the stop-rules server every developer's hook should send questions to. */
   team?: string;
+  /** How this repo cuts a change into pieces. `hunks` copies no parser files. */
+  cut?: CutMode;
   /** Environment, so an endpoint already set in it counts as team mode. */
   env: NodeJS.ProcessEnv;
 }
@@ -83,11 +91,13 @@ function failure(repo: string, reason: string): InitReport {
   return {
     ok: false,
     repo,
+    cut: DEFAULT_CUT,
     mode: "local",
     bundle: { path: BUNDLE_PATH, written: false },
     grammars: noGrammars(),
     rules: { path: ".stop-rules.md", created: false },
     team: null,
+    settings: null,
     agents: [],
     todo: [],
     errors: [reason],
@@ -133,36 +143,53 @@ export async function init(options: InitOptions): Promise<InitReport> {
     }
   }
 
+  // The cut mode a flag asks for, else the one this repo already set, else the default.
+  const existingSettings = await loadSettings(root);
+  if (!existingSettings.ok) return failure(root, existingSettings.reason);
+  const cut = options.cut ?? existingSettings.loaded.settings.cut ?? DEFAULT_CUT;
+
   const report: InitReport = {
     ok: true,
     repo: root,
+    cut,
     mode: "local",
     bundle: { path: BUNDLE_PATH, written: false },
     grammars: noGrammars(),
     rules: { path: ".stop-rules.md", created: false },
     team: null,
+    settings: null,
     agents: [],
     todo: [],
     errors: [],
   };
 
   // Team mode: write the endpoint into the repo, so no developer needs the Jev key.
+  const wroteKeys: string[] = [];
   if (options.team !== undefined) {
     const written = await writeTeamConfig(root, options.team);
     if (!written.ok) {
       return failure(root, written.lines.join(" ").replace(/^stop-rules: /, ""));
     }
     report.mode = "team";
-    report.team = { endpoint: options.team.trim(), path: TEAM_CONFIG_FILE, written: true };
+    report.team = { endpoint: options.team.trim(), path: SETTINGS_FILE, written: true };
+    wroteKeys.push("endpoint");
   } else {
     // A teammate installing into a repository that is already on a team server.
-    const existing = await readTeamEndpoint(root, options.env);
+    const existing = readTeamEndpoint(existingSettings.loaded, options.env);
     if (!existing.ok) return failure(root, existing.reason);
     if (existing.endpoint !== null) {
       report.mode = "team";
       report.team = { endpoint: existing.endpoint, path: existing.source, written: false };
     }
   }
+
+  // The settings file is written only when this run has something to put in it.
+  if (options.cut !== undefined) {
+    const written = await writeSettings(root, { cut: options.cut });
+    if (!written.ok) return failure(root, written.reason ?? `could not write ${written.file}`);
+    wroteKeys.push("cut");
+  }
+  if (wroteKeys.length > 0) report.settings = { path: SETTINGS_FILE, wrote: wroteKeys };
 
   // 3. The vendored single file. Re-running init updates it.
   const source = bundleSource(options.selfPath);
@@ -183,9 +210,13 @@ export async function init(options: InitOptions): Promise<InitReport> {
     }
   }
 
-  // 3b. The parser and the grammars for the languages this repository is written in.
+  // 3b. The parser and the grammars, in functions mode. Hunks mode parses nothing, so it
+  // copies no wasm files and .stop-rules holds only the one script.
   try {
-    report.grammars = await copyGrammars(root);
+    report.grammars =
+      cut === "hunks"
+        ? { languages: [], added: [], kept: [], bytes: await folderBytes(path.join(root, VENDOR_DIR)) }
+        : await copyGrammars(root);
   } catch (error) {
     return failure(root, error instanceof Error ? error.message : String(error));
   }
@@ -237,10 +268,11 @@ export async function init(options: InitOptions): Promise<InitReport> {
       : 'Give it your own Jev key from TypeSafe: set TYPESAFE_API_KEY, or run printf %s "$KEY" | stop-rules login --jev-key-stdin',
   );
   report.todo.push(`Edit ${report.rules.path} so it says what your team actually cares about.`);
+  const vendored = cut === "hunks" ? "the checker" : "the checker and its grammars";
   report.todo.push(
     report.mode === "team"
-      ? `Commit ${VENDOR_DIR}/ (the checker and its grammars), ${TEAM_CONFIG_FILE} and the config files, so teammates and cloud agents get the check too.`
-      : `Commit ${VENDOR_DIR}/ (the checker and its grammars) and the config files, so teammates and cloud agents get the check too.`,
+      ? `Commit ${VENDOR_DIR}/ (${vendored}), ${SETTINGS_FILE} and the config files, so teammates and cloud agents get the check too.`
+      : `Commit ${VENDOR_DIR}/ (${vendored}) and the config files, so teammates and cloud agents get the check too.`,
   );
   report.todo.push("Check it works: stop-rules login --check");
   return report;
@@ -341,16 +373,27 @@ export function renderInit(report: InitReport): string[] {
   );
   const grammars = report.grammars;
   const megabytes = (grammars.bytes / 1_000_000).toFixed(1);
-  lines.push(
-    grammars.languages.length === 0
-      ? `  no file in this repo has a language stop-rules can parse, so it copied no grammars (${VENDOR_DIR} is ${megabytes} MB)`
-      : `  grammars for ${grammars.languages.join(", ")}: ${grammars.added.length} copied, ${grammars.kept.length} already there (${VENDOR_DIR} is ${megabytes} MB)`,
-  );
+  if (report.cut === "hunks") {
+    lines.push(
+      `  cut: hunks, so no parser and no grammars were copied (${VENDOR_DIR} is ${megabytes} MB)`,
+    );
+  } else {
+    lines.push(
+      grammars.languages.length === 0
+        ? `  no file in this repo has a language stop-rules can parse, so it copied no grammars (${VENDOR_DIR} is ${megabytes} MB)`
+        : `  grammars for ${grammars.languages.join(", ")}: ${grammars.added.length} copied, ${grammars.kept.length} already there (${VENDOR_DIR} is ${megabytes} MB)`,
+    );
+  }
   lines.push(
     report.rules.created
       ? `  wrote ${report.rules.path} with ${parseRules(STARTER_RULES).length} starter rules`
       : `  kept the rules file already at ${report.rules.path}`,
   );
+  // The endpoint has a line of its own below, so only the other keys are named here.
+  const otherKeys = report.settings?.wrote.filter((key) => key !== "endpoint") ?? [];
+  if (report.settings !== null && otherKeys.length > 0) {
+    lines.push(`  wrote ${otherKeys.join(" and ")} into ${report.settings.path}`);
+  }
   if (report.team !== null) {
     lines.push(
       report.team.written

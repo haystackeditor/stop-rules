@@ -11,8 +11,8 @@ import { homedir } from "node:os";
 import * as path from "node:path";
 import { DEFAULT_ENDPOINT, DEFAULT_MODEL, JevClient, type FetchLike } from "./jev.js";
 import { resolveApiKey } from "./key.js";
+import { loadSettings, writeSettings, type LoadedSettings } from "./settings.js";
 
-export const TEAM_CONFIG_FILE = ".stop-rules.json";
 export const SYSTEMONE_PATH = "/v1/systemone";
 export const TOKEN_FILE = "token";
 export const JEV_KEY_FILE = "jev-key";
@@ -117,57 +117,24 @@ export type TeamEndpointLookup =
   | { ok: true; endpoint: string | null; source: string }
   | { ok: false; reason: string };
 
-/** Env first, then the committed .stop-rules.json, which holds no secret. */
-export async function readTeamEndpoint(
-  repoRoot: string,
+/** Env first, then the committed settings file, which holds no secret. */
+export function readTeamEndpoint(
+  loaded: LoadedSettings,
   env: NodeJS.ProcessEnv,
-): Promise<TeamEndpointLookup> {
+): TeamEndpointLookup {
   const fromEnv = envValue(env, "STOP_RULES_ENDPOINT");
   if (!fromEnv.ok) return { ok: false, reason: fromEnv.reason };
   if (fromEnv.value !== null) {
     return { ok: true, endpoint: fromEnv.value, source: "STOP_RULES_ENDPOINT" };
   }
-
-  const file = path.join(repoRoot, TEAM_CONFIG_FILE);
-  let raw: string;
-  try {
-    raw = await fs.readFile(file, "utf8");
-  } catch (error) {
-    const err = error as NodeJS.ErrnoException;
-    if (err.code === "ENOENT") return { ok: true, endpoint: null, source: "none" };
-    return { ok: false, reason: `could not read ${file}: ${err.code ?? err.message}` };
-  }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch (error) {
-    return {
-      ok: false,
-      reason: `${file} is not valid JSON (${error instanceof Error ? error.message : String(error)}).`,
-    };
-  }
-  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-    return { ok: false, reason: `${file} does not hold a JSON object.` };
-  }
-  const endpoint = (parsed as { endpoint?: unknown }).endpoint;
-  // The file exists, so it is meant to point somewhere. Local mode is not what was meant.
-  if (endpoint === undefined) {
-    return {
-      ok: false,
-      reason: `${file} has no endpoint. Write one with stop-rules team <url>, or delete the file to use your own Jev key.`,
-    };
-  }
-  if (typeof endpoint !== "string") {
-    return { ok: false, reason: `the endpoint in ${file} is not a string.` };
-  }
-  if (endpoint.trim().length === 0) {
-    return { ok: false, reason: `the endpoint in ${file} is empty.` };
-  }
-  return { ok: true, endpoint, source: file };
+  const endpoint = loaded.settings.endpoint;
+  // No endpoint means local mode: this machine's own Jev key.
+  if (endpoint === undefined) return { ok: true, endpoint: null, source: "none" };
+  return { ok: true, endpoint, source: loaded.file };
 }
 
 export async function resolveCredentials(
-  repoRoot: string,
+  loaded: LoadedSettings,
   env: NodeJS.ProcessEnv,
 ): Promise<CredentialsResult> {
   // Checked here so a blank XDG_CONFIG_HOME is one plain message, not a thrown error from
@@ -178,7 +145,7 @@ export async function resolveCredentials(
   if (!model.ok) return { ok: false, reason: model.reason };
   const chosenModel = model.value === null ? DEFAULT_MODEL : model.value;
 
-  const team = await readTeamEndpoint(repoRoot, env);
+  const team = readTeamEndpoint(loaded, env);
   if (!team.ok) return { ok: false, reason: team.reason };
 
   if (team.endpoint !== null) {
@@ -245,46 +212,27 @@ export interface WriteResult {
 }
 
 /**
- * Writes the endpoint into <repoRoot>/.stop-rules.json, keeping every other key. Job A's
- * init command calls this for `init --team <endpoint>`.
+ * Writes the endpoint into the repository's settings file, keeping every other key. This is
+ * what `stop-rules team <url>` and `init --team <url>` call.
  */
 export async function writeTeamConfig(repoRoot: string, endpoint: string): Promise<WriteResult> {
   const parsed = parseEndpoint(endpoint);
   if (!parsed.ok) return { ok: false, lines: [`stop-rules: ${parsed.reason}`] };
 
-  const file = path.join(repoRoot, TEAM_CONFIG_FILE);
-  let settings: Record<string, unknown> = {};
-  let existed = false;
-  try {
-    const raw = await fs.readFile(file, "utf8");
-    existed = true;
-    const parsedFile: unknown = JSON.parse(raw);
-    if (typeof parsedFile !== "object" || parsedFile === null || Array.isArray(parsedFile)) {
-      return {
-        ok: false,
-        lines: [`stop-rules: ${file} does not hold a JSON object. Nothing was changed.`],
-      };
-    }
-    settings = parsedFile as Record<string, unknown>;
-  } catch (error) {
-    const err = error as NodeJS.ErrnoException;
-    if (err.code !== "ENOENT") {
-      return {
-        ok: false,
-        lines: [
-          `stop-rules: could not use ${file}: ${err.message}`,
-          "Nothing was changed. Fix the file and try again.",
-        ],
-      };
-    }
+  const written = await writeSettings(repoRoot, { endpoint: parsed.base });
+  if (!written.ok) {
+    return {
+      ok: false,
+      lines: [
+        `stop-rules: ${written.reason ?? `could not write ${written.file}`}`,
+        "Nothing was changed.",
+      ],
+    };
   }
-
-  settings["endpoint"] = parsed.base;
-  await fs.writeFile(file, `${JSON.stringify(settings, null, 2)}\n`, "utf8");
   return {
     ok: true,
     lines: [
-      existed ? `updated ${file}` : `wrote ${file}`,
+      written.existed ? `updated ${written.file}` : `wrote ${written.file}`,
       `  endpoint: ${parsed.base}`,
       "Commit that file: it holds no secret. Every developer then only needs the team token:",
       '  printf %s "$TOKEN" | stop-rules login --token-stdin',
@@ -332,7 +280,9 @@ export async function loginCheck(
   env: NodeJS.ProcessEnv,
   fetchImpl: FetchLike = (url, init) => fetch(url, init),
 ): Promise<WriteResult> {
-  const resolved = await resolveCredentials(repoRoot, env);
+  const load = await loadSettings(repoRoot);
+  if (!load.ok) return { ok: false, lines: [`stop-rules: ${load.reason}`] };
+  const resolved = await resolveCredentials(load.loaded, env);
   if (!resolved.ok) return { ok: false, lines: [`stop-rules: ${resolved.reason}`] };
   const { mode, endpoint, bearer, model, teamBase } = resolved.credentials;
   const lines = [`mode: ${mode}`, `endpoint: ${endpoint}`];

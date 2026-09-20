@@ -14,12 +14,8 @@ export interface AddedLine {
   text: string;
 }
 
-export interface ViolationLine {
-  /** Line number in the new version of the file. */
-  line: number;
-  /** Trimmed text of that line. */
-  text: string;
-}
+/** How a change is cut into pieces. Set with `cut` in .stop-rules.json or `--cut`. */
+export type CutMode = "functions" | "hunks";
 
 /** One rule a piece broke. */
 export interface BrokenRule {
@@ -27,13 +23,6 @@ export interface BrokenRule {
   /** The rule in full. Never shortened. */
   rule: string;
   confidence: number;
-  /**
-   * Only filled by the old line finding report: the lines that reached the cutoff, at most
-   * 3, ascending. Empty in the piece report, which names no line.
-   */
-  lines: ViolationLine[];
-  /** Why no line is named, in plain words. Null in the piece report and when lines holds them. */
-  unlocalised: string | null;
 }
 
 /** One piece and every rule it broke. This is one entry of the report. */
@@ -69,6 +58,8 @@ export interface SkippedFile {
 }
 
 export interface RunStats {
+  /** How the change was cut into pieces in this run. */
+  cut: CutMode;
   files: number;
   /** Pieces the diff was cut into. Each one is judged on its own. */
   pieces: number;
@@ -93,6 +84,34 @@ export interface RunStats {
 export interface CutByHunk {
   file: string;
   reason: string;
+}
+
+/** One rule's score for one piece, with no bar applied. What `score` prints. */
+export interface RuleScore {
+  ruleId: string;
+  /** The rule in full. Never shortened. */
+  rule: string;
+  score: number;
+}
+
+/** One piece and every rule's score for it, highest first. One entry of a score report. */
+export interface PieceScore {
+  file: string;
+  /** The function this piece is, or "top-level code". Null when the piece was cut by hunk. */
+  unit: string | null;
+  fromLine: number;
+  toLine: number;
+  rules: RuleScore[];
+}
+
+/** What `stop-rules score` returns: every piece, every rule, every score, no cutoff. */
+export interface ScoreReport {
+  pieces: PieceScore[];
+  notChecked: NotChecked[];
+  skipped: SkippedFile[];
+  stats: RunStats;
+  /** What was scored: the working tree, or a diff file. */
+  source: string;
 }
 
 export interface CheckReport {

@@ -1202,12 +1202,13 @@ function getAdapter(name2) {
 }
 
 // src/check.ts
-import * as path19 from "node:path";
+import { promises as fs15 } from "node:fs";
+import * as path20 from "node:path";
 
 // src/credentials.ts
-import { promises as fs8 } from "node:fs";
+import { promises as fs9 } from "node:fs";
 import { homedir } from "node:os";
-import * as path14 from "node:path";
+import * as path15 from "node:path";
 
 // src/jev.ts
 var DEFAULT_ENDPOINT = "https://api.typesafe.ai/v1/systemone";
@@ -1351,11 +1352,12 @@ var JevClient = class {
         return { ok: false, failure: "budget", message: "call budget exhausted" };
       }
       attempt += 1;
+      this.callsUsed += 1;
       const sent = await this.fetchOnce(body2);
       if (sent.kind === "busy") {
+        this.callsUsed -= 1;
         return { ok: false, failure: "busy", message: sent.reason };
       }
-      this.callsUsed += 1;
       if (sent.kind === "error") {
         if (attempt < MAX_ATTEMPTS) {
           this.options.note(`${sent.message}, retrying`);
@@ -1540,8 +1542,102 @@ async function resolveApiKey(env) {
   };
 }
 
+// src/settings.ts
+import { promises as fs8 } from "node:fs";
+import * as path14 from "node:path";
+var SETTINGS_FILE = ".stop-rules.json";
+var DEFAULT_CUT = "functions";
+var KNOWN_KEYS = ["endpoint", "cut", "threshold", "maxCalls"];
+function parseSettings(file, raw) {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    return { ok: false, reason: `${file} does not hold a JSON object.` };
+  }
+  const record = raw;
+  const settings = {};
+  for (const key of Object.keys(record)) {
+    if (!KNOWN_KEYS.includes(key)) {
+      return {
+        ok: false,
+        reason: `${file} sets "${key}", which stop-rules does not know. The settings are ${KNOWN_KEYS.join(", ")}.`
+      };
+    }
+  }
+  const endpoint = record["endpoint"];
+  if (endpoint !== void 0) {
+    if (typeof endpoint !== "string") {
+      return { ok: false, reason: `"endpoint" in ${file} must be a string.` };
+    }
+    if (endpoint.trim().length === 0) {
+      return { ok: false, reason: `"endpoint" in ${file} is empty.` };
+    }
+    settings.endpoint = endpoint.trim();
+  }
+  const cut = record["cut"];
+  if (cut !== void 0) {
+    if (cut !== "functions" && cut !== "hunks") {
+      return {
+        ok: false,
+        reason: `"cut" in ${file} must be "functions" or "hunks", not ${JSON.stringify(cut)}.`
+      };
+    }
+    settings.cut = cut;
+  }
+  const threshold = record["threshold"];
+  if (threshold !== void 0) {
+    if (typeof threshold !== "number" || !Number.isFinite(threshold)) {
+      return { ok: false, reason: `"threshold" in ${file} must be a number.` };
+    }
+    if (threshold < 0 || threshold > 1) {
+      return { ok: false, reason: `"threshold" in ${file} must be between 0 and 1, not ${threshold}.` };
+    }
+    settings.threshold = threshold;
+  }
+  const maxCalls = record["maxCalls"];
+  if (maxCalls !== void 0) {
+    if (typeof maxCalls !== "number" || !Number.isInteger(maxCalls)) {
+      return { ok: false, reason: `"maxCalls" in ${file} must be a whole number.` };
+    }
+    if (maxCalls < 1) {
+      return { ok: false, reason: `"maxCalls" in ${file} must be 1 or more, not ${maxCalls}.` };
+    }
+    settings.maxCalls = maxCalls;
+  }
+  return { ok: true, loaded: { settings, file, exists: true } };
+}
+async function loadSettings(repoRoot) {
+  const file = path14.join(repoRoot, SETTINGS_FILE);
+  let text;
+  try {
+    text = await fs8.readFile(file, "utf8");
+  } catch (error) {
+    const err2 = error;
+    if (err2.code === "ENOENT") {
+      return { ok: true, loaded: { settings: {}, file, exists: false } };
+    }
+    return { ok: false, reason: `could not read ${file}: ${err2.code ?? err2.message}` };
+  }
+  let raw;
+  try {
+    raw = JSON.parse(text);
+  } catch (error) {
+    return {
+      ok: false,
+      reason: `${file} is not valid JSON (${error instanceof Error ? error.message : String(error)}).`
+    };
+  }
+  return parseSettings(file, raw);
+}
+async function writeSettings(repoRoot, patch) {
+  const file = path14.join(repoRoot, SETTINGS_FILE);
+  const load = await loadSettings(repoRoot);
+  if (!load.ok) return { ok: false, wrote: [], file, existed: true, reason: load.reason };
+  const merged = { ...load.loaded.settings, ...patch };
+  await fs8.writeFile(file, `${JSON.stringify(merged, null, 2)}
+`, "utf8");
+  return { ok: true, wrote: Object.keys(patch), file, existed: load.loaded.exists };
+}
+
 // src/credentials.ts
-var TEAM_CONFIG_FILE = ".stop-rules.json";
 var SYSTEMONE_PATH = "/v1/systemone";
 var TOKEN_FILE = "token";
 var JEV_KEY_FILE = "jev-key";
@@ -1558,19 +1654,19 @@ function envValue(env, name2) {
 function configDir(env) {
   const xdg = envValue(env, "XDG_CONFIG_HOME");
   if (!xdg.ok) throw new Error(xdg.reason);
-  const base = xdg.value === null ? path14.join(homedir(), ".config") : xdg.value;
-  return path14.join(base, "stop-rules");
+  const base = xdg.value === null ? path15.join(homedir(), ".config") : xdg.value;
+  return path15.join(base, "stop-rules");
 }
 function tokenPath(env) {
-  return path14.join(configDir(env), TOKEN_FILE);
+  return path15.join(configDir(env), TOKEN_FILE);
 }
 function jevKeyPath(env) {
-  return path14.join(configDir(env), JEV_KEY_FILE);
+  return path15.join(configDir(env), JEV_KEY_FILE);
 }
 async function readTrimmed(file) {
   let text;
   try {
-    text = (await fs8.readFile(file, "utf8")).trim();
+    text = (await fs9.readFile(file, "utf8")).trim();
   } catch (error) {
     const err2 = error;
     if (err2.code === "ENOENT") return { value: null };
@@ -1598,55 +1694,23 @@ function parseEndpoint(raw) {
     post: isFull ? trimmed : `${trimmed}${SYSTEMONE_PATH}`
   };
 }
-async function readTeamEndpoint(repoRoot, env) {
+function readTeamEndpoint(loaded, env) {
   const fromEnv = envValue(env, "STOP_RULES_ENDPOINT");
   if (!fromEnv.ok) return { ok: false, reason: fromEnv.reason };
   if (fromEnv.value !== null) {
     return { ok: true, endpoint: fromEnv.value, source: "STOP_RULES_ENDPOINT" };
   }
-  const file = path14.join(repoRoot, TEAM_CONFIG_FILE);
-  let raw;
-  try {
-    raw = await fs8.readFile(file, "utf8");
-  } catch (error) {
-    const err2 = error;
-    if (err2.code === "ENOENT") return { ok: true, endpoint: null, source: "none" };
-    return { ok: false, reason: `could not read ${file}: ${err2.code ?? err2.message}` };
-  }
-  let parsed;
-  try {
-    parsed = JSON.parse(raw);
-  } catch (error) {
-    return {
-      ok: false,
-      reason: `${file} is not valid JSON (${error instanceof Error ? error.message : String(error)}).`
-    };
-  }
-  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-    return { ok: false, reason: `${file} does not hold a JSON object.` };
-  }
-  const endpoint = parsed.endpoint;
-  if (endpoint === void 0) {
-    return {
-      ok: false,
-      reason: `${file} has no endpoint. Write one with stop-rules team <url>, or delete the file to use your own Jev key.`
-    };
-  }
-  if (typeof endpoint !== "string") {
-    return { ok: false, reason: `the endpoint in ${file} is not a string.` };
-  }
-  if (endpoint.trim().length === 0) {
-    return { ok: false, reason: `the endpoint in ${file} is empty.` };
-  }
-  return { ok: true, endpoint, source: file };
+  const endpoint = loaded.settings.endpoint;
+  if (endpoint === void 0) return { ok: true, endpoint: null, source: "none" };
+  return { ok: true, endpoint, source: loaded.file };
 }
-async function resolveCredentials(repoRoot, env) {
+async function resolveCredentials(loaded, env) {
   const configHome = envValue(env, "XDG_CONFIG_HOME");
   if (!configHome.ok) return { ok: false, reason: configHome.reason };
   const model = envValue(env, "STOP_RULES_JEV_MODEL");
   if (!model.ok) return { ok: false, reason: model.reason };
   const chosenModel = model.value === null ? DEFAULT_MODEL : model.value;
-  const team = await readTeamEndpoint(repoRoot, env);
+  const team = readTeamEndpoint(loaded, env);
   if (!team.ok) return { ok: false, reason: team.reason };
   if (team.endpoint !== null) {
     const parsed = parseEndpoint(team.endpoint);
@@ -1703,39 +1767,20 @@ async function resolveCredentials(repoRoot, env) {
 async function writeTeamConfig(repoRoot, endpoint) {
   const parsed = parseEndpoint(endpoint);
   if (!parsed.ok) return { ok: false, lines: [`stop-rules: ${parsed.reason}`] };
-  const file = path14.join(repoRoot, TEAM_CONFIG_FILE);
-  let settings = {};
-  let existed = false;
-  try {
-    const raw = await fs8.readFile(file, "utf8");
-    existed = true;
-    const parsedFile = JSON.parse(raw);
-    if (typeof parsedFile !== "object" || parsedFile === null || Array.isArray(parsedFile)) {
-      return {
-        ok: false,
-        lines: [`stop-rules: ${file} does not hold a JSON object. Nothing was changed.`]
-      };
-    }
-    settings = parsedFile;
-  } catch (error) {
-    const err2 = error;
-    if (err2.code !== "ENOENT") {
-      return {
-        ok: false,
-        lines: [
-          `stop-rules: could not use ${file}: ${err2.message}`,
-          "Nothing was changed. Fix the file and try again."
-        ]
-      };
-    }
+  const written = await writeSettings(repoRoot, { endpoint: parsed.base });
+  if (!written.ok) {
+    return {
+      ok: false,
+      lines: [
+        `stop-rules: ${written.reason ?? `could not write ${written.file}`}`,
+        "Nothing was changed."
+      ]
+    };
   }
-  settings["endpoint"] = parsed.base;
-  await fs8.writeFile(file, `${JSON.stringify(settings, null, 2)}
-`, "utf8");
   return {
     ok: true,
     lines: [
-      existed ? `updated ${file}` : `wrote ${file}`,
+      written.existed ? `updated ${written.file}` : `wrote ${written.file}`,
       `  endpoint: ${parsed.base}`,
       "Commit that file: it holds no secret. Every developer then only needs the team token:",
       '  printf %s "$TOKEN" | stop-rules login --token-stdin'
@@ -1755,10 +1800,10 @@ async function login(env, target, secret) {
   }
   const dir = configDir(env);
   const file = target === "token" ? tokenPath(env) : jevKeyPath(env);
-  await fs8.mkdir(dir, { recursive: true, mode: 448 });
-  await fs8.writeFile(file, `${value2}
+  await fs9.mkdir(dir, { recursive: true, mode: 448 });
+  await fs9.writeFile(file, `${value2}
 `, { encoding: "utf8", mode: 384 });
-  await fs8.chmod(file, 384);
+  await fs9.chmod(file, 384);
   return {
     ok: true,
     lines: [
@@ -1769,7 +1814,9 @@ async function login(env, target, secret) {
   };
 }
 async function loginCheck(repoRoot, env, fetchImpl = (url, init3) => fetch(url, init3)) {
-  const resolved = await resolveCredentials(repoRoot, env);
+  const load = await loadSettings(repoRoot);
+  if (!load.ok) return { ok: false, lines: [`stop-rules: ${load.reason}`] };
+  const resolved = await resolveCredentials(load.loaded, env);
   if (!resolved.ok) return { ok: false, lines: [`stop-rules: ${resolved.reason}`] };
   const { mode, endpoint, bearer: bearer2, model, teamBase } = resolved.credentials;
   const lines = [`mode: ${mode}`, `endpoint: ${endpoint}`];
@@ -1816,6 +1863,7 @@ async function loginCheck(repoRoot, env, fetchImpl = (url, init3) => fetch(url, 
 }
 
 // src/diff.ts
+var CHUNK_MAX_BYTES = 12e3;
 var LONG_LINE_LIMIT = 1e3;
 function longLineMarker(chars) {
   return `<stop-rules left out a ${chars} character line here: data, not code>`;
@@ -2130,6 +2178,41 @@ function splitHunk(hunk, pieces) {
   }
   return out3;
 }
+function splitHunkToFit(hunk, headerBytes) {
+  const budget = Math.max(CHUNK_MAX_BYTES - headerBytes, 1);
+  if (utf8Bytes(hunkText(hunk)) <= budget) return [hunk];
+  if (hunk.lines.length < 2) return [hunk];
+  let pieces = 2;
+  for (; ; ) {
+    const parts2 = splitHunk(hunk, pieces);
+    const tooBig = parts2.some((part) => utf8Bytes(hunkText(part)) > budget);
+    if (!tooBig || pieces >= hunk.lines.length) return parts2;
+    pieces *= 2;
+  }
+}
+function chunkFile(file) {
+  const headerBytes = utf8Bytes(`${file.header.join("\n")}
+`);
+  const fitted = [];
+  for (const hunk of file.hunks) {
+    fitted.push(...splitHunkToFit(hunk, headerBytes));
+  }
+  const chunks = [];
+  let current = [];
+  let currentBytes = headerBytes;
+  for (const hunk of fitted) {
+    const size = utf8Bytes(hunkText(hunk));
+    if (current.length > 0 && currentBytes + size > CHUNK_MAX_BYTES) {
+      chunks.push({ file: file.file, header: file.header, hunks: current });
+      current = [];
+      currentBytes = headerBytes;
+    }
+    current.push(hunk);
+    currentBytes += size;
+  }
+  if (current.length > 0) chunks.push({ file: file.file, header: file.header, hunks: current });
+  return chunks.filter((chunk) => chunk.hunks.some((h) => h.lines.some((l) => l.startsWith("+"))));
+}
 function halvePiece(piece) {
   const halves = halveChunk(piece);
   if (halves === null) return null;
@@ -2165,103 +2248,6 @@ function halveChunk(chunk) {
     { file: chunk.file, header: chunk.header, hunks: [first] },
     { file: chunk.file, header: chunk.header, hunks: [second] }
   ];
-}
-
-// src/git.ts
-import { execFile } from "node:child_process";
-import { promises as fs9 } from "node:fs";
-import * as path15 from "node:path";
-import { randomBytes } from "node:crypto";
-var MAX_BUFFER = 256 * 1024 * 1024;
-function runGit(cwd, args2, extraEnv) {
-  return new Promise((resolve3, reject) => {
-    execFile(
-      "git",
-      args2,
-      {
-        cwd,
-        env: extraEnv ? { ...process.env, ...extraEnv } : process.env,
-        maxBuffer: MAX_BUFFER,
-        encoding: "utf8"
-      },
-      (error, stdout, stderr) => {
-        if (error === null) {
-          resolve3({ code: 0, stdout, stderr });
-          return;
-        }
-        const withCode = error;
-        if (typeof withCode.code === "number") {
-          resolve3({ code: withCode.code, stdout, stderr });
-          return;
-        }
-        reject(new Error(`could not run git ${args2.join(" ")}: ${error.message}`));
-      }
-    );
-  });
-}
-async function gitOrThrow(cwd, args2, extraEnv) {
-  const result = await runGit(cwd, args2, extraEnv);
-  if (result.code !== 0) {
-    throw new Error(`git ${args2.join(" ")} failed (exit ${result.code}): ${result.stderr.trim()}`);
-  }
-  return result.stdout;
-}
-async function findRepo(cwd) {
-  const root = await runGit(cwd, ["rev-parse", "--show-toplevel"]);
-  if (root.code !== 0) return null;
-  const gitDir = await runGit(cwd, ["rev-parse", "--absolute-git-dir"]);
-  if (gitDir.code !== 0) return null;
-  return { root: root.stdout.trim(), gitDir: gitDir.stdout.trim() };
-}
-async function hasHead(root) {
-  const result = await runGit(root, ["rev-parse", "--verify", "--quiet", "HEAD"]);
-  return result.code === 0;
-}
-async function objectExists(root, rev) {
-  const result = await runGit(root, ["cat-file", "-e", `${rev}^{object}`]);
-  return result.code === 0;
-}
-async function resolveTree(root, rev) {
-  const result = await runGit(root, ["rev-parse", "--verify", "--quiet", `${rev}^{tree}`]);
-  if (result.code !== 0) return null;
-  const tree = result.stdout.trim();
-  return tree.length > 0 ? tree : null;
-}
-async function emptyTree(root) {
-  const out3 = await gitOrThrow(root, ["hash-object", "-w", "-t", "tree", "--stdin"]);
-  return out3.trim();
-}
-async function snapshotWorkingTree(repo, stateDir) {
-  await fs9.mkdir(stateDir, { recursive: true });
-  const indexPath = path15.join(stateDir, `index-${process.pid}-${randomBytes(4).toString("hex")}`);
-  const env = { GIT_INDEX_FILE: indexPath };
-  try {
-    if (await hasHead(repo.root)) {
-      await gitOrThrow(repo.root, ["read-tree", "HEAD"], env);
-    }
-    await gitOrThrow(repo.root, ["add", "-A", "--", "."], env);
-    const tree = await gitOrThrow(repo.root, ["write-tree"], env);
-    return tree.trim();
-  } finally {
-    await fs9.rm(indexPath, { force: true });
-    await fs9.rm(`${indexPath}.lock`, { force: true });
-  }
-}
-async function readBlob(root, tree, filePath) {
-  const result = await runGit(root, ["cat-file", "blob", `${tree}:${filePath}`]);
-  if (result.code !== 0) return null;
-  return result.stdout;
-}
-async function diffTrees(root, base, head) {
-  return gitOrThrow(root, [
-    "diff",
-    "--no-color",
-    "--no-ext-diff",
-    "--no-renames",
-    "-U8",
-    base,
-    head
-  ]);
 }
 
 // src/languages.ts
@@ -3006,6 +2992,35 @@ function piecesByHunk(file) {
     flush();
   }
   assertEveryAddedLineOnce(file.file, addedNumbers, pieces);
+  return pieces;
+}
+function chunkPieces(file) {
+  const pieces = chunkFile(file).map((chunk) => {
+    const range = chunkRange(chunk);
+    return {
+      file: chunk.file,
+      header: chunk.header,
+      hunks: chunk.hunks,
+      unitName: null,
+      fromLine: range.from,
+      toLine: range.to,
+      cut: "hunk"
+    };
+  });
+  const added = [];
+  for (const hunk of file.hunks) {
+    let line = hunk.newStart;
+    for (const raw of hunk.lines) {
+      const marker = raw[0];
+      if (marker === "+") {
+        added.push(line);
+        line += 1;
+      } else if (marker === " ") {
+        line += 1;
+      }
+    }
+  }
+  assertEveryAddedLineOnce(file.file, added, pieces);
   return pieces;
 }
 
@@ -5088,11 +5103,11 @@ var Module2 = (() => {
       throw toThrow;
     }, "quit_");
     var scriptDirectory = "";
-    function locateFile(path21) {
+    function locateFile(path22) {
       if (Module["locateFile"]) {
-        return Module["locateFile"](path21, scriptDirectory);
+        return Module["locateFile"](path22, scriptDirectory);
       }
-      return scriptDirectory + path21;
+      return scriptDirectory + path22;
     }
     __name(locateFile, "locateFile");
     var readAsync, readBinary;
@@ -7049,11 +7064,15 @@ function describeExtension(filePath) {
   const extension = extensionOf(filePath);
   return extension.length === 0 ? "a file with no extension" : extension;
 }
-async function cutFiles(root, snapshot, files) {
+async function cutFiles(files, options) {
   const pieces = [];
   const notChecked = [];
   const cutByHunk = [];
   const missing = /* @__PURE__ */ new Set();
+  if (options.cut === "hunks") {
+    for (const file of files) pieces.push(...chunkPieces(file));
+    return { pieces, notChecked, cutByHunk };
+  }
   for (const file of files) {
     const key = grammarForPath(file.file);
     if (key === null) {
@@ -7062,7 +7081,7 @@ async function cutFiles(root, snapshot, files) {
       continue;
     }
     const range = chunkRange(file);
-    const source = await readBlob(root, snapshot, file.file);
+    const source = await options.readSource(file.file);
     if (source === null) {
       notChecked.push({
         file: file.file,
@@ -7110,17 +7129,14 @@ async function cutFiles(root, snapshot, files) {
 
 // src/engine.ts
 var DEFAULT_THRESHOLD = 0.6;
+var DEFAULT_MAX_CALLS = 60;
 var PIECES_PER_CALL = 4;
 var PACK_MAX_BYTES = 6e4;
-var MAX_LINES_PER_VIOLATION = 3;
 var MAX_RULES_PER_CALL = 200;
 var CACHE_KEY_VERSION = "v1";
 var CACHE_PIECE_KEY = "p0";
 function stage1Claim(rule, key) {
   return `The added lines in the diff state.pieces.${key} violate this coding rule: ${rule.text}`;
-}
-function stage2Claim(line) {
-  return `Added line ${line.line} is where this diff violates the rule: ${line.text.trim()}`;
 }
 var encoder2 = new TextEncoder();
 async function sha256Hex(parts2) {
@@ -7202,33 +7218,6 @@ function packWork(model, work) {
   if (current.length > 0) packs.push(current);
   return packs;
 }
-function makeStage2Node(piece, rule, lines) {
-  const questions = {};
-  const byQuestion = {};
-  lines.forEach((line, index) => {
-    const id = `q${index}`;
-    questions[id] = { type: "noul", instructions: stage2Claim(line) };
-    byQuestion[id] = line;
-  });
-  return {
-    payload: { piece, rule, byQuestion },
-    state: { file: piece.file, diff: chunkText(piece), rule: rule.text },
-    questions,
-    halve: () => {
-      if (lines.length < 2) return null;
-      const mid = Math.ceil(lines.length / 2);
-      return [
-        makeStage2Node(piece, rule, lines.slice(0, mid)),
-        makeStage2Node(piece, rule, lines.slice(mid))
-      ];
-    }
-  };
-}
-function localisableLines(piece) {
-  return addedLines(piece).filter(
-    (line) => /[A-Za-z0-9]/.test(line.text) && !isLongLineMarker(line.text)
-  );
-}
 async function runEngine(input) {
   const { cache, note, threshold, model } = input;
   const client = new JevClient({
@@ -7243,7 +7232,7 @@ async function runEngine(input) {
     ...input.slot ? { slot: input.slot } : {}
   });
   const notChecked = [];
-  const hits = [];
+  const scored = [];
   const piecesPerCall = [];
   let cacheHits = 0;
   let answered = 0;
@@ -7268,7 +7257,7 @@ async function runEngine(input) {
       }
       cacheHits += 1;
       answered += 1;
-      if (cached >= threshold) hits.push({ piece, rule, score: cached });
+      scored.push({ piece, rule, score: cached });
     }
     for (let i2 = 0; i2 < uncached.length; i2 += MAX_RULES_PER_CALL) {
       work.push({ piece, rules: uncached.slice(i2, i2 + MAX_RULES_PER_CALL) });
@@ -7302,27 +7291,13 @@ async function runEngine(input) {
         await cacheKey(model, stage1Claim(target.rule, CACHE_PIECE_KEY), soloState(target.piece)),
         noul
       );
-      if (noul >= threshold) hits.push({ piece: target.piece, rule: target.rule, score: noul });
+      scored.push({ piece: target.piece, rule: target.rule, score: noul });
     }
   }
+  const hits = scored.filter((hit) => hit.score >= threshold);
   const fresh = input.skipFinding === void 0 ? hits : hits.filter((hit) => !input.skipFinding?.(hit.rule.id, chunkText(hit.piece)));
   const findings = fresh.map((hit) => ({ ruleId: hit.rule.id, pieceText: chunkText(hit.piece) }));
-  const localised = input.reportMode === "lines" ? await localiseLines({
-    client,
-    cache,
-    fresh,
-    model,
-    threshold,
-    note,
-    onFailure: (failure2) => {
-      if (holdsBaseline(failure2)) holdBaseline = true;
-      noteFailure(failure2);
-    },
-    countCacheHit: () => {
-      cacheHits += 1;
-    }
-  }) : /* @__PURE__ */ new Map();
-  const pieces = groupByPiece(fresh, localised);
+  const pieces = groupByPiece(fresh);
   const fromLineOf = (entry) => entry.fromLine === void 0 ? 0 : entry.fromLine;
   notChecked.sort((a, b) => {
     const fileA = a.file ?? "";
@@ -7331,6 +7306,7 @@ async function runEngine(input) {
   });
   return {
     pieces,
+    scores: groupScores(scored),
     notChecked,
     calls: client.calls,
     cacheHits,
@@ -7343,20 +7319,14 @@ async function runEngine(input) {
     findings
   };
 }
-function hitKey(rule, piece) {
-  return `${rule.id}\0${chunkText(piece)}`;
-}
-function groupByPiece(fresh, localised) {
+function groupByPiece(fresh) {
   const byPiece = /* @__PURE__ */ new Map();
   for (const hit of fresh) {
     const text = chunkText(hit.piece);
-    const found = localised.get(hitKey(hit.rule, hit.piece));
     const broken = {
       ruleId: hit.rule.id,
       rule: hit.rule.text,
-      confidence: hit.score,
-      lines: found?.lines ?? [],
-      unlocalised: found?.unlocalised ?? null
+      confidence: hit.score
     };
     const existing = byPiece.get(text);
     if (existing !== void 0) {
@@ -7379,90 +7349,140 @@ function groupByPiece(fresh, localised) {
   pieces.sort((a, b) => a.file === b.file ? a.fromLine - b.fromLine : a.file < b.file ? -1 : 1);
   return pieces;
 }
-async function localiseLines(args2) {
-  const { client, cache, fresh, model, threshold, note } = args2;
-  const nodes = [];
-  const scores = /* @__PURE__ */ new Map();
-  const failures = /* @__PURE__ */ new Map();
-  for (const hit of fresh) {
-    const state = { file: hit.piece.file, diff: chunkText(hit.piece), rule: hit.rule.text };
-    const perLine = /* @__PURE__ */ new Map();
-    scores.set(hitKey(hit.rule, hit.piece), perLine);
-    const uncached = [];
-    for (const line of localisableLines(hit.piece)) {
-      const cached = cache.get(await cacheKey(model, stage2Claim(line), state));
-      if (cached === void 0) {
-        uncached.push(line);
-        continue;
-      }
-      args2.countCacheHit();
-      perLine.set(line.line, cached);
-    }
-    if (uncached.length > 0) nodes.push(makeStage2Node(hit.piece, hit.rule, uncached));
-  }
-  for (const result of await client.askAll(nodes)) {
-    const { piece, rule, byQuestion } = result.node.payload;
-    const target = scores.get(hitKey(rule, piece));
-    if (!result.outcome.ok) {
-      const failure2 = result.outcome.failure;
-      args2.onFailure(failure2);
-      const why = `the question about which line failed: ${reasonFor(failure2, result.outcome.message)}`;
-      note(`could not localise rule ${rule.id} in ${piece.file}: ${why}`);
-      failures.set(hitKey(rule, piece), why);
+function groupScores(scored) {
+  const byPiece = /* @__PURE__ */ new Map();
+  for (const hit of scored) {
+    const text = chunkText(hit.piece);
+    const entry = {
+      ruleId: hit.rule.id,
+      rule: hit.rule.text,
+      score: hit.score
+    };
+    const existing = byPiece.get(text);
+    if (existing !== void 0) {
+      existing.rules.push(entry);
       continue;
     }
-    for (const [id, line] of Object.entries(byQuestion)) {
-      const noul = result.outcome.answers[id];
-      if (noul === void 0) {
-        note(`Jev returned no answer for line ${line.line} of ${piece.file}`);
-        continue;
-      }
-      cache.set(await cacheKey(model, stage2Claim(line), result.node.state), noul);
-      target?.set(line.line, noul);
-    }
+    byPiece.set(text, {
+      file: hit.piece.file,
+      unit: hit.piece.unitName,
+      fromLine: hit.piece.fromLine,
+      toLine: hit.piece.toLine,
+      rules: [entry]
+    });
   }
-  const out3 = /* @__PURE__ */ new Map();
-  for (const hit of fresh) {
-    const key = hitKey(hit.rule, hit.piece);
-    const perLine = scores.get(key);
-    if (perLine === void 0) {
-      throw new Error(`internal error: no line scores were recorded for ${hit.piece.file}`);
-    }
-    const textByLine = new Map(addedLines(hit.piece).map((line) => [line.line, line.text.trim()]));
-    const byScore = [...perLine.entries()].sort((a, b) => b[1] - a[1]);
-    const above = byScore.filter(([, score]) => score >= threshold).slice(0, MAX_LINES_PER_VIOLATION);
-    const lines = [];
-    for (const [lineNo] of above) {
-      const text = textByLine.get(lineNo);
-      if (text === void 0) {
-        throw new Error(`internal error: line ${lineNo} is not an added line of ${hit.piece.file}`);
+  const pieces = [...byPiece.values()];
+  for (const piece of pieces) piece.rules.sort((a, b) => b.score - a.score);
+  const top = (piece) => piece.rules[0]?.score ?? 0;
+  pieces.sort((a, b) => {
+    if (top(a) !== top(b)) return top(b) - top(a);
+    if (a.file !== b.file) return a.file < b.file ? -1 : 1;
+    return a.fromLine - b.fromLine;
+  });
+  return pieces;
+}
+
+// src/git.ts
+import { execFile } from "node:child_process";
+import { promises as fs11 } from "node:fs";
+import * as path17 from "node:path";
+import { randomBytes } from "node:crypto";
+var MAX_BUFFER = 256 * 1024 * 1024;
+function runGit(cwd, args2, extraEnv) {
+  return new Promise((resolve3, reject) => {
+    execFile(
+      "git",
+      args2,
+      {
+        cwd,
+        env: extraEnv ? { ...process.env, ...extraEnv } : process.env,
+        maxBuffer: MAX_BUFFER,
+        encoding: "utf8"
+      },
+      (error, stdout, stderr) => {
+        if (error === null) {
+          resolve3({ code: 0, stdout, stderr });
+          return;
+        }
+        const withCode = error;
+        if (typeof withCode.code === "number") {
+          resolve3({ code: withCode.code, stdout, stderr });
+          return;
+        }
+        reject(new Error(`could not run git ${args2.join(" ")}: ${error.message}`));
       }
-      lines.push({ line: lineNo, text });
-    }
-    lines.sort((a, b) => a.line - b.line);
-    let unlocalised = null;
-    if (lines.length === 0) {
-      const failed2 = failures.get(key);
-      if (failed2 !== void 0) unlocalised = failed2;
-      else if (byScore.length > 0) unlocalised = `no added line reached the ${threshold} cutoff`;
-      else if (localisableLines(hit.piece).length === 0) {
-        unlocalised = "no added line in this block has text to point at";
-      } else unlocalised = "no line scores came back for this block";
-    }
-    out3.set(key, { lines, unlocalised });
+    );
+  });
+}
+async function gitOrThrow(cwd, args2, extraEnv) {
+  const result = await runGit(cwd, args2, extraEnv);
+  if (result.code !== 0) {
+    throw new Error(`git ${args2.join(" ")} failed (exit ${result.code}): ${result.stderr.trim()}`);
   }
-  return out3;
+  return result.stdout;
+}
+async function findRepo(cwd) {
+  const root = await runGit(cwd, ["rev-parse", "--show-toplevel"]);
+  if (root.code !== 0) return null;
+  const gitDir = await runGit(cwd, ["rev-parse", "--absolute-git-dir"]);
+  if (gitDir.code !== 0) return null;
+  return { root: root.stdout.trim(), gitDir: gitDir.stdout.trim() };
+}
+async function hasHead(root) {
+  const result = await runGit(root, ["rev-parse", "--verify", "--quiet", "HEAD"]);
+  return result.code === 0;
+}
+async function objectExists(root, rev) {
+  const result = await runGit(root, ["cat-file", "-e", `${rev}^{object}`]);
+  return result.code === 0;
+}
+async function resolveTree(root, rev) {
+  const result = await runGit(root, ["rev-parse", "--verify", "--quiet", `${rev}^{tree}`]);
+  if (result.code !== 0) return null;
+  const tree = result.stdout.trim();
+  return tree.length > 0 ? tree : null;
+}
+async function emptyTree(root) {
+  const out3 = await gitOrThrow(root, ["hash-object", "-w", "-t", "tree", "--stdin"]);
+  return out3.trim();
+}
+async function snapshotWorkingTree(repo, stateDir) {
+  await fs11.mkdir(stateDir, { recursive: true });
+  const indexPath = path17.join(stateDir, `index-${process.pid}-${randomBytes(4).toString("hex")}`);
+  const env = { GIT_INDEX_FILE: indexPath };
+  try {
+    if (await hasHead(repo.root)) {
+      await gitOrThrow(repo.root, ["read-tree", "HEAD"], env);
+    }
+    await gitOrThrow(repo.root, ["add", "-A", "--", "."], env);
+    const tree = await gitOrThrow(repo.root, ["write-tree"], env);
+    return tree.trim();
+  } finally {
+    await fs11.rm(indexPath, { force: true });
+    await fs11.rm(`${indexPath}.lock`, { force: true });
+  }
+}
+async function readBlob(root, tree, filePath) {
+  const result = await runGit(root, ["cat-file", "blob", `${tree}:${filePath}`]);
+  if (result.code !== 0) return null;
+  return result.stdout;
+}
+async function diffTrees(root, base, head) {
+  return gitOrThrow(root, [
+    "diff",
+    "--no-color",
+    "--no-ext-diff",
+    "--no-renames",
+    "-U8",
+    base,
+    head
+  ]);
 }
 
 // src/report.ts
-var MAX_QUOTED_LINE = 160;
 var MAX_PIECE_LINES = 60;
 function confidence(score) {
   return score.toFixed(2);
-}
-function trimQuoted(text) {
-  if (text.length <= MAX_QUOTED_LINE) return text;
-  return `${text.slice(0, MAX_QUOTED_LINE)}...`;
 }
 function where(from, to) {
   return from === to ? `line ${from}` : `lines ${from}-${to}`;
@@ -7497,23 +7517,22 @@ function pieceBlock(piece, index) {
     ...pieceDiff(piece)
   ].join("\n");
 }
-function linesBlock(piece, index) {
-  const out3 = [`${index}. ${piece.file} ${where(piece.fromLine, piece.toLine)}`];
-  for (const rule of piece.rules) {
-    out3.push(`   Rule: ${rule.rule}`);
-    if (rule.unlocalised !== null) {
-      out3.push(`   No single line identified: ${rule.unlocalised}`);
-    } else {
-      for (const line of rule.lines) out3.push(`   Line ${line.line}: ${trimQuoted(line.text)}`);
-    }
-    out3.push(`   Confidence: ${confidence(rule.confidence)}`);
+function notCheckedSections(notChecked) {
+  if (notChecked.length === 1) {
+    const only = notChecked[0];
+    return only === void 0 ? [] : [`Not checked (1): ${notCheckedLine(only)}`];
   }
-  return out3.join("\n");
+  if (notChecked.length > 1) {
+    return [
+      `Not checked (${notChecked.length}):
+` + notChecked.map((entry) => `  ${notCheckedLine(entry)}`).join("\n")
+    ];
+  }
+  return [];
 }
-function renderReport(report, mode = "piece") {
+function renderReport(report) {
   const { pieces, notChecked, stats } = report;
   const sections = [];
-  const block = mode === "piece" ? pieceBlock : linesBlock;
   if (pieces.length === 0) {
     sections.push(
       stats.pieces === 0 ? "stop-rules: no changes to check." : "stop-rules: no rule violations in your latest changes."
@@ -7526,23 +7545,41 @@ function renderReport(report, mode = "piece") {
       `stop-rules: ${count} in ${places} in your latest changes.
 Fix each one. If a rule truly should not apply here, leave the code and tell the user why.`
     );
-    sections.push(pieces.map((piece, i2) => block(piece, i2 + 1)).join("\n\n"));
+    sections.push(pieces.map((piece, i2) => pieceBlock(piece, i2 + 1)).join("\n\n"));
   }
-  if (notChecked.length === 1) {
-    const only = notChecked[0];
-    if (only !== void 0) sections.push(`Not checked (1): ${notCheckedLine(only)}`);
-  } else if (notChecked.length > 1) {
+  sections.push(...notCheckedSections(notChecked));
+  return sections.join("\n\n");
+}
+function cutWords(cut) {
+  return cut === "functions" ? "whole functions, with tree-sitter" : "diff hunks, with no parser";
+}
+function scoreBlock(piece, index) {
+  const unit = piece.unit === null ? "" : ` in ${piece.unit}`;
+  const lines = [`${index}. ${piece.file} ${where(piece.fromLine, piece.toLine)}${unit}`];
+  for (const rule of piece.rules) lines.push(`   ${confidence(rule.score)}  ${rule.rule}`);
+  return lines.join("\n");
+}
+function renderScores(report) {
+  const { pieces, notChecked, stats, source } = report;
+  const sections = [];
+  const scores = pieces.reduce((total, piece) => total + piece.rules.length, 0);
+  if (pieces.length === 0) {
+    sections.push(`stop-rules score: nothing to score in ${source}.`);
+  } else {
+    const count = pieces.length === 1 ? "1 piece" : `${pieces.length} pieces`;
     sections.push(
-      `Not checked (${notChecked.length}):
-` + notChecked.map((entry) => `  ${notCheckedLine(entry)}`).join("\n")
+      `stop-rules score: ${count}, ${scores} scores, ${stats.calls} Jev calls, ${stats.cacheHits} answers from the cache.
+Scored ${source}. No cutoff applied, nothing was marked as checked, and the baseline did not move.`
     );
+    sections.push(pieces.map((piece, i2) => scoreBlock(piece, i2 + 1)).join("\n\n"));
   }
+  sections.push(...notCheckedSections(notChecked));
   return sections.join("\n\n");
 }
 
 // src/rules.ts
 import { createHash } from "node:crypto";
-import { promises as fs11 } from "node:fs";
+import { promises as fs12 } from "node:fs";
 var TOP_LEVEL_ITEM = /^(?:[-*+]|\d+[.)])\s+(.*)$/;
 var FENCE = /^\s*(?:```|~~~)/;
 function normalise(text) {
@@ -7615,7 +7652,7 @@ function parseRules(markdown) {
 async function loadRules(rulesPath) {
   let source;
   try {
-    source = await fs11.readFile(rulesPath, "utf8");
+    source = await fs12.readFile(rulesPath, "utf8");
   } catch (error) {
     const err2 = error;
     if (err2.code === "ENOENT") {
@@ -7654,9 +7691,9 @@ seeing the rest of the codebase.
 
 // src/slots.ts
 import { randomBytes as randomBytes2 } from "node:crypto";
-import { promises as fs12 } from "node:fs";
+import { promises as fs13 } from "node:fs";
 import * as os from "node:os";
-import * as path17 from "node:path";
+import * as path18 from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 var MACHINE_SLOTS = 8;
 var SLOT_WAIT_MS = 6e4;
@@ -7669,11 +7706,11 @@ function slotsDir(env) {
     if (configured.trim().length === 0) {
       throw new Error("XDG_CACHE_HOME is set but empty. Unset it or point it at a folder.");
     }
-    return path17.join(configured, "stop-rules", "slots");
+    return path18.join(configured, "stop-rules", "slots");
   }
   const home = os.homedir();
-  if (process.platform === "darwin") return path17.join(home, "Library", "Caches", "stop-rules", "slots");
-  return path17.join(home, ".cache", "stop-rules", "slots");
+  if (process.platform === "darwin") return path18.join(home, "Library", "Caches", "stop-rules", "slots");
+  return path18.join(home, ".cache", "stop-rules", "slots");
 }
 function pidAlive(pid) {
   if (!Number.isInteger(pid) || pid <= 0) return false;
@@ -7699,22 +7736,22 @@ function readSlot(text) {
   return { pid, at };
 }
 async function acquireSlot(dir, waitMs = SLOT_WAIT_MS) {
-  await fs12.mkdir(dir, { recursive: true });
+  await fs13.mkdir(dir, { recursive: true });
   const deadline = Date.now() + waitMs;
   for (; ; ) {
-    const claim = path17.join(dir, `claim-${process.pid}-${randomBytes2(4).toString("hex")}`);
-    await fs12.writeFile(claim, JSON.stringify({ pid: process.pid, at: Date.now() }), "utf8");
+    const claim = path18.join(dir, `claim-${process.pid}-${randomBytes2(4).toString("hex")}`);
+    await fs13.writeFile(claim, JSON.stringify({ pid: process.pid, at: Date.now() }), "utf8");
     try {
       for (let index = 0; index < MACHINE_SLOTS; index += 1) {
-        const file = path17.join(dir, `slot-${index}`);
+        const file = path18.join(dir, `slot-${index}`);
         try {
-          await fs12.link(claim, file);
+          await fs13.link(claim, file);
           return {
             ok: true,
             release: async () => {
               try {
-                const owner2 = readSlot(await fs12.readFile(file, "utf8"));
-                if (owner2 !== null && owner2.pid === process.pid) await fs12.rm(file, { force: true });
+                const owner2 = readSlot(await fs13.readFile(file, "utf8"));
+                if (owner2 !== null && owner2.pid === process.pid) await fs13.rm(file, { force: true });
               } catch (error) {
                 const err2 = error;
                 if (err2.code !== "ENOENT") {
@@ -7731,8 +7768,8 @@ async function acquireSlot(dir, waitMs = SLOT_WAIT_MS) {
         let owner = null;
         let writtenAt = 0;
         try {
-          owner = readSlot(await fs12.readFile(file, "utf8"));
-          writtenAt = owner === null ? (await fs12.stat(file)).mtimeMs : owner.at;
+          owner = readSlot(await fs13.readFile(file, "utf8"));
+          writtenAt = owner === null ? (await fs13.stat(file)).mtimeMs : owner.at;
         } catch (error) {
           const err2 = error;
           if (err2.code !== "ENOENT") throw err2;
@@ -7740,11 +7777,11 @@ async function acquireSlot(dir, waitMs = SLOT_WAIT_MS) {
         }
         const tooOld = Date.now() - writtenAt > SLOT_STALE_MS;
         if (tooOld || owner !== null && !pidAlive(owner.pid)) {
-          await fs12.rm(file, { force: true });
+          await fs13.rm(file, { force: true });
         }
       }
     } finally {
-      await fs12.rm(claim, { force: true });
+      await fs13.rm(claim, { force: true });
     }
     if (Date.now() >= deadline) return { ok: false, reason: MACHINE_BUSY };
     await delay(POLL_MS);
@@ -7753,15 +7790,15 @@ async function acquireSlot(dir, waitMs = SLOT_WAIT_MS) {
 
 // src/state.ts
 import { createHash as createHash2, randomBytes as randomBytes3 } from "node:crypto";
-import { promises as fs13 } from "node:fs";
-import * as path18 from "node:path";
+import { promises as fs14 } from "node:fs";
+import * as path19 from "node:path";
 import { setTimeout as delay2 } from "node:timers/promises";
 var MAX_CACHE_ENTRIES = 5e3;
 var MAX_REPORTED_ENTRIES = 5e3;
 var MAX_LOG_BYTES = 1024 * 1024;
 var LOCK_POLL_MS = 200;
 function stateDirFor(gitDir) {
-  return path18.join(gitDir, "stop-rules");
+  return path19.join(gitDir, "stop-rules");
 }
 function emptyState() {
   return { version: 1, reported: {}, sessions: {} };
@@ -7772,7 +7809,7 @@ function emptyCache() {
 async function readJson(file) {
   let text;
   try {
-    text = await fs13.readFile(file, "utf8");
+    text = await fs14.readFile(file, "utf8");
   } catch (error) {
     const err2 = error;
     if (err2.code === "ENOENT") return null;
@@ -7788,16 +7825,16 @@ async function readJson(file) {
 }
 async function writeJsonAtomic(file, value2) {
   const temp = `${file}.tmp-${process.pid}-${randomBytes3(4).toString("hex")}`;
-  await fs13.mkdir(path18.dirname(file), { recursive: true });
-  await fs13.writeFile(temp, `${JSON.stringify(value2)}
+  await fs14.mkdir(path19.dirname(file), { recursive: true });
+  await fs14.writeFile(temp, `${JSON.stringify(value2)}
 `, "utf8");
-  await fs13.rename(temp, file);
+  await fs14.rename(temp, file);
 }
 function isRecord2(value2) {
   return typeof value2 === "object" && value2 !== null && !Array.isArray(value2);
 }
 async function loadState(stateDir) {
-  const file = path18.join(stateDir, "state.json");
+  const file = path19.join(stateDir, "state.json");
   const raw = await readJson(file);
   if (raw === null) return emptyState();
   if (!isRecord2(raw)) {
@@ -7826,10 +7863,10 @@ function prune(entries, at, max) {
 }
 async function saveState(stateDir, state) {
   prune(state.reported, (value2) => value2, MAX_REPORTED_ENTRIES);
-  await writeJsonAtomic(path18.join(stateDir, "state.json"), state);
+  await writeJsonAtomic(path19.join(stateDir, "state.json"), state);
 }
 async function loadCache(stateDir) {
-  const file = path18.join(stateDir, "cache.json");
+  const file = path19.join(stateDir, "cache.json");
   const raw = await readJson(file);
   if (raw === null) return emptyCache();
   if (!isRecord2(raw) || !isRecord2(raw["entries"])) {
@@ -7838,11 +7875,11 @@ async function loadCache(stateDir) {
   return { version: 1, entries: raw["entries"] };
 }
 async function resetState(stateDir) {
-  await writeJsonAtomic(path18.join(stateDir, "state.json"), emptyState());
+  await writeJsonAtomic(path19.join(stateDir, "state.json"), emptyState());
 }
 async function saveCache(stateDir, cache) {
   prune(cache.entries, (value2) => value2.at, MAX_CACHE_ENTRIES);
-  await writeJsonAtomic(path18.join(stateDir, "cache.json"), cache);
+  await writeJsonAtomic(path19.join(stateDir, "cache.json"), cache);
 }
 function reportedKey(ruleId2, chunkText2) {
   return createHash2("sha256").update(`${ruleId2}\0${chunkText2}`, "utf8").digest("hex");
@@ -7859,12 +7896,12 @@ function pidAlive2(pid) {
   }
 }
 async function acquireLock(stateDir, timeoutMs = 6e4) {
-  await fs13.mkdir(stateDir, { recursive: true });
-  const lockPath = path18.join(stateDir, "lock");
+  await fs14.mkdir(stateDir, { recursive: true });
+  const lockPath = path19.join(stateDir, "lock");
   const deadline = Date.now() + timeoutMs;
   for (; ; ) {
     try {
-      const handle3 = await fs13.open(lockPath, "wx");
+      const handle3 = await fs14.open(lockPath, "wx");
       try {
         await handle3.writeFile(String(process.pid), "utf8");
       } finally {
@@ -7872,8 +7909,8 @@ async function acquireLock(stateDir, timeoutMs = 6e4) {
       }
       return async () => {
         try {
-          const owner = await fs13.readFile(lockPath, "utf8");
-          if (owner.trim() === String(process.pid)) await fs13.rm(lockPath, { force: true });
+          const owner = await fs14.readFile(lockPath, "utf8");
+          if (owner.trim() === String(process.pid)) await fs14.rm(lockPath, { force: true });
         } catch (error) {
           const err2 = error;
           if (err2.code !== "ENOENT") {
@@ -7888,14 +7925,14 @@ async function acquireLock(stateDir, timeoutMs = 6e4) {
     }
     let ownerPid = 0;
     try {
-      ownerPid = Number.parseInt((await fs13.readFile(lockPath, "utf8")).trim(), 10);
+      ownerPid = Number.parseInt((await fs14.readFile(lockPath, "utf8")).trim(), 10);
     } catch (readError) {
       const err2 = readError;
       if (err2.code !== "ENOENT") throw err2;
       continue;
     }
     if (!pidAlive2(ownerPid)) {
-      await fs13.rm(lockPath, { force: true });
+      await fs14.rm(lockPath, { force: true });
       continue;
     }
     if (Date.now() >= deadline) return null;
@@ -7903,31 +7940,24 @@ async function acquireLock(stateDir, timeoutMs = 6e4) {
   }
 }
 async function appendRunLog(stateDir, line) {
-  const logPath = path18.join(stateDir, "run.log");
-  await fs13.mkdir(stateDir, { recursive: true });
-  await fs13.appendFile(logPath, `${JSON.stringify(line)}
+  const logPath = path19.join(stateDir, "run.log");
+  await fs14.mkdir(stateDir, { recursive: true });
+  await fs14.appendFile(logPath, `${JSON.stringify(line)}
 `, "utf8");
-  const stats = await fs13.stat(logPath);
+  const stats = await fs14.stat(logPath);
   if (stats.size <= MAX_LOG_BYTES) return;
-  const contents = await fs13.readFile(logPath, "utf8");
+  const contents = await fs14.readFile(logPath, "utf8");
   const lines = contents.split("\n").filter((entry) => entry.length > 0);
   const kept = lines.slice(Math.floor(lines.length / 2));
   const temp = `${logPath}.tmp-${process.pid}-${randomBytes3(4).toString("hex")}`;
-  await fs13.writeFile(temp, `${kept.join("\n")}
+  await fs14.writeFile(temp, `${kept.join("\n")}
 `, "utf8");
-  await fs13.rename(temp, logPath);
+  await fs14.rename(temp, logPath);
 }
 
 // src/check.ts
 var LOOP_GUARD_ROUNDS = 3;
 var MAX_SESSIONS_KEPT = 100;
-function reportMode(env) {
-  const raw = env["STOP_RULES_REPORT"];
-  if (raw === void 0) return "piece";
-  const value2 = raw.trim();
-  if (value2 === "piece" || value2 === "lines") return value2;
-  throw new Error(`STOP_RULES_REPORT must be piece or lines, not ${JSON.stringify(raw)}.`);
-}
 function cannotRun(reason) {
   return { kind: "cannot-run", reason };
 }
@@ -7963,16 +7993,22 @@ async function run2(options) {
   };
   const repo = await findRepo(options.cwd);
   if (repo === null) return cannotRun(`${options.cwd} is not inside a git repository.`);
-  const rulesPath = options.rulesPath ? path19.resolve(options.cwd, options.rulesPath) : path19.join(repo.root, ".stop-rules.md");
+  const rulesPath = options.rulesPath ? path20.resolve(options.cwd, options.rulesPath) : path20.join(repo.root, ".stop-rules.md");
   const rulesLoad = await loadRules(rulesPath);
   if (!rulesLoad.ok) return cannotRun(rulesLoad.reason);
-  const credentials = await resolveCredentials(repo.root, env);
+  const settingsLoad = await loadSettings(repo.root);
+  if (!settingsLoad.ok) return cannotRun(settingsLoad.reason);
+  const settings = settingsLoad.loaded.settings;
+  const knobs = {
+    threshold: options.threshold ?? settings.threshold ?? DEFAULT_THRESHOLD,
+    maxCalls: options.maxCalls ?? settings.maxCalls ?? DEFAULT_MAX_CALLS,
+    cut: options.cut ?? settings.cut ?? DEFAULT_CUT
+  };
+  const credentials = await resolveCredentials(settingsLoad.loaded, env);
   if (!credentials.ok) return cannotRun(credentials.reason);
   let slotDir;
-  let mode;
   try {
     slotDir = slotsDir(env);
-    mode = reportMode(env);
   } catch (error) {
     return cannotRun(error instanceof Error ? error.message : String(error));
   }
@@ -7988,9 +8024,9 @@ async function run2(options) {
       rulesPath,
       rules: rulesLoad.rules,
       credentials: credentials.credentials,
+      knobs,
       stateDir,
       slotDir,
-      mode,
       notes,
       note,
       started: started2
@@ -7999,8 +8035,75 @@ async function run2(options) {
     await release();
   }
 }
+async function diffFileWork(args2, diffFile) {
+  const full = path20.resolve(args2.options.cwd, diffFile);
+  let text;
+  try {
+    text = await fs15.readFile(full, "utf8");
+  } catch (error) {
+    const err2 = error;
+    return { ok: false, reason: `could not read the diff file ${full}: ${err2.code ?? err2.message}` };
+  }
+  const parsed = parseDiff(text, []);
+  if (parsed.files.length === 0 && parsed.failures.length === 0) {
+    return { ok: false, reason: `${full} holds no diff with added lines.` };
+  }
+  return {
+    ok: true,
+    work: {
+      files: parsed.files,
+      skipped: parsed.skipped,
+      failures: parsed.failures.map((failure2) => ({ file: failure2.file, reason: failure2.reason })),
+      readSource: async () => null,
+      snapshot: null,
+      cut: "hunks",
+      source: `${diffFile}, cut by diff hunk because a diff file has no file content to parse`
+    }
+  };
+}
+async function workingTreeWork(args2, state) {
+  const { options, repo, rulesPath, stateDir, knobs } = args2;
+  const snapshot = await snapshotWorkingTree(repo, stateDir);
+  let baseline;
+  if (options.base !== void 0) {
+    const resolved = await resolveTree(repo.root, options.base);
+    if (resolved === null) return { ok: false, reason: `unknown revision ${options.base}.` };
+    baseline = resolved;
+  } else if (state.lastTree !== void 0) {
+    if (!await objectExists(repo.root, state.lastTree)) {
+      return {
+        ok: false,
+        reason: "the saved baseline is gone (git cleaned it up). Run stop-rules baseline --reset to start again from HEAD."
+      };
+    }
+    baseline = state.lastTree;
+  } else if (await hasHead(repo.root)) {
+    const head = await resolveTree(repo.root, "HEAD");
+    if (head === null) {
+      return { ok: false, reason: "git could not resolve HEAD to a tree in this repository." };
+    }
+    baseline = head;
+  } else {
+    baseline = await emptyTree(repo.root);
+  }
+  const rulesRelative = path20.relative(repo.root, rulesPath).split(path20.sep).join("/");
+  const parsed = parseDiff(await diffTrees(repo.root, baseline, snapshot), [rulesRelative]);
+  const against = options.base === void 0 ? "the last check" : `${options.base}`;
+  return {
+    ok: true,
+    work: {
+      files: parsed.files,
+      skipped: parsed.skipped,
+      failures: parsed.failures.map((failure2) => ({ file: failure2.file, reason: failure2.reason })),
+      readSource: (file) => readBlob(repo.root, snapshot, file),
+      snapshot,
+      cut: knobs.cut,
+      source: `the working tree against ${against}, cut into ${cutWords(knobs.cut)}`
+    }
+  };
+}
 async function runLocked(args2) {
-  const { options, repo, rulesPath, rules, credentials, stateDir, notes, note, started: started2 } = args2;
+  const { options, rules, credentials, knobs, stateDir, notes, note, started: started2 } = args2;
   const model = credentials.model;
   let state;
   let cache;
@@ -8010,36 +8113,12 @@ async function runLocked(args2) {
   } catch (error) {
     return cannotRun(error instanceof Error ? error.message : String(error));
   }
-  const snapshot = await snapshotWorkingTree(repo, stateDir);
-  let baseline;
-  if (options.base !== void 0) {
-    const resolved = await resolveTree(repo.root, options.base);
-    if (resolved === null) return cannotRun(`unknown revision ${options.base}.`);
-    baseline = resolved;
-  } else if (state.lastTree !== void 0) {
-    if (!await objectExists(repo.root, state.lastTree)) {
-      return cannotRun(
-        "the saved baseline is gone (git cleaned it up). Run stop-rules baseline --reset to start again from HEAD."
-      );
-    }
-    baseline = state.lastTree;
-  } else if (await hasHead(repo.root)) {
-    const head = await resolveTree(repo.root, "HEAD");
-    if (head === null) return cannotRun("git could not resolve HEAD to a tree in this repository.");
-    baseline = head;
-  } else {
-    baseline = await emptyTree(repo.root);
-  }
-  const rulesRelative = path19.relative(repo.root, rulesPath).split(path19.sep).join("/");
-  const parsed = parseDiff(await diffTrees(repo.root, baseline, snapshot), [rulesRelative]);
-  const files = parsed.files;
-  const parseFailures = parsed.failures.map((failure2) => ({
-    file: failure2.file,
-    reason: failure2.reason
-  }));
+  const prepared = options.diffFile === void 0 ? await workingTreeWork(args2, state) : await diffFileWork(args2, options.diffFile);
+  if (!prepared.ok) return cannotRun(prepared.reason);
+  const work = prepared.work;
   let cut;
   try {
-    cut = await cutFiles(repo.root, snapshot, files);
+    cut = await cutFiles(work.files, { cut: work.cut, readSource: work.readSource });
   } catch (error) {
     return cannotRun(error instanceof Error ? error.message : String(error));
   }
@@ -8048,10 +8127,9 @@ async function runLocked(args2) {
   const engineResult = await runEngine({
     pieces,
     rules,
-    reportMode: args2.mode,
     slot: () => acquireSlot(args2.slotDir),
-    threshold: options.threshold,
-    maxCalls: options.maxCalls,
+    threshold: knobs.threshold,
+    maxCalls: knobs.maxCalls,
     model,
     endpoint: credentials.endpoint,
     apiKey: credentials.bearer,
@@ -8073,11 +8151,12 @@ async function runLocked(args2) {
     await saveCache(stateDir, cache);
     return cannotRun("could not reach Jev for any piece of this diff.");
   }
-  const notChecked = [...parseFailures, ...cut.notChecked, ...engineResult.notChecked];
+  const notChecked = [...work.failures, ...cut.notChecked, ...engineResult.notChecked];
   const stats = {
-    files: files.length,
+    cut: work.cut,
+    files: work.files.length,
     pieces: pieces.length,
-    skipped: parsed.skipped.length,
+    skipped: work.skipped.length,
     calls: engineResult.calls,
     piecesPerCall: engineResult.piecesPerCall,
     cacheHits: engineResult.cacheHits,
@@ -8089,27 +8168,38 @@ async function runLocked(args2) {
     outputTokens: engineResult.usage.outputTokens,
     durationMs: Date.now() - started2
   };
-  const report = {
-    pieces: engineResult.pieces,
-    notChecked,
-    skipped: parsed.skipped,
-    stats
-  };
-  const outcome = decide(
-    options,
-    args2.mode,
-    report,
-    state,
-    engineResult.findings,
-    snapshot,
-    engineResult.holdBaseline
-  );
-  if (options.mode === "hook") await saveState(stateDir, state);
+  let outcome;
+  if (options.mode === "score") {
+    const report = {
+      pieces: engineResult.scores,
+      notChecked,
+      skipped: work.skipped,
+      stats,
+      source: work.source
+    };
+    outcome = { kind: "scored", report, text: renderScores(report) };
+  } else {
+    const report = {
+      pieces: engineResult.pieces,
+      notChecked,
+      skipped: work.skipped,
+      stats
+    };
+    outcome = decide(
+      options,
+      report,
+      state,
+      engineResult.findings,
+      work.snapshot,
+      engineResult.holdBaseline
+    );
+    if (options.mode === "hook") await saveState(stateDir, state);
+  }
   await saveCache(stateDir, cache);
   await appendRunLog(stateDir, {
     at: (/* @__PURE__ */ new Date()).toISOString(),
     mode: options.mode + (options.stopHookActive === true ? " (stop_hook_active)" : ""),
-    report: args2.mode,
+    cut: stats.cut,
     files: stats.files,
     pieces: stats.pieces,
     piecesPerCall: stats.piecesPerCall,
@@ -8122,16 +8212,19 @@ async function runLocked(args2) {
     inputTokens: stats.inputTokens,
     outputTokens: stats.outputTokens,
     durationMs: stats.durationMs,
-    exitCode: outcome.kind === "violations" ? 2 : outcome.kind === "clean" ? 0 : 1,
+    exitCode: outcome.kind === "violations" ? 2 : outcome.kind === "cannot-run" ? 1 : 0,
     notes
   });
   return outcome;
 }
-function decide(options, mode, report, state, findings, snapshot, holdBaseline) {
-  const text = renderReport(report, mode);
+function decide(options, report, state, findings, snapshot, holdBaseline) {
+  const text = renderReport(report);
   const hasViolations2 = report.pieces.length > 0;
   if (options.mode !== "hook") {
     return hasViolations2 ? { kind: "violations", report, text } : { kind: "clean", report, text };
+  }
+  if (snapshot === null) {
+    throw new Error("internal error: hook mode ran without a working tree snapshot");
   }
   const sessionId = options.sessionId;
   if (sessionId === void 0) {
@@ -8168,8 +8261,8 @@ ${text}` };
 }
 
 // src/init.ts
-import { promises as fs14 } from "node:fs";
-import * as path20 from "node:path";
+import { promises as fs16 } from "node:fs";
+import * as path21 from "node:path";
 var BUNDLE_PATH = ".stop-rules/stop-rules.mjs";
 var BUNDLE_NAME = "stop-rules.mjs";
 var VENDOR_DIR = ".stop-rules";
@@ -8180,11 +8273,13 @@ function failure(repo, reason) {
   return {
     ok: false,
     repo,
+    cut: DEFAULT_CUT,
     mode: "local",
     bundle: { path: BUNDLE_PATH, written: false },
     grammars: noGrammars(),
     rules: { path: ".stop-rules.md", created: false },
     team: null,
+    settings: null,
     agents: [],
     todo: [],
     errors: [reason]
@@ -8192,7 +8287,7 @@ function failure(repo, reason) {
 }
 function bundleSource(selfPath) {
   if (isBundled()) return selfPath;
-  return path20.join(path20.dirname(selfPath), BUNDLE_NAME);
+  return path21.join(path21.dirname(selfPath), BUNDLE_NAME);
 }
 async function init2(options) {
   const repo = await findRepo(options.dir);
@@ -8220,39 +8315,52 @@ async function init2(options) {
       );
     }
   }
+  const existingSettings = await loadSettings(root);
+  if (!existingSettings.ok) return failure(root, existingSettings.reason);
+  const cut = options.cut ?? existingSettings.loaded.settings.cut ?? DEFAULT_CUT;
   const report = {
     ok: true,
     repo: root,
+    cut,
     mode: "local",
     bundle: { path: BUNDLE_PATH, written: false },
     grammars: noGrammars(),
     rules: { path: ".stop-rules.md", created: false },
     team: null,
+    settings: null,
     agents: [],
     todo: [],
     errors: []
   };
+  const wroteKeys = [];
   if (options.team !== void 0) {
     const written = await writeTeamConfig(root, options.team);
     if (!written.ok) {
       return failure(root, written.lines.join(" ").replace(/^stop-rules: /, ""));
     }
     report.mode = "team";
-    report.team = { endpoint: options.team.trim(), path: TEAM_CONFIG_FILE, written: true };
+    report.team = { endpoint: options.team.trim(), path: SETTINGS_FILE, written: true };
+    wroteKeys.push("endpoint");
   } else {
-    const existing = await readTeamEndpoint(root, options.env);
+    const existing = readTeamEndpoint(existingSettings.loaded, options.env);
     if (!existing.ok) return failure(root, existing.reason);
     if (existing.endpoint !== null) {
       report.mode = "team";
       report.team = { endpoint: existing.endpoint, path: existing.source, written: false };
     }
   }
+  if (options.cut !== void 0) {
+    const written = await writeSettings(root, { cut: options.cut });
+    if (!written.ok) return failure(root, written.reason ?? `could not write ${written.file}`);
+    wroteKeys.push("cut");
+  }
+  if (wroteKeys.length > 0) report.settings = { path: SETTINGS_FILE, wrote: wroteKeys };
   const source = bundleSource(options.selfPath);
-  const target = path20.join(root, BUNDLE_PATH);
-  if (path20.resolve(source) !== path20.resolve(target)) {
+  const target = path21.join(root, BUNDLE_PATH);
+  if (path21.resolve(source) !== path21.resolve(target)) {
     try {
-      await fs14.mkdir(path20.dirname(target), { recursive: true });
-      await fs14.copyFile(source, target);
+      await fs16.mkdir(path21.dirname(target), { recursive: true });
+      await fs16.copyFile(source, target);
       report.bundle.written = true;
     } catch (error) {
       const err2 = error;
@@ -8263,13 +8371,13 @@ async function init2(options) {
     }
   }
   try {
-    report.grammars = await copyGrammars(root);
+    report.grammars = cut === "hunks" ? { languages: [], added: [], kept: [], bytes: await folderBytes(path21.join(root, VENDOR_DIR)) } : await copyGrammars(root);
   } catch (error) {
     return failure(root, error instanceof Error ? error.message : String(error));
   }
-  const rulesPath = path20.join(root, ".stop-rules.md");
+  const rulesPath = path21.join(root, ".stop-rules.md");
   try {
-    await fs14.writeFile(rulesPath, STARTER_RULES, { encoding: "utf8", flag: "wx" });
+    await fs16.writeFile(rulesPath, STARTER_RULES, { encoding: "utf8", flag: "wx" });
     report.rules.created = true;
   } catch (error) {
     const err2 = error;
@@ -8307,8 +8415,9 @@ async function init2(options) {
     report.mode === "team" ? 'Store the team token: printf %s "$TOKEN" | stop-rules login --token-stdin' : 'Give it your own Jev key from TypeSafe: set TYPESAFE_API_KEY, or run printf %s "$KEY" | stop-rules login --jev-key-stdin'
   );
   report.todo.push(`Edit ${report.rules.path} so it says what your team actually cares about.`);
+  const vendored = cut === "hunks" ? "the checker" : "the checker and its grammars";
   report.todo.push(
-    report.mode === "team" ? `Commit ${VENDOR_DIR}/ (the checker and its grammars), ${TEAM_CONFIG_FILE} and the config files, so teammates and cloud agents get the check too.` : `Commit ${VENDOR_DIR}/ (the checker and its grammars) and the config files, so teammates and cloud agents get the check too.`
+    report.mode === "team" ? `Commit ${VENDOR_DIR}/ (${vendored}), ${SETTINGS_FILE} and the config files, so teammates and cloud agents get the check too.` : `Commit ${VENDOR_DIR}/ (${vendored}) and the config files, so teammates and cloud agents get the check too.`
   );
   report.todo.push("Check it works: stop-rules login --check");
   return report;
@@ -8330,15 +8439,15 @@ async function languagesInRepo(root) {
 async function copyIfNew(source, target) {
   let fresh = true;
   try {
-    await fs14.access(target);
+    await fs16.access(target);
     fresh = false;
   } catch (error) {
     const err2 = error;
     if (err2.code !== "ENOENT") throw new Error(`could not look at ${target}: ${err2.message}`);
   }
-  await fs14.mkdir(path20.dirname(target), { recursive: true });
+  await fs16.mkdir(path21.dirname(target), { recursive: true });
   try {
-    await fs14.copyFile(source, target);
+    await fs16.copyFile(source, target);
   } catch (error) {
     const err2 = error;
     throw new Error(
@@ -8349,24 +8458,24 @@ async function copyIfNew(source, target) {
 }
 async function folderBytes(dir) {
   let total = 0;
-  const entries = await fs14.readdir(dir, { withFileTypes: true });
+  const entries = await fs16.readdir(dir, { withFileTypes: true });
   for (const entry of entries) {
-    const full = path20.join(dir, entry.name);
+    const full = path21.join(dir, entry.name);
     if (entry.isDirectory()) total += await folderBytes(full);
-    else total += (await fs14.stat(full)).size;
+    else total += (await fs16.stat(full)).size;
   }
   return total;
 }
 async function copyGrammars(root) {
   const from = vendorDir();
-  const into = path20.join(root, VENDOR_DIR);
+  const into = path21.join(root, VENDOR_DIR);
   const languages = await languagesInRepo(root);
-  await copyIfNew(runtimeWasmPath(from), path20.join(into, "tree-sitter.wasm"));
+  await copyIfNew(runtimeWasmPath(from), path21.join(into, "tree-sitter.wasm"));
   const added = [];
   const kept = [];
   for (const key of languages) {
     const name2 = grammarWasmName(key);
-    const fresh = await copyIfNew(grammarWasmPath(key, from), path20.join(into, "grammars", name2));
+    const fresh = await copyIfNew(grammarWasmPath(key, from), path21.join(into, "grammars", name2));
     if (fresh) added.push(name2);
     else kept.push(name2);
   }
@@ -8389,12 +8498,22 @@ function renderInit(report) {
   );
   const grammars = report.grammars;
   const megabytes = (grammars.bytes / 1e6).toFixed(1);
-  lines.push(
-    grammars.languages.length === 0 ? `  no file in this repo has a language stop-rules can parse, so it copied no grammars (${VENDOR_DIR} is ${megabytes} MB)` : `  grammars for ${grammars.languages.join(", ")}: ${grammars.added.length} copied, ${grammars.kept.length} already there (${VENDOR_DIR} is ${megabytes} MB)`
-  );
+  if (report.cut === "hunks") {
+    lines.push(
+      `  cut: hunks, so no parser and no grammars were copied (${VENDOR_DIR} is ${megabytes} MB)`
+    );
+  } else {
+    lines.push(
+      grammars.languages.length === 0 ? `  no file in this repo has a language stop-rules can parse, so it copied no grammars (${VENDOR_DIR} is ${megabytes} MB)` : `  grammars for ${grammars.languages.join(", ")}: ${grammars.added.length} copied, ${grammars.kept.length} already there (${VENDOR_DIR} is ${megabytes} MB)`
+    );
+  }
   lines.push(
     report.rules.created ? `  wrote ${report.rules.path} with ${parseRules(STARTER_RULES).length} starter rules` : `  kept the rules file already at ${report.rules.path}`
   );
+  const otherKeys = report.settings?.wrote.filter((key) => key !== "endpoint") ?? [];
+  if (report.settings !== null && otherKeys.length > 0) {
+    lines.push(`  wrote ${otherKeys.join(" and ")} into ${report.settings.path}`);
+  }
   if (report.team !== null) {
     lines.push(
       report.team.written ? `  wrote ${report.team.path} pointing at ${report.team.endpoint}` : `  team server already set to ${report.team.endpoint} (from ${report.team.path})`
@@ -8586,9 +8705,9 @@ async function systemone(request, env) {
   );
 }
 async function route(request, env) {
-  const path21 = new URL(request.url).pathname.replace(/\/+$/, "");
-  if (request.method === "GET" && (path21 === "" || path21.endsWith("/health"))) return health(env);
-  if (request.method === "POST" && path21.endsWith("/v1/systemone")) return systemone(request, env);
+  const path22 = new URL(request.url).pathname.replace(/\/+$/, "");
+  if (request.method === "GET" && (path22 === "" || path22.endsWith("/health"))) return health(env);
+  if (request.method === "POST" && path22.endsWith("/v1/systemone")) return systemone(request, env);
   return json(404, {
     error: "not_found",
     message: "stop-rules serves GET /health and POST /v1/systemone"
@@ -8731,6 +8850,7 @@ var USAGE = `stop-rules: check the code your agent just wrote against your team'
 Usage:
   stop-rules hook [options]            run as a stop hook, reading the agent's JSON on stdin
   stop-rules check [options]           run the same check in a terminal, pre-commit or CI
+  stop-rules score [options]           print every piece and every rule's score, no cutoff
   stop-rules init [options]            vendor the checker and wire it into your agents
   stop-rules team <endpoint>           point this repo at your team's stop-rules server
   stop-rules login --token-stdin       store the team token, read from stdin
@@ -8745,9 +8865,11 @@ Options:
   --dir <path>         init mode only: the repository to install into (default: this one)
   --team <endpoint>    init mode only: use your team's stop-rules server, not your own key
   --rules <path>       rules file (default <repo root>/.stop-rules.md)
+  --cut <mode>         functions (tree-sitter) or hunks (no parser) (default ${DEFAULT_CUT})
   --threshold <0..1>   score at or above which a rule counts as violated (default ${DEFAULT_THRESHOLD})
-  --max-calls <n>      hard ceiling on requests to Jev in one run (default 60)
-  --base <rev>         check mode only: diff this revision against the working tree
+  --max-calls <n>      hard ceiling on requests to Jev in one run (default ${DEFAULT_MAX_CALLS})
+  --base <rev>         check and score modes: diff this revision against the working tree
+  --diff <path>        score mode only: score a unified diff file instead of the working tree
   --json               print the findings, or the init result, as JSON
   --port <n>           serve mode only: port to listen on (default PORT or 8080)
   --reset              baseline mode only: clear the saved baseline
@@ -8756,6 +8878,10 @@ Options:
   --version            print the version
 
 Agents: ${agentNames().join(", ")}
+
+Settings: ${SETTINGS_FILE} in the repository root holds endpoint, cut, threshold and
+maxCalls. It is committed and holds no secret. A flag above beats the file. What each knob
+costs is in docs/TUNING.md.
 
 Environment, client:
   STOP_RULES_ENDPOINT      your team's stop-rules server, beats .stop-rules.json
@@ -8779,8 +8905,6 @@ var UsageError = class extends Error {
 function parseArgs(argv) {
   const parsed = {
     command: "",
-    threshold: DEFAULT_THRESHOLD,
-    maxCalls: 60,
     json: false,
     agent: DEFAULT_AGENT,
     tokenStdin: false,
@@ -8840,6 +8964,19 @@ function parseArgs(argv) {
         i2 += 1;
         parsed.base = take(i2, "--base");
         break;
+      case "--diff":
+        i2 += 1;
+        parsed.diff = take(i2, "--diff");
+        break;
+      case "--cut": {
+        i2 += 1;
+        const value2 = take(i2, "--cut");
+        if (value2 !== "functions" && value2 !== "hunks") {
+          throw new UsageError("--cut must be functions or hunks");
+        }
+        parsed.cut = value2;
+        break;
+      }
       case "--agent":
         i2 += 1;
         parsed.agent = take(i2, "--agent");
@@ -8907,6 +9044,8 @@ function emit(delivery) {
 }
 function deliverOutcome(adapter, outcome) {
   switch (outcome.kind) {
+    case "scored":
+      throw new Error("internal error: the hook asked for a check and got a score report");
     case "cannot-run":
       return adapter.deliverError(`stop-rules: ${outcome.reason}`);
     case "handoff":
@@ -8939,22 +9078,26 @@ async function runHook(args2) {
     // all, and those agents run the hook in the project root. See HookContext.
     cwd: input.cwd === void 0 ? process.cwd() : input.cwd,
     mode: "hook",
-    threshold: args2.threshold,
-    maxCalls: args2.maxCalls,
     sessionId: input.sessionId,
     stopHookActive: input.stopHookActive === true,
-    ...input.loopCount !== void 0 ? { loopCount: input.loopCount } : {},
-    ...args2.rules !== void 0 ? { rulesPath: args2.rules } : {}
+    ...knobArgs(args2),
+    ...input.loopCount !== void 0 ? { loopCount: input.loopCount } : {}
   });
   return emit(deliverOutcome(adapter, outcome));
+}
+function knobArgs(args2) {
+  return {
+    ...args2.threshold !== void 0 ? { threshold: args2.threshold } : {},
+    ...args2.maxCalls !== void 0 ? { maxCalls: args2.maxCalls } : {},
+    ...args2.cut !== void 0 ? { cut: args2.cut } : {},
+    ...args2.rules !== void 0 ? { rulesPath: args2.rules } : {}
+  };
 }
 async function runCheckCommand(args2) {
   const outcome = await run2({
     cwd: process.cwd(),
     mode: "check",
-    threshold: args2.threshold,
-    maxCalls: args2.maxCalls,
-    ...args2.rules !== void 0 ? { rulesPath: args2.rules } : {},
+    ...knobArgs(args2),
     ...args2.base !== void 0 ? { base: args2.base } : {}
   });
   if (outcome.kind === "cannot-run") {
@@ -8968,13 +9111,40 @@ async function runCheckCommand(args2) {
 `);
   return outcome.kind === "violations" ? 2 : 0;
 }
+async function runScoreCommand(args2) {
+  if (args2.diff !== void 0 && args2.base !== void 0) {
+    process.stderr.write("stop-rules: score takes --diff or --base, not both\n");
+    return 1;
+  }
+  const outcome = await run2({
+    cwd: process.cwd(),
+    mode: "score",
+    ...knobArgs(args2),
+    ...args2.base !== void 0 ? { base: args2.base } : {},
+    ...args2.diff !== void 0 ? { diffFile: args2.diff } : {}
+  });
+  if (outcome.kind === "cannot-run") {
+    process.stderr.write(`stop-rules: ${outcome.reason}
+`);
+    return 1;
+  }
+  if (outcome.kind !== "scored") {
+    throw new Error(`internal error: score mode returned a ${outcome.kind} outcome`);
+  }
+  if (args2.json) process.stdout.write(`${JSON.stringify(outcome.report, null, 2)}
+`);
+  else process.stdout.write(`${outcome.text}
+`);
+  return 0;
+}
 async function runInitCommand(args2) {
   const report = await init2({
     dir: args2.dir ?? process.cwd(),
     selfPath: runningFile(),
     env: process.env,
     ...args2.agents !== void 0 ? { agents: args2.agents } : {},
-    ...args2.team !== void 0 ? { team: args2.team } : {}
+    ...args2.team !== void 0 ? { team: args2.team } : {},
+    ...args2.cut !== void 0 ? { cut: args2.cut } : {}
   });
   if (args2.json) {
     const stream2 = report.ok ? process.stdout : process.stderr;
@@ -9063,6 +9233,8 @@ async function main() {
       return runHook(args2);
     case "check":
       return runCheckCommand(args2);
+    case "score":
+      return runScoreCommand(args2);
     case "init":
       return runInitCommand(args2);
     case "team":

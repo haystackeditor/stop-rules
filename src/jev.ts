@@ -256,13 +256,16 @@ export class JevClient {
         return { ok: false, failure: "budget", message: "call budget exhausted" };
       }
       attempt += 1;
+      // The unit is taken before the attempt, not after it. Several attempts run at once, so
+      // counting afterwards let them all pass the check above and overshoot the ceiling.
+      this.callsUsed += 1;
 
       const sent = await this.fetchOnce(body);
       if (sent.kind === "busy") {
         // Nothing was sent, so this costs no budget. The whole run stops here.
+        this.callsUsed -= 1;
         return { ok: false, failure: "busy", message: sent.reason };
       }
-      this.callsUsed += 1;
 
       if (sent.kind === "error") {
         if (attempt < MAX_ATTEMPTS) {

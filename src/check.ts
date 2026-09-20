@@ -1,25 +1,28 @@
 /**
- * Node side orchestration: repository, rules file, lock, snapshot, baseline, cache file
- * and run log. The judging itself lives in the runtime free engine.
+ * Node side orchestration: repository, settings, rules file, lock, snapshot, baseline, cache
+ * file and run log. The judging itself lives in the runtime free engine.
  */
 
+import { promises as fs } from "node:fs";
 import * as path from "node:path";
 import { resolveCredentials, TOKEN_REJECTED, type Credentials } from "./credentials.js";
 import { cutFiles } from "./cut.js";
-import { parseDiff } from "./diff.js";
-import { runEngine, type CacheLike, type ReportMode } from "./engine.js";
+import { parseDiff, type FileDiff } from "./diff.js";
+import { DEFAULT_MAX_CALLS, DEFAULT_THRESHOLD, runEngine, type CacheLike } from "./engine.js";
 import {
   diffTrees,
   emptyTree,
   findRepo,
   hasHead,
   objectExists,
+  readBlob,
   resolveTree,
   snapshotWorkingTree,
 } from "./git.js";
 import { AUTH_REJECTED, BILLING_EXHAUSTED, type FetchLike } from "./jev.js";
-import { renderReport } from "./report.js";
+import { cutWords, renderReport, renderScores } from "./report.js";
 import { loadRules } from "./rules.js";
+import { DEFAULT_CUT, loadSettings } from "./settings.js";
 import { acquireSlot, MACHINE_BUSY, slotsDir } from "./slots.js";
 import {
   acquireLock,
@@ -34,32 +37,30 @@ import {
   type Cache,
   type StopRulesState,
 } from "./state.js";
-import type { CheckReport, NotChecked, Rule, RunStats } from "./types.js";
+import type {
+  CheckReport,
+  CutMode,
+  NotChecked,
+  Rule,
+  RunStats,
+  ScoreReport,
+  SkippedFile,
+} from "./types.js";
 
 const LOOP_GUARD_ROUNDS = 3;
 const MAX_SESSIONS_KEPT = 100;
 
-/**
- * Which report to write. `piece` hands the failing piece to the agent and is the product.
- * `lines` is the old line finding report, kept only so the owner's "test it both ways"
- * measurement can run. It is not a feature and it is not documented, and both it and this
- * switch are removed once that test is done.
- */
-function reportMode(env: NodeJS.ProcessEnv): ReportMode {
-  const raw = env["STOP_RULES_REPORT"];
-  if (raw === undefined) return "piece";
-  const value = raw.trim();
-  if (value === "piece" || value === "lines") return value;
-  throw new Error(`STOP_RULES_REPORT must be piece or lines, not ${JSON.stringify(raw)}.`);
-}
-
 export interface RunOptions {
   cwd: string;
-  mode: "hook" | "check";
-  threshold: number;
-  maxCalls: number;
+  mode: "hook" | "check" | "score";
+  /** A flag value. It beats the settings file, which beats the default. */
+  threshold?: number;
+  maxCalls?: number;
+  cut?: CutMode;
   rulesPath?: string;
   base?: string;
+  /** score mode only: score this unified diff file instead of the working tree. */
+  diffFile?: string;
   sessionId?: string;
   stopHookActive?: boolean;
   /** Rounds the agent itself reports having already looped, when it tracks that. */
@@ -74,7 +75,8 @@ export type RunOutcome =
   | { kind: "cannot-run"; reason: string }
   | { kind: "clean"; report: CheckReport; text: string }
   | { kind: "violations"; report: CheckReport; text: string }
-  | { kind: "handoff"; report: CheckReport; text: string };
+  | { kind: "handoff"; report: CheckReport; text: string }
+  | { kind: "scored"; report: ScoreReport; text: string };
 
 function cannotRun(reason: string): RunOutcome {
   return { kind: "cannot-run", reason };
@@ -111,6 +113,13 @@ export async function resetBaseline(cwd: string): Promise<CommandResult> {
   };
 }
 
+/** The knobs, after the flags, the settings file and the defaults have had their say. */
+interface Knobs {
+  threshold: number;
+  maxCalls: number;
+  cut: CutMode;
+}
+
 export async function run(options: RunOptions): Promise<RunOutcome> {
   const started = Date.now();
   const env = options.env ?? process.env;
@@ -128,16 +137,24 @@ export async function run(options: RunOptions): Promise<RunOutcome> {
   const rulesLoad = await loadRules(rulesPath);
   if (!rulesLoad.ok) return cannotRun(rulesLoad.reason);
 
+  // The one settings file. A flag beats it, and it beats the defaults.
+  const settingsLoad = await loadSettings(repo.root);
+  if (!settingsLoad.ok) return cannotRun(settingsLoad.reason);
+  const settings = settingsLoad.loaded.settings;
+  const knobs: Knobs = {
+    threshold: options.threshold ?? settings.threshold ?? DEFAULT_THRESHOLD,
+    maxCalls: options.maxCalls ?? settings.maxCalls ?? DEFAULT_MAX_CALLS,
+    cut: options.cut ?? settings.cut ?? DEFAULT_CUT,
+  };
+
   // Team mode when this repo knows a stop-rules endpoint, the developer's own key if not.
-  const credentials = await resolveCredentials(repo.root, env);
+  const credentials = await resolveCredentials(settingsLoad.loaded, env);
   if (!credentials.ok) return cannotRun(credentials.reason);
 
-  // Both of these read the environment, so a bad value is reported before any work.
+  // Reads the environment, so a bad value is reported before any work.
   let slotDir: string;
-  let mode: ReportMode;
   try {
     slotDir = slotsDir(env);
-    mode = reportMode(env);
   } catch (error) {
     return cannotRun(error instanceof Error ? error.message : String(error));
   }
@@ -154,9 +171,9 @@ export async function run(options: RunOptions): Promise<RunOutcome> {
       rulesPath,
       rules: rulesLoad.rules,
       credentials: credentials.credentials,
+      knobs,
       stateDir,
       slotDir,
-      mode,
       notes,
       note,
       started,
@@ -172,17 +189,115 @@ interface LockedArgs {
   rulesPath: string;
   rules: Rule[];
   credentials: Credentials;
+  knobs: Knobs;
   stateDir: string;
   /** Where the machine wide Jev slots live. */
   slotDir: string;
-  mode: ReportMode;
   notes: string[];
   note: (message: string) => void;
   started: number;
 }
 
+/** The diff to judge, and where it came from. */
+interface Work {
+  files: FileDiff[];
+  skipped: SkippedFile[];
+  failures: NotChecked[];
+  /** The new content of a changed file, for the cutting that needs to parse it. */
+  readSource: (file: string) => Promise<string | null>;
+  /** The snapshot tree the baseline moves to, or null when nothing was snapshotted. */
+  snapshot: string | null;
+  cut: CutMode;
+  /** What was scored or checked, in plain words, for the score report. */
+  source: string;
+}
+
+type WorkResult = { ok: true; work: Work } | { ok: false; reason: string };
+
+/** score --diff: a unified diff file. There is no file content, so it is cut by hunk. */
+async function diffFileWork(args: LockedArgs, diffFile: string): Promise<WorkResult> {
+  const full = path.resolve(args.options.cwd, diffFile);
+  let text: string;
+  try {
+    text = await fs.readFile(full, "utf8");
+  } catch (error) {
+    const err = error as NodeJS.ErrnoException;
+    return { ok: false, reason: `could not read the diff file ${full}: ${err.code ?? err.message}` };
+  }
+  const parsed = parseDiff(text, []);
+  if (parsed.files.length === 0 && parsed.failures.length === 0) {
+    return { ok: false, reason: `${full} holds no diff with added lines.` };
+  }
+  return {
+    ok: true,
+    work: {
+      files: parsed.files,
+      skipped: parsed.skipped,
+      failures: parsed.failures.map((failure) => ({ file: failure.file, reason: failure.reason })),
+      readSource: async () => null,
+      snapshot: null,
+      cut: "hunks",
+      source: `${diffFile}, cut by diff hunk because a diff file has no file content to parse`,
+    },
+  };
+}
+
+/** The usual case: the working tree against the baseline, or against --base. */
+async function workingTreeWork(args: LockedArgs, state: StopRulesState): Promise<WorkResult> {
+  const { options, repo, rulesPath, stateDir, knobs } = args;
+  // Taken under the lock, so a second firing checks the newest tree.
+  const snapshot = await snapshotWorkingTree(repo, stateDir);
+
+  let baseline: string;
+  if (options.base !== undefined) {
+    const resolved = await resolveTree(repo.root, options.base);
+    if (resolved === null) return { ok: false, reason: `unknown revision ${options.base}.` };
+    baseline = resolved;
+  } else if (state.lastTree !== undefined) {
+    // A baseline we recorded but git has since removed. Turning that into HEAD silently
+    // would re-check work the user has already been told about, or skip work in between.
+    if (!(await objectExists(repo.root, state.lastTree))) {
+      return {
+        ok: false,
+        reason:
+          "the saved baseline is gone (git cleaned it up). Run stop-rules baseline --reset to start again from HEAD.",
+      };
+    }
+    baseline = state.lastTree;
+  } else if (await hasHead(repo.root)) {
+    // First run in this repository: HEAD is the defined starting point.
+    const head = await resolveTree(repo.root, "HEAD");
+    if (head === null) {
+      return { ok: false, reason: "git could not resolve HEAD to a tree in this repository." };
+    }
+    baseline = head;
+  } else {
+    // First run in a repository with no commit yet: everything is new.
+    baseline = await emptyTree(repo.root);
+  }
+
+  const rulesRelative = path.relative(repo.root, rulesPath).split(path.sep).join("/");
+  // .stop-rules.md and .stop-rules.json are skipped by name inside parseDiff. The extra
+  // name here is for a rules file the user pointed somewhere else with --rules.
+  const parsed = parseDiff(await diffTrees(repo.root, baseline, snapshot), [rulesRelative]);
+  const against =
+    options.base === undefined ? "the last check" : `${options.base}`;
+  return {
+    ok: true,
+    work: {
+      files: parsed.files,
+      skipped: parsed.skipped,
+      failures: parsed.failures.map((failure) => ({ file: failure.file, reason: failure.reason })),
+      readSource: (file) => readBlob(repo.root, snapshot, file),
+      snapshot,
+      cut: knobs.cut,
+      source: `the working tree against ${against}, cut into ${cutWords(knobs.cut)}`,
+    },
+  };
+}
+
 async function runLocked(args: LockedArgs): Promise<RunOutcome> {
-  const { options, repo, rulesPath, rules, credentials, stateDir, notes, note, started } = args;
+  const { options, rules, credentials, knobs, stateDir, notes, note, started } = args;
   const model = credentials.model;
 
   let state: StopRulesState;
@@ -195,48 +310,17 @@ async function runLocked(args: LockedArgs): Promise<RunOutcome> {
     return cannotRun(error instanceof Error ? error.message : String(error));
   }
 
-  // Taken under the lock, so a second firing checks the newest tree.
-  const snapshot = await snapshotWorkingTree(repo, stateDir);
+  const prepared =
+    options.diffFile === undefined
+      ? await workingTreeWork(args, state)
+      : await diffFileWork(args, options.diffFile);
+  if (!prepared.ok) return cannotRun(prepared.reason);
+  const work = prepared.work;
 
-  let baseline: string;
-  if (options.base !== undefined) {
-    const resolved = await resolveTree(repo.root, options.base);
-    if (resolved === null) return cannotRun(`unknown revision ${options.base}.`);
-    baseline = resolved;
-  } else if (state.lastTree !== undefined) {
-    // A baseline we recorded but git has since removed. Turning that into HEAD silently
-    // would re-check work the user has already been told about, or skip work in between.
-    if (!(await objectExists(repo.root, state.lastTree))) {
-      return cannotRun(
-        "the saved baseline is gone (git cleaned it up). Run stop-rules baseline --reset to start again from HEAD.",
-      );
-    }
-    baseline = state.lastTree;
-  } else if (await hasHead(repo.root)) {
-    // First run in this repository: HEAD is the defined starting point.
-    const head = await resolveTree(repo.root, "HEAD");
-    if (head === null) return cannotRun("git could not resolve HEAD to a tree in this repository.");
-    baseline = head;
-  } else {
-    // First run in a repository with no commit yet: everything is new.
-    baseline = await emptyTree(repo.root);
-  }
-
-  const rulesRelative = path.relative(repo.root, rulesPath).split(path.sep).join("/");
-  // .stop-rules.md and .stop-rules.json are skipped by name inside parseDiff. The extra
-  // name here is for a rules file the user pointed somewhere else with --rules.
-  const parsed = parseDiff(await diffTrees(repo.root, baseline, snapshot), [rulesRelative]);
-  const files = parsed.files;
-  // Files the parser could not name are failures, not skips, and they are reported.
-  const parseFailures: NotChecked[] = parsed.failures.map((failure) => ({
-    file: failure.file,
-    reason: failure.reason,
-  }));
-
-  // Cut each file into pieces: whole syntactic units, or diff hunks when there is no grammar.
+  // Cut each file into pieces: whole syntactic units, or diff hunks.
   let cut;
   try {
-    cut = await cutFiles(repo.root, snapshot, files);
+    cut = await cutFiles(work.files, { cut: work.cut, readSource: work.readSource });
   } catch (error) {
     // A broken install, or the "every added line lands in exactly one piece" check failing.
     return cannotRun(error instanceof Error ? error.message : String(error));
@@ -247,10 +331,9 @@ async function runLocked(args: LockedArgs): Promise<RunOutcome> {
   const engineResult = await runEngine({
     pieces,
     rules,
-    reportMode: args.mode,
     slot: () => acquireSlot(args.slotDir),
-    threshold: options.threshold,
-    maxCalls: options.maxCalls,
+    threshold: knobs.threshold,
+    maxCalls: knobs.maxCalls,
     model,
     endpoint: credentials.endpoint,
     apiKey: credentials.bearer,
@@ -281,11 +364,12 @@ async function runLocked(args: LockedArgs): Promise<RunOutcome> {
     return cannotRun("could not reach Jev for any piece of this diff.");
   }
 
-  const notChecked = [...parseFailures, ...cut.notChecked, ...engineResult.notChecked];
+  const notChecked = [...work.failures, ...cut.notChecked, ...engineResult.notChecked];
   const stats: RunStats = {
-    files: files.length,
+    cut: work.cut,
+    files: work.files.length,
     pieces: pieces.length,
-    skipped: parsed.skipped.length,
+    skipped: work.skipped.length,
     calls: engineResult.calls,
     piecesPerCall: engineResult.piecesPerCall,
     cacheHits: engineResult.cacheHits,
@@ -297,28 +381,40 @@ async function runLocked(args: LockedArgs): Promise<RunOutcome> {
     outputTokens: engineResult.usage.outputTokens,
     durationMs: Date.now() - started,
   };
-  const report: CheckReport = {
-    pieces: engineResult.pieces,
-    notChecked,
-    skipped: parsed.skipped,
-    stats,
-  };
 
-  const outcome = decide(
-    options,
-    args.mode,
-    report,
-    state,
-    engineResult.findings,
-    snapshot,
-    engineResult.holdBaseline,
-  );
-  if (options.mode === "hook") await saveState(stateDir, state);
+  let outcome: RunOutcome;
+  if (options.mode === "score") {
+    const report: ScoreReport = {
+      pieces: engineResult.scores,
+      notChecked,
+      skipped: work.skipped,
+      stats,
+      source: work.source,
+    };
+    outcome = { kind: "scored", report, text: renderScores(report) };
+  } else {
+    const report: CheckReport = {
+      pieces: engineResult.pieces,
+      notChecked,
+      skipped: work.skipped,
+      stats,
+    };
+    outcome = decide(
+      options,
+      report,
+      state,
+      engineResult.findings,
+      work.snapshot,
+      engineResult.holdBaseline,
+    );
+    if (options.mode === "hook") await saveState(stateDir, state);
+  }
+
   await saveCache(stateDir, cache);
   await appendRunLog(stateDir, {
     at: new Date().toISOString(),
     mode: options.mode + (options.stopHookActive === true ? " (stop_hook_active)" : ""),
-    report: args.mode,
+    cut: stats.cut,
     files: stats.files,
     pieces: stats.pieces,
     piecesPerCall: stats.piecesPerCall,
@@ -331,7 +427,7 @@ async function runLocked(args: LockedArgs): Promise<RunOutcome> {
     inputTokens: stats.inputTokens,
     outputTokens: stats.outputTokens,
     durationMs: stats.durationMs,
-    exitCode: outcome.kind === "violations" ? 2 : outcome.kind === "clean" ? 0 : 1,
+    exitCode: outcome.kind === "violations" ? 2 : outcome.kind === "cannot-run" ? 1 : 0,
     notes,
   });
   return outcome;
@@ -340,19 +436,21 @@ async function runLocked(args: LockedArgs): Promise<RunOutcome> {
 /** Applies the hook's session policy and mutates state accordingly. */
 function decide(
   options: RunOptions,
-  mode: ReportMode,
   report: CheckReport,
   state: StopRulesState,
   findings: readonly { ruleId: string; pieceText: string }[],
-  snapshot: string,
+  snapshot: string | null,
   holdBaseline: boolean,
 ): RunOutcome {
-  const text = renderReport(report, mode);
+  const text = renderReport(report);
   const hasViolations = report.pieces.length > 0;
 
   if (options.mode !== "hook") {
     // check is read only: it advances nothing and remembers nothing.
     return hasViolations ? { kind: "violations", report, text } : { kind: "clean", report, text };
+  }
+  if (snapshot === null) {
+    throw new Error("internal error: hook mode ran without a working tree snapshot");
   }
 
   const sessionId = options.sessionId;

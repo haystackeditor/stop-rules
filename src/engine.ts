@@ -5,33 +5,17 @@
  * function. Parsing happens above this file; here a piece is just text.
  */
 
-import {
-  addedLines,
-
-  chunkText,
-  halvePiece,
-  isLongLineMarker,
-  utf8Bytes,
-  type Piece,
-} from "./diff.js";
+import { chunkText, halvePiece, utf8Bytes, type Piece } from "./diff.js";
 import {
   JevClient,
   holdsBaseline,
   type AskNode,
-  type FailureClass,
   type FetchLike,
   type JevQuestion,
   type JevUsage,
   type SlotGate,
 } from "./jev.js";
-import type {
-  AddedLine,
-  BrokenRule,
-  NotChecked,
-  PieceFinding,
-  Rule,
-  ViolationLine,
-} from "./types.js";
+import type { BrokenRule, NotChecked, PieceFinding, PieceScore, Rule } from "./types.js";
 
 /**
  * The one cutoff. Measured on 240 real agent written changes: whole functions as pieces
@@ -39,12 +23,14 @@ import type {
  */
 export const DEFAULT_THRESHOLD = 0.6;
 
+/** The one ceiling on Jev requests in one run. Raise it with `maxCalls` or `--max-calls`. */
+export const DEFAULT_MAX_CALLS = 60;
+
 /** Measured: four pieces per call moved scores by 0.03 on average, eight was worse. */
 export const PIECES_PER_CALL = 4;
 /** And a call is bounded by its body size, whatever the piece count. */
 export const PACK_MAX_BYTES = 60_000;
 
-const MAX_LINES_PER_VIOLATION = 3;
 const MAX_RULES_PER_CALL = 200;
 const CACHE_KEY_VERSION = "v1";
 /**
@@ -52,9 +38,6 @@ const CACHE_KEY_VERSION = "v1";
  * stays valid however the pieces are packed on the next run.
  */
 const CACHE_PIECE_KEY = "p0";
-
-/** Which report the run wants. `lines` exists only for the owner's both ways test. */
-export type ReportMode = "piece" | "lines";
 
 /** Minimal cache seam: the caller owns storage and eviction. */
 export interface CacheLike {
@@ -73,8 +56,6 @@ export interface EngineInput {
   fetchImpl: FetchLike;
   cache: CacheLike;
   note: (message: string) => void;
-  /** `piece` hands the failing piece over. `lines` runs the old line finding second call. */
-  reportMode: ReportMode;
   /** True for a (rule, piece) pair the caller has already delivered once. */
   skipFinding?: (ruleId: string, pieceText: string) => boolean;
   sleep?: (ms: number) => Promise<void>;
@@ -84,6 +65,8 @@ export interface EngineInput {
 
 export interface EngineResult {
   pieces: PieceFinding[];
+  /** Every piece with every rule's score, highest first. No cutoff applied. */
+  scores: PieceScore[];
   notChecked: NotChecked[];
   calls: number;
   cacheHits: number;
@@ -108,10 +91,6 @@ export interface EngineResult {
 /** The stage 1 claim. `key` names the piece inside the call's state. */
 export function stage1Claim(rule: Rule, key: string): string {
   return `The added lines in the diff state.pieces.${key} violate this coding rule: ${rule.text}`;
-}
-
-export function stage2Claim(line: AddedLine): string {
-  return `Added line ${line.line} is where this diff violates the rule: ${line.text.trim()}`;
 }
 
 const encoder = new TextEncoder();
@@ -143,12 +122,6 @@ interface Work {
 interface PackPayload {
   work: Work[];
   byQuestion: Record<string, { piece: Piece; rule: Rule }>;
-}
-
-interface Stage2Payload {
-  piece: Piece;
-  rule: Rule;
-  byQuestion: Record<string, AddedLine>;
 }
 
 interface Hit {
@@ -236,39 +209,6 @@ export function packWork(model: string, work: readonly Work[]): Work[][] {
   return packs;
 }
 
-function makeStage2Node(piece: Piece, rule: Rule, lines: AddedLine[]): AskNode<Stage2Payload> {
-  const questions: Record<string, JevQuestion> = {};
-  const byQuestion: Record<string, AddedLine> = {};
-  lines.forEach((line, index) => {
-    const id = `q${index}`;
-    questions[id] = { type: "noul", instructions: stage2Claim(line) };
-    byQuestion[id] = line;
-  });
-  return {
-    payload: { piece, rule, byQuestion },
-    state: { file: piece.file, diff: chunkText(piece), rule: rule.text },
-    questions,
-    halve: () => {
-      if (lines.length < 2) return null;
-      const mid = Math.ceil(lines.length / 2);
-      return [
-        makeStage2Node(piece, rule, lines.slice(0, mid)),
-        makeStage2Node(piece, rule, lines.slice(mid)),
-      ];
-    },
-  };
-}
-
-/**
- * Lines with no letter or digit (a lone brace, say) are not unique enough to score, and a
- * line whose payload was left out as data has no text to point at.
- */
-function localisableLines(piece: Piece): AddedLine[] {
-  return addedLines(piece).filter(
-    (line) => /[A-Za-z0-9]/.test(line.text) && !isLongLineMarker(line.text),
-  );
-}
-
 export async function runEngine(input: EngineInput): Promise<EngineResult> {
   const { cache, note, threshold, model } = input;
   const client = new JevClient({
@@ -284,7 +224,8 @@ export async function runEngine(input: EngineInput): Promise<EngineResult> {
   });
 
   const notChecked: NotChecked[] = [];
-  const hits: Hit[] = [];
+  /** Every (piece, rule) that got a score, whatever the score was. */
+  const scored: Hit[] = [];
   const piecesPerCall: number[] = [];
   let cacheHits = 0;
   let answered = 0;
@@ -312,7 +253,7 @@ export async function runEngine(input: EngineInput): Promise<EngineResult> {
       }
       cacheHits += 1;
       answered += 1;
-      if (cached >= threshold) hits.push({ piece, rule, score: cached });
+      scored.push({ piece, rule, score: cached });
     }
     for (let i = 0; i < uncached.length; i += MAX_RULES_PER_CALL) {
       work.push({ piece, rules: uncached.slice(i, i + MAX_RULES_PER_CALL) });
@@ -349,38 +290,18 @@ export async function runEngine(input: EngineInput): Promise<EngineResult> {
         await cacheKey(model, stage1Claim(target.rule, CACHE_PIECE_KEY), soloState(target.piece)),
         noul,
       );
-      if (noul >= threshold) hits.push({ piece: target.piece, rule: target.rule, score: noul });
+      scored.push({ piece: target.piece, rule: target.rule, score: noul });
     }
   }
 
+  const hits = scored.filter((hit) => hit.score >= threshold);
   const fresh =
     input.skipFinding === undefined
       ? hits
       : hits.filter((hit) => !input.skipFinding?.(hit.rule.id, chunkText(hit.piece)));
 
   const findings = fresh.map((hit) => ({ ruleId: hit.rule.id, pieceText: chunkText(hit.piece) }));
-
-  // The old line finding report asks a second question per finding. The piece report does not.
-  const localised =
-    input.reportMode === "lines"
-      ? await localiseLines({
-          client,
-          cache,
-          fresh,
-          model,
-          threshold,
-          note,
-          onFailure: (failure) => {
-            if (holdsBaseline(failure)) holdBaseline = true;
-            noteFailure(failure);
-          },
-          countCacheHit: () => {
-            cacheHits += 1;
-          },
-        })
-      : new Map<string, Localised>();
-
-  const pieces = groupByPiece(fresh, localised);
+  const pieces = groupByPiece(fresh);
 
   const fromLineOf = (entry: NotChecked): number => (entry.fromLine === undefined ? 0 : entry.fromLine);
   notChecked.sort((a, b) => {
@@ -391,6 +312,7 @@ export async function runEngine(input: EngineInput): Promise<EngineResult> {
 
   return {
     pieces,
+    scores: groupScores(scored),
     notChecked,
     calls: client.calls,
     cacheHits,
@@ -404,34 +326,18 @@ export async function runEngine(input: EngineInput): Promise<EngineResult> {
   };
 }
 
-/** What the line finding report worked out for one (piece, rule). */
-interface Localised {
-  lines: ViolationLine[];
-  unlocalised: string | null;
-}
-
-function hitKey(rule: Rule, piece: Piece): string {
-  return `${rule.id}\u0000${chunkText(piece)}`;
-}
-
 /**
  * One entry per piece, with every rule that piece broke, highest confidence first. The piece
  * is what the agent is handed, so it is named once and its diff is printed once.
  */
-function groupByPiece(
-  fresh: readonly Hit[],
-  localised: Map<string, Localised>,
-): PieceFinding[] {
+function groupByPiece(fresh: readonly Hit[]): PieceFinding[] {
   const byPiece = new Map<string, PieceFinding>();
   for (const hit of fresh) {
     const text = chunkText(hit.piece);
-    const found = localised.get(hitKey(hit.rule, hit.piece));
     const broken: BrokenRule = {
       ruleId: hit.rule.id,
       rule: hit.rule.text,
       confidence: hit.score,
-      lines: found?.lines ?? [],
-      unlocalised: found?.unlocalised ?? null,
     };
     const existing = byPiece.get(text);
     if (existing !== undefined) {
@@ -456,97 +362,40 @@ function groupByPiece(
   return pieces;
 }
 
-interface LineArgs {
-  client: JevClient;
-  cache: CacheLike;
-  fresh: readonly Hit[];
-  model: string;
-  threshold: number;
-  note: (message: string) => void;
-  onFailure: (failure: FailureClass) => void;
-  countCacheHit: () => void;
-}
-
 /**
- * The old line finding report, kept only for the owner's "test it both ways" measurement: a
- * second call per finding that asks which added line is at fault. Removed after that test.
+ * What `score` prints: one entry per piece with every rule's score, highest score first.
+ * Nothing is left out, so a team can see where their own code sits on the scale.
  */
-async function localiseLines(args: LineArgs): Promise<Map<string, Localised>> {
-  const { client, cache, fresh, model, threshold, note } = args;
-  const nodes: AskNode<Stage2Payload>[] = [];
-  const scores = new Map<string, Map<number, number>>();
-  const failures = new Map<string, string>();
-
-  for (const hit of fresh) {
-    const state = { file: hit.piece.file, diff: chunkText(hit.piece), rule: hit.rule.text };
-    const perLine = new Map<number, number>();
-    scores.set(hitKey(hit.rule, hit.piece), perLine);
-    const uncached: AddedLine[] = [];
-    for (const line of localisableLines(hit.piece)) {
-      const cached = cache.get(await cacheKey(model, stage2Claim(line), state));
-      if (cached === undefined) {
-        uncached.push(line);
-        continue;
-      }
-      args.countCacheHit();
-      perLine.set(line.line, cached);
-    }
-    if (uncached.length > 0) nodes.push(makeStage2Node(hit.piece, hit.rule, uncached));
-  }
-
-  for (const result of await client.askAll(nodes)) {
-    const { piece, rule, byQuestion } = result.node.payload;
-    const target = scores.get(hitKey(rule, piece));
-    if (!result.outcome.ok) {
-      const failure = result.outcome.failure;
-      args.onFailure(failure);
-      const why = `the question about which line failed: ${reasonFor(failure, result.outcome.message)}`;
-      note(`could not localise rule ${rule.id} in ${piece.file}: ${why}`);
-      failures.set(hitKey(rule, piece), why);
+function groupScores(scored: readonly Hit[]): PieceScore[] {
+  const byPiece = new Map<string, PieceScore>();
+  for (const hit of scored) {
+    const text = chunkText(hit.piece);
+    const entry: PieceScore["rules"][number] = {
+      ruleId: hit.rule.id,
+      rule: hit.rule.text,
+      score: hit.score,
+    };
+    const existing = byPiece.get(text);
+    if (existing !== undefined) {
+      existing.rules.push(entry);
       continue;
     }
-    for (const [id, line] of Object.entries(byQuestion)) {
-      const noul = result.outcome.answers[id];
-      if (noul === undefined) {
-        note(`Jev returned no answer for line ${line.line} of ${piece.file}`);
-        continue;
-      }
-      cache.set(await cacheKey(model, stage2Claim(line), result.node.state), noul);
-      target?.set(line.line, noul);
-    }
+    byPiece.set(text, {
+      file: hit.piece.file,
+      unit: hit.piece.unitName,
+      fromLine: hit.piece.fromLine,
+      toLine: hit.piece.toLine,
+      rules: [entry],
+    });
   }
 
-  const out = new Map<string, Localised>();
-  for (const hit of fresh) {
-    const key = hitKey(hit.rule, hit.piece);
-    const perLine = scores.get(key);
-    if (perLine === undefined) {
-      throw new Error(`internal error: no line scores were recorded for ${hit.piece.file}`);
-    }
-    const textByLine = new Map(addedLines(hit.piece).map((line) => [line.line, line.text.trim()]));
-    const byScore = [...perLine.entries()].sort((a, b) => b[1] - a[1]);
-    const above = byScore.filter(([, score]) => score >= threshold).slice(0, MAX_LINES_PER_VIOLATION);
-
-    const lines: ViolationLine[] = [];
-    for (const [lineNo] of above) {
-      const text = textByLine.get(lineNo);
-      if (text === undefined) {
-        throw new Error(`internal error: line ${lineNo} is not an added line of ${hit.piece.file}`);
-      }
-      lines.push({ line: lineNo, text });
-    }
-    lines.sort((a, b) => a.line - b.line);
-
-    let unlocalised: string | null = null;
-    if (lines.length === 0) {
-      const failed = failures.get(key);
-      if (failed !== undefined) unlocalised = failed;
-      else if (byScore.length > 0) unlocalised = `no added line reached the ${threshold} cutoff`;
-      else if (localisableLines(hit.piece).length === 0) {
-        unlocalised = "no added line in this block has text to point at";
-      } else unlocalised = "no line scores came back for this block";
-    }
-    out.set(key, { lines, unlocalised });
-  }
-  return out;
+  const pieces = [...byPiece.values()];
+  for (const piece of pieces) piece.rules.sort((a, b) => b.score - a.score);
+  const top = (piece: PieceScore): number => piece.rules[0]?.score ?? 0;
+  pieces.sort((a, b) => {
+    if (top(a) !== top(b)) return top(b) - top(a);
+    if (a.file !== b.file) return a.file < b.file ? -1 : 1;
+    return a.fromLine - b.fromLine;
+  });
+  return pieces;
 }

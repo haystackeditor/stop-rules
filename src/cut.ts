@@ -1,21 +1,34 @@
 /**
- * The Node layer that turns a diff into pieces: read each changed file out of the snapshot
- * tree, parse it with the grammar for its extension, and cut it into pieces. A file with no
- * grammar is cut by diff hunk. A file whose grammar is not installed, or that will not parse,
- * is reported as not checked. Nothing here guesses and nothing falls back.
+ * The Node layer that turns a diff into pieces.
+ *
+ * In `functions` mode each changed file is read out of the snapshot tree, parsed with the
+ * grammar for its extension, and cut into whole functions. A file with no grammar is cut by
+ * diff hunk. A file whose grammar is not installed, or that will not parse, is reported as
+ * not checked.
+ *
+ * In `hunks` mode no parser runs at all: every file is cut by diff hunk into pieces of up to
+ * 12,000 bytes. Nothing here guesses and nothing falls back.
  */
 
 import { addedLines, chunkRange, type FileDiff, type Piece } from "./diff.js";
-import { readBlob } from "./git.js";
 import { extensionOf, grammarForPath, GRAMMAR_TITLE, TABLES, type GrammarKey } from "./languages.js";
-import { buildPieces, errorRows, piecesByHunk } from "./pieces.js";
+import { buildPieces, chunkPieces, errorRows, piecesByHunk } from "./pieces.js";
 import { parseSource } from "./treesitter.js";
-import type { CutByHunk, NotChecked } from "./types.js";
+import type { CutByHunk, CutMode, NotChecked } from "./types.js";
 
 export interface CutResult {
   pieces: Piece[];
   notChecked: NotChecked[];
   cutByHunk: CutByHunk[];
+}
+
+/** Where a file's new content comes from. Null means the source could not be read. */
+export type ReadSource = (file: string) => Promise<string | null>;
+
+export interface CutOptions {
+  cut: CutMode;
+  /** Only used in functions mode, where a file has to be parsed to be cut. */
+  readSource: ReadSource;
 }
 
 function describeExtension(filePath: string): string {
@@ -24,15 +37,19 @@ function describeExtension(filePath: string): string {
 }
 
 export async function cutFiles(
-  root: string,
-  snapshot: string,
   files: readonly FileDiff[],
+  options: CutOptions,
 ): Promise<CutResult> {
   const pieces: Piece[] = [];
   const notChecked: NotChecked[] = [];
   const cutByHunk: CutByHunk[] = [];
   /** Extensions whose grammar this install does not have, reported once for the run. */
   const missing = new Set<string>();
+
+  if (options.cut === "hunks") {
+    for (const file of files) pieces.push(...chunkPieces(file));
+    return { pieces, notChecked, cutByHunk };
+  }
 
   for (const file of files) {
     const key = grammarForPath(file.file);
@@ -42,7 +59,7 @@ export async function cutFiles(
       continue;
     }
     const range = chunkRange(file);
-    const source = await readBlob(root, snapshot, file.file);
+    const source = await options.readSource(file.file);
     if (source === null) {
       notChecked.push({
         file: file.file,

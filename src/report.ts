@@ -1,19 +1,17 @@
-import type { ReportMode } from "./engine.js";
-import type { BrokenRule, CheckReport, NotChecked, PieceFinding } from "./types.js";
+import type {
+  BrokenRule,
+  CheckReport,
+  NotChecked,
+  PieceFinding,
+  PieceScore,
+  ScoreReport,
+} from "./types.js";
 
-/** A quoted code line is a pointer, not the payload. Past this it is noise for the agent. */
-export const MAX_QUOTED_LINE = 160;
 /** How much of a piece's diff the report hands over before it says how much is left. */
 export const MAX_PIECE_LINES = 60;
 
 function confidence(score: number): string {
   return score.toFixed(2);
-}
-
-/** Only quoted code lines are ever shortened. Rule text is never cut. */
-export function trimQuoted(text: string): string {
-  if (text.length <= MAX_QUOTED_LINE) return text;
-  return `${text.slice(0, MAX_QUOTED_LINE)}...`;
 }
 
 function where(from: number, to: number): string {
@@ -63,7 +61,7 @@ function ruleLines(rule: BrokenRule): string[] {
   return [`   Rule: ${rule.rule}`, `   Confidence: ${confidence(rule.confidence)}`];
 }
 
-/** The default report: hand over the piece that failed, once, with every rule it broke. */
+/** One entry: the piece that failed, once, with every rule it broke. */
 function pieceBlock(piece: PieceFinding, index: number): string {
   const unit = piece.unit === null ? "" : ` in ${piece.unit}`;
   const heading =
@@ -78,29 +76,24 @@ function pieceBlock(piece: PieceFinding, index: number): string {
   ].join("\n");
 }
 
-/**
- * The old line finding report. It is reachable only through STOP_RULES_REPORT=lines, which
- * exists for one measurement and is removed once that is done.
- */
-function linesBlock(piece: PieceFinding, index: number): string {
-  const out: string[] = [`${index}. ${piece.file} ${where(piece.fromLine, piece.toLine)}`];
-  for (const rule of piece.rules) {
-    out.push(`   Rule: ${rule.rule}`);
-    if (rule.unlocalised !== null) {
-      out.push(`   No single line identified: ${rule.unlocalised}`);
-    } else {
-      for (const line of rule.lines) out.push(`   Line ${line.line}: ${trimQuoted(line.text)}`);
-    }
-    out.push(`   Confidence: ${confidence(rule.confidence)}`);
+function notCheckedSections(notChecked: readonly NotChecked[]): string[] {
+  if (notChecked.length === 1) {
+    const only = notChecked[0];
+    return only === undefined ? [] : [`Not checked (1): ${notCheckedLine(only)}`];
   }
-  return out.join("\n");
+  if (notChecked.length > 1) {
+    return [
+      `Not checked (${notChecked.length}):\n` +
+        notChecked.map((entry) => `  ${notCheckedLine(entry)}`).join("\n"),
+    ];
+  }
+  return [];
 }
 
 /** Plain text for the agent. No colours, no em dashes. */
-export function renderReport(report: CheckReport, mode: ReportMode = "piece"): string {
+export function renderReport(report: CheckReport): string {
   const { pieces, notChecked, stats } = report;
   const sections: string[] = [];
-  const block = mode === "piece" ? pieceBlock : linesBlock;
 
   if (pieces.length === 0) {
     sections.push(
@@ -116,18 +109,42 @@ export function renderReport(report: CheckReport, mode: ReportMode = "piece"): s
       `stop-rules: ${count} in ${places} in your latest changes.\n` +
         "Fix each one. If a rule truly should not apply here, leave the code and tell the user why.",
     );
-    sections.push(pieces.map((piece, i) => block(piece, i + 1)).join("\n\n"));
+    sections.push(pieces.map((piece, i) => pieceBlock(piece, i + 1)).join("\n\n"));
   }
 
-  if (notChecked.length === 1) {
-    const only = notChecked[0];
-    if (only !== undefined) sections.push(`Not checked (1): ${notCheckedLine(only)}`);
-  } else if (notChecked.length > 1) {
+  sections.push(...notCheckedSections(notChecked));
+  return sections.join("\n\n");
+}
+
+/** How the change was cut, in plain words. */
+export function cutWords(cut: "functions" | "hunks"): string {
+  return cut === "functions" ? "whole functions, with tree-sitter" : "diff hunks, with no parser";
+}
+
+function scoreBlock(piece: PieceScore, index: number): string {
+  const unit = piece.unit === null ? "" : ` in ${piece.unit}`;
+  const lines = [`${index}. ${piece.file} ${where(piece.fromLine, piece.toLine)}${unit}`];
+  for (const rule of piece.rules) lines.push(`   ${confidence(rule.score)}  ${rule.rule}`);
+  return lines.join("\n");
+}
+
+/** What `stop-rules score` prints: every piece, every rule, every score, no cutoff. */
+export function renderScores(report: ScoreReport): string {
+  const { pieces, notChecked, stats, source } = report;
+  const sections: string[] = [];
+  const scores = pieces.reduce((total, piece) => total + piece.rules.length, 0);
+
+  if (pieces.length === 0) {
+    sections.push(`stop-rules score: nothing to score in ${source}.`);
+  } else {
+    const count = pieces.length === 1 ? "1 piece" : `${pieces.length} pieces`;
     sections.push(
-      `Not checked (${notChecked.length}):\n` +
-        notChecked.map((entry) => `  ${notCheckedLine(entry)}`).join("\n"),
+      `stop-rules score: ${count}, ${scores} scores, ${stats.calls} Jev calls, ${stats.cacheHits} answers from the cache.\n` +
+        `Scored ${source}. No cutoff applied, nothing was marked as checked, and the baseline did not move.`,
     );
+    sections.push(pieces.map((piece, i) => scoreBlock(piece, i + 1)).join("\n\n"));
   }
 
+  sections.push(...notCheckedSections(notChecked));
   return sections.join("\n\n");
 }

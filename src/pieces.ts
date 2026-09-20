@@ -27,6 +27,8 @@
 
 import type { Node } from "web-tree-sitter";
 import {
+  chunkFile,
+  chunkRange,
   countNew,
   countOld,
   gitOldStart,
@@ -751,5 +753,40 @@ export function piecesByHunk(file: FileDiff): Piece[] {
     flush();
   }
   assertEveryAddedLineOnce(file.file, addedNumbers, pieces);
+  return pieces;
+}
+
+/**
+ * Hunks mode: no parser at all. A file's diff becomes one or more pieces of whole hunks, up
+ * to 12,000 bytes each, and a hunk bigger than that is halved until it fits. This is how
+ * stop-rules cut code before it had a parser.
+ */
+export function chunkPieces(file: FileDiff): Piece[] {
+  const pieces: Piece[] = chunkFile(file).map((chunk) => {
+    const range = chunkRange(chunk);
+    return {
+      file: chunk.file,
+      header: chunk.header,
+      hunks: chunk.hunks,
+      unitName: null,
+      fromLine: range.from,
+      toLine: range.to,
+      cut: "hunk" as const,
+    };
+  });
+  const added: number[] = [];
+  for (const hunk of file.hunks) {
+    let line = hunk.newStart;
+    for (const raw of hunk.lines) {
+      const marker = raw[0];
+      if (marker === "+") {
+        added.push(line);
+        line += 1;
+      } else if (marker === " ") {
+        line += 1;
+      }
+    }
+  }
+  assertEveryAddedLineOnce(file.file, added, pieces);
   return pieces;
 }

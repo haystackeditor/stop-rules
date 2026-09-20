@@ -4,9 +4,11 @@ import { DEFAULT_AGENT, agentNames, getAdapter } from "./adapters/index.js";
 import type { AgentAdapter, HookContext, HookOutput } from "./adapters/index.js";
 import { resetBaseline, run, type RunOutcome } from "./check.js";
 import { login, loginCheck, writeTeamConfig } from "./credentials.js";
-import { DEFAULT_THRESHOLD } from "./engine.js";
+import { DEFAULT_MAX_CALLS, DEFAULT_THRESHOLD } from "./engine.js";
 import { findRepo } from "./git.js";
 import { init, renderInit } from "./init.js";
+import { DEFAULT_CUT, SETTINGS_FILE } from "./settings.js";
+import type { CutMode } from "./types.js";
 import { serveMain } from "./server/node.js";
 import { VERSION } from "./version.js";
 
@@ -15,6 +17,7 @@ const USAGE = `stop-rules: check the code your agent just wrote against your tea
 Usage:
   stop-rules hook [options]            run as a stop hook, reading the agent's JSON on stdin
   stop-rules check [options]           run the same check in a terminal, pre-commit or CI
+  stop-rules score [options]           print every piece and every rule's score, no cutoff
   stop-rules init [options]            vendor the checker and wire it into your agents
   stop-rules team <endpoint>           point this repo at your team's stop-rules server
   stop-rules login --token-stdin       store the team token, read from stdin
@@ -29,9 +32,11 @@ Options:
   --dir <path>         init mode only: the repository to install into (default: this one)
   --team <endpoint>    init mode only: use your team's stop-rules server, not your own key
   --rules <path>       rules file (default <repo root>/.stop-rules.md)
+  --cut <mode>         functions (tree-sitter) or hunks (no parser) (default ${DEFAULT_CUT})
   --threshold <0..1>   score at or above which a rule counts as violated (default ${DEFAULT_THRESHOLD})
-  --max-calls <n>      hard ceiling on requests to Jev in one run (default 60)
-  --base <rev>         check mode only: diff this revision against the working tree
+  --max-calls <n>      hard ceiling on requests to Jev in one run (default ${DEFAULT_MAX_CALLS})
+  --base <rev>         check and score modes: diff this revision against the working tree
+  --diff <path>        score mode only: score a unified diff file instead of the working tree
   --json               print the findings, or the init result, as JSON
   --port <n>           serve mode only: port to listen on (default PORT or 8080)
   --reset              baseline mode only: clear the saved baseline
@@ -40,6 +45,10 @@ Options:
   --version            print the version
 
 Agents: ${agentNames().join(", ")}
+
+Settings: ${SETTINGS_FILE} in the repository root holds endpoint, cut, threshold and
+maxCalls. It is committed and holds no secret. A flag above beats the file. What each knob
+costs is in docs/TUNING.md.
 
 Environment, client:
   STOP_RULES_ENDPOINT      your team's stop-rules server, beats .stop-rules.json
@@ -64,9 +73,12 @@ interface ParsedArgs {
   /** The one positional a command can take, today only `team <endpoint>`. */
   operand?: string;
   rules?: string;
-  threshold: number;
-  maxCalls: number;
+  /** Undefined when the flag was not given, so the settings file can have its say. */
+  threshold?: number;
+  maxCalls?: number;
+  cut?: CutMode;
   base?: string;
+  diff?: string;
   json: boolean;
   agent: string;
   agents?: string[];
@@ -86,8 +98,6 @@ class UsageError extends Error {}
 function parseArgs(argv: readonly string[]): ParsedArgs {
   const parsed: ParsedArgs = {
     command: "",
-    threshold: DEFAULT_THRESHOLD,
-    maxCalls: 60,
     json: false,
     agent: DEFAULT_AGENT,
     tokenStdin: false,
@@ -151,6 +161,19 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
         i += 1;
         parsed.base = take(i, "--base");
         break;
+      case "--diff":
+        i += 1;
+        parsed.diff = take(i, "--diff");
+        break;
+      case "--cut": {
+        i += 1;
+        const value = take(i, "--cut");
+        if (value !== "functions" && value !== "hunks") {
+          throw new UsageError("--cut must be functions or hunks");
+        }
+        parsed.cut = value;
+        break;
+      }
       case "--agent":
         i += 1;
         parsed.agent = take(i, "--agent");
@@ -230,6 +253,8 @@ function emit(delivery: HookOutput): number {
 
 function deliverOutcome(adapter: AgentAdapter, outcome: RunOutcome): HookOutput {
   switch (outcome.kind) {
+    case "scored":
+      throw new Error("internal error: the hook asked for a check and got a score report");
     case "cannot-run":
       return adapter.deliverError(`stop-rules: ${outcome.reason}`);
     case "handoff":
@@ -262,23 +287,34 @@ async function runHook(args: ParsedArgs): Promise<number> {
     // all, and those agents run the hook in the project root. See HookContext.
     cwd: input.cwd === undefined ? process.cwd() : input.cwd,
     mode: "hook",
-    threshold: args.threshold,
-    maxCalls: args.maxCalls,
     sessionId: input.sessionId,
     stopHookActive: input.stopHookActive === true,
+    ...knobArgs(args),
     ...(input.loopCount !== undefined ? { loopCount: input.loopCount } : {}),
-    ...(args.rules !== undefined ? { rulesPath: args.rules } : {}),
   });
   return emit(deliverOutcome(adapter, outcome));
+}
+
+/** The knobs a flag can set. Left out when the flag was not given. */
+function knobArgs(args: ParsedArgs): {
+  threshold?: number;
+  maxCalls?: number;
+  cut?: CutMode;
+  rulesPath?: string;
+} {
+  return {
+    ...(args.threshold !== undefined ? { threshold: args.threshold } : {}),
+    ...(args.maxCalls !== undefined ? { maxCalls: args.maxCalls } : {}),
+    ...(args.cut !== undefined ? { cut: args.cut } : {}),
+    ...(args.rules !== undefined ? { rulesPath: args.rules } : {}),
+  };
 }
 
 async function runCheckCommand(args: ParsedArgs): Promise<number> {
   const outcome = await run({
     cwd: process.cwd(),
     mode: "check",
-    threshold: args.threshold,
-    maxCalls: args.maxCalls,
-    ...(args.rules !== undefined ? { rulesPath: args.rules } : {}),
+    ...knobArgs(args),
     ...(args.base !== undefined ? { base: args.base } : {}),
   });
   if (outcome.kind === "cannot-run") {
@@ -290,6 +326,31 @@ async function runCheckCommand(args: ParsedArgs): Promise<number> {
   return outcome.kind === "violations" ? 2 : 0;
 }
 
+/** Read only: every piece, every rule, every score, and no cutoff applied. */
+async function runScoreCommand(args: ParsedArgs): Promise<number> {
+  if (args.diff !== undefined && args.base !== undefined) {
+    process.stderr.write("stop-rules: score takes --diff or --base, not both\n");
+    return 1;
+  }
+  const outcome = await run({
+    cwd: process.cwd(),
+    mode: "score",
+    ...knobArgs(args),
+    ...(args.base !== undefined ? { base: args.base } : {}),
+    ...(args.diff !== undefined ? { diffFile: args.diff } : {}),
+  });
+  if (outcome.kind === "cannot-run") {
+    process.stderr.write(`stop-rules: ${outcome.reason}\n`);
+    return 1;
+  }
+  if (outcome.kind !== "scored") {
+    throw new Error(`internal error: score mode returned a ${outcome.kind} outcome`);
+  }
+  if (args.json) process.stdout.write(`${JSON.stringify(outcome.report, null, 2)}\n`);
+  else process.stdout.write(`${outcome.text}\n`);
+  return 0;
+}
+
 async function runInitCommand(args: ParsedArgs): Promise<number> {
   const report = await init({
     dir: args.dir ?? process.cwd(),
@@ -297,6 +358,7 @@ async function runInitCommand(args: ParsedArgs): Promise<number> {
     env: process.env,
     ...(args.agents !== undefined ? { agents: args.agents } : {}),
     ...(args.team !== undefined ? { team: args.team } : {}),
+    ...(args.cut !== undefined ? { cut: args.cut } : {}),
   });
   if (args.json) {
     const stream = report.ok ? process.stdout : process.stderr;
@@ -389,6 +451,8 @@ async function main(): Promise<number> {
       return runHook(args);
     case "check":
       return runCheckCommand(args);
+    case "score":
+      return runScoreCommand(args);
     case "init":
       return runInitCommand(args);
     case "team":
