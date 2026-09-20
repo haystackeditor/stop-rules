@@ -4,8 +4,8 @@ You are a coding agent. This file tells you how to install `stop-rules` in the h
 repository, end to end, and how to prove it works before you say you are done.
 
 `stop-rules` runs after a coding agent finishes a turn. It cuts the code that changed into
-pieces, normally one function each, asks Jev whether any piece breaks one of the team's rules,
-and hands the function that broke it back to the agent so the agent fixes it.
+pieces, one git diff hunk each, asks Jev whether any piece breaks one of the team's rules, and
+hands the piece that broke it back to the agent so the agent fixes it.
 
 ## 1. Ask the human these questions, all at once, before you do anything
 
@@ -57,12 +57,16 @@ Read the JSON it prints. The fields you need:
 
 - `ok`: false means nothing was installed. `errors` says why.
 - `mode`: `team` or `local`. It decides which secret the human stores in step 7.
-- `grammars`: which languages this repo has, which grammar files were copied into
-  `.stop-rules/`, and how big that folder now is. A language with no grammar here is cut by
-  diff hunk instead, which still works. `languages` is read from the files git tracks and the
-  untracked ones it would add, so a repository with no commit yet still gets its grammars. When
-  the repository has no file in a supported language at all, `todo[]` says so and asks you to
-  run `init` again once there is one.
+- `cut`: how this repo will cut a change into pieces. `hunks` is the default, and then nothing
+  is parsed, no grammar file is copied, and `grammars.languages` is empty. That is not a
+  failure. It is `functions` only when this run passed `--cut functions` or the repo's
+  `.stop-rules.json` already said so.
+- `grammars`, in `functions` mode only: which languages this repo has, which grammar files were
+  copied into `.stop-rules/`, and how big that folder now is. A language with no grammar here is
+  cut by diff hunk instead, which still works. `languages` is read from the files git tracks and
+  the untracked ones it would add, so a repository with no commit yet still gets its grammars.
+  When the repository has no file in a supported language at all, `todo[]` says so and asks you
+  to run `init` again once there is one.
 - `agents[]`: one entry per agent, with `files` (what was written), `changed`, `ok`,
   `notes`, and `effect` in plain words. `feedback` is `continues-agent` when that agent can
   be told to fix violations, or `shown-to-user-only` when it can only show them.
@@ -86,21 +90,28 @@ measured totals behind each one, so read it before you answer questions about it
 
 | Knob | Default | What turning it does |
 |---|---|---|
-| `cut` | `functions` | `functions` uses tree-sitter, hands the agent the one function at fault, and copies a few megabytes of parser files into `.stop-rules/`. `hunks` uses no parser, is one 384 KB file, covers every language, and hands the agent the whole diff hunk. `chunks` is the same install with bigger pieces, up to 12,000 bytes, which is the quietest of the three and hands over the most code. |
-| `threshold` | `0.6` | The bar a score must reach to count. Lower catches more and flags more. On our 240 change sample, dropping from 0.6 to 0.5 doubled both the real breaks caught and the flags the reviewers disagreed with. |
+| `cut` | `hunks` | `hunks` uses no parser, is one 384 KB file, covers every language, and hands the agent the git diff hunk the fault sits in. `functions` uses tree-sitter, hands the agent the one function at fault instead, and copies a few megabytes of grammar files into `.stop-rules/`. `chunks` is the default install with bigger pieces, up to 12,000 bytes, which is the quietest of the three and hands over the most code. |
+| `threshold` | `0.5` | The bar a score must reach to count. Lower catches more and flags more. Measured on 240 real changes cut the default way, with 29 real problems in them: 0.5 caught 22 with 6 plainly false flags and 5 arguable, and 0.6 caught 11 with 1 plainly false flag. |
 | `maxCalls` | `60` | Requests to Jev in one run. When it runs out, the rest of the change is reported as not checked and picked up on the next run. |
 | `endpoint` | none, so each person uses their own Jev key | Team mode: questions go to your team's server, which holds the one key. |
 
-What to say, in plain words: the defaults are the defaults because they were measured, not
-because they are right for this repository. If the human does not want to decide now, leave
-every knob alone and do not write the file: `init` writes `.stop-rules.json` only when it has
-something to put in it.
+Say this about the cut, in plain words, because it is the one the human is most likely to want
+changed: the default is git diff hunks, and nothing is installed for it. Tree-sitter would buy
+them one thing, that the agent is handed exactly one function rather than the hunk it sits in,
+and it costs a few megabytes of grammar files in the repository and works in 10 languages only
+(TypeScript, TSX, JavaScript, Python, Go, Rust, Ruby, Java, Kotlin and Swift). Everything else
+in that mode falls back to hunks, and a file that will not parse is not checked at all.
 
-Once they choose:
+Then: the defaults are the defaults because they were measured, not because they are right for
+this repository. If the human does not want to decide now, leave every knob alone and do not
+write the file: `init` writes `.stop-rules.json` only when it has something to put in it, so a
+plain install has no settings file and takes the defaults.
+
+If they want tree-sitter:
 
 ```bash
-# hunks mode, no parser files at all (chunks is the same install, bigger pieces)
-node /tmp/stop-rules/bin/stop-rules.mjs init --dir /path/to/repo --cut hunks --json
+# functions mode: copies the parser and the grammars, and writes {"cut":"functions"}
+node /tmp/stop-rules/bin/stop-rules.mjs init --dir /path/to/repo --cut functions --json
 ```
 
 `threshold` and `maxCalls` you put in `.stop-rules.json` by hand, next to whatever `init`
@@ -231,8 +242,9 @@ rm throwaway-stop-rules-check.ts
 node .stop-rules/stop-rules.mjs check
 ```
 
-Step 1 prints `jev: pass`. Step 3 prints one entry for the function at fault, with the rules
-it breaks and its diff, and exits 2. Step 5 prints "no rule violations" and exits 0.
+Step 1 prints `jev: pass`. Step 3 prints one entry for the piece at fault, which is the diff
+hunk by default and the named function in `functions` mode, with the rules it breaks and its
+diff, and exits 2. Step 5 prints "no rule violations" and exits 0.
 
 Match the throwaway file to a rule the team actually has, and to the language of the repo.
 The example above breaks "do not silently swallow errors".
@@ -268,11 +280,12 @@ Claude Code settings, no hook runs at all and nothing warns them.
 Commit:
 
 - `.stop-rules.md`, the rules.
-- `.stop-rules/`, the checker, the parser and the grammars, so teammates and cloud agents get
-  the check with nothing to install. It is a few megabytes of wasm. If the team would rather
-  not keep binaries in their history, commit only `.stop-rules/stop-rules.mjs` and tell them
-  that each person runs `init` again once on their own machine; until they do, files in that
-  language are reported as not checked and nothing else breaks.
+- `.stop-rules/`, so teammates and cloud agents get the check with nothing to install. On a
+  default install that is one 384 KB file. In `functions` mode it also holds the parser and the
+  grammars, a few megabytes of wasm; if the team would rather not keep binaries in their
+  history, commit only `.stop-rules/stop-rules.mjs` and tell them that each person runs `init`
+  again once on their own machine; until they do, files in that language are reported as not
+  checked and nothing else breaks.
 - The agent config files `init` wrote or changed, listed in `agents[].files`.
 - `.stop-rules.json`, if there is one. It holds the knobs and the team endpoint, and no secret.
 
@@ -318,7 +331,7 @@ Never commit, and never print:
 | `<dir> is not inside a git repository.` | `--dir` pointed somewhere that is not a repo. |
 | `there is no directory at <path>.` | `--dir` pointed at a path that is not there. Check the spelling. |
 | `this is the copy of stop-rules vendored in <repo A>, and it was about to work on <repo B>.` | A repository's own `.stop-rules/stop-rules.mjs` only works on that repository. Pass `--dir <repo A>`, or change into the repository you meant, or use the clone's `bin/stop-rules.mjs` to install somewhere else. |
-| `no source files in a supported language yet: run stop-rules init again after you add some` | `init` found no file in a language it can parse, so it copied no grammar. Add the first source files, then run `init` again in that repo. |
+| `no source files in a supported language yet: run stop-rules init again after you add some` | Only from `init --cut functions`: it found no file in a language it can parse, so it copied no grammar. Add the first source files, then run `init` again in that repo. |
 | `the saved baseline is gone (git cleaned it up). Run stop-rules baseline --reset to start again from HEAD.` | Run that command. The next check starts from HEAD. |
 | `<path>/state.json is not valid JSON ... Run stop-rules baseline --reset to start again.` | Same command fixes it. |
 | `<path>/cache.json is not a stop-rules cache. Delete it and run again.` | Delete that one file. Answers are re-fetched. |
@@ -330,7 +343,7 @@ Never commit, and never print:
 | `stop-rules: 1 file changed and none of it could be checked.` | Something did change and none of it was judged, so this is not a clean result. The reasons follow on the "Not checked" lines, usually a missing grammar or a file that will not parse. In `hook` mode the same case exits 1 with that reason instead of staying quiet. |
 | `stop-rules: no rule violations in the 3 pieces that were checked, and 2 not checked, listed below.` | Part of the change was judged and part was not. The part that was judged broke no rule. |
 | `Jev is busy on this machine, this change will be checked on the next run` | Eight Jev calls from other stop-rules runs on this machine were in flight for a minute. Nothing was marked as checked, so the next turn checks the same code. Nothing to fix. |
-| `no grammar installed for .go, run stop-rules init again to add it` | This repo gained a language after `init` ran. Run `init` again in the repo; it copies the missing grammar and leaves everything else alone. |
+| `no grammar installed for .go, run stop-rules init again to add it` | Only in `functions` mode. This repo gained a language after `init` ran, or the grammars were never copied. Run `init` again in the repo; it copies the missing grammar and leaves everything else alone. The tool never switches to hunks by itself, so this keeps being reported until the grammar is there or the setting changes. |
 | `<file> lines 10-40: could not be parsed as TypeScript` | The file does not parse, so it was not cut into pieces and not checked. Usually the file really is broken: open it. |
 | `the tree-sitter runtime is missing at <path>` | The `.stop-rules/` folder is half there, most likely because only the bundle was committed. Run `init` again in the repo. |
 | Nothing happens at all in Claude Code | Check `disableAllHooks` in their settings, and that `.claude/settings.json` has the Stop entry `init` wrote. |

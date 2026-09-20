@@ -10,9 +10,10 @@ other from the root of this clone:
 stop-rules score --diff examples/tuning/bar.diff --rules examples/tuning/rules-errors.md
 ```
 
-A diff file has no file content, so it cannot be cut into functions. It is cut into one piece
-per diff hunk instead, and the output says so. That is why one piece covers the whole of each
-file below.
+One diff hunk per piece is the default cut, and that is what the command above uses. A diff
+file has no file content, so it can never be cut into functions anyway: ask for
+`--cut functions` on a `--diff` run and the output says it used hunks instead and why. That is
+why one piece covers the whole of each file below.
 
 | File | What it is |
 |---|---|
@@ -31,15 +32,19 @@ file below.
 | `rules-codebase.md` | a rule that needs the whole codebase to answer |
 | `rules-three.md`, `rules-twelve.md` | the same change under 3 and under 12 rules, for the token count |
 
-To score `cutting/notify.ts` in `functions` mode, which needs the file and not just the diff:
+To score `cutting/notify.ts` in `functions` mode, which needs the file and not just the diff.
+`--cut functions` is not optional here: the default is one diff hunk per piece, which would
+give one piece for the whole file.
 
 ```bash
 mkdir /tmp/cutting && cd /tmp/cutting
 git init -q && git commit -q --allow-empty -m empty
 cp /path/to/stop-rules/examples/tuning/cutting/notify.ts .
 cp /path/to/stop-rules/examples/tuning/rules-errors.md .stop-rules.md
-node /path/to/stop-rules/bin/stop-rules.mjs score
+node /path/to/stop-rules/bin/stop-rules.mjs score --cut functions
 ```
+
+Drop the flag to see the same file as one piece, which is what a default install does.
 
 Scores move between model versions. The ones in `docs/TUNING.md` are from 19 September 2026,
 when the service reported `jev-1.13.0`, which is also the version that scored `helper.diff`

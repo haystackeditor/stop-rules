@@ -1,10 +1,15 @@
 # stop-rules
 
 `stop-rules` holds your coding agent to your team's written coding rules. When the agent
-finishes a turn, it cuts the code changed since the last check into pieces, normally one
-function each, and asks [Jev](https://typesafe.ai) one yes or no question per piece and per
-rule. If a rule is likely broken, it hands that one function back to the agent so it fixes it
-before you see it.
+finishes a turn, it cuts the code changed since the last check into pieces, one git diff hunk
+each, and asks [Jev](https://typesafe.ai) one yes or no question per piece and per rule. If a
+rule is likely broken, it hands that piece of code back to the agent so it fixes it before you
+see it.
+
+Cutting by git diff hunk is the default, and it needs nothing installed. A team that would
+rather have one whole function per piece switches to tree-sitter with
+`init --cut functions`, which is 10 languages and a few megabytes of grammar files. Both are
+in [docs/TUNING.md](docs/TUNING.md).
 
 Using a coding agent? Point it at [AGENT-SETUP.md](AGENT-SETUP.md) and let it do the
 install.
@@ -19,9 +24,16 @@ node stop-rules/bin/stop-rules.mjs init --dir /path/to/your/repo
 No `npm install`, no build: `bin/stop-rules.mjs` is committed and ready to run.
 
 `init` finds which coding agents your repo already uses, copies itself into
-`.stop-rules/stop-rules.mjs` there, copies the parser and only the grammars for the languages
-your repo is written in, writes a starter `.stop-rules.md`, and wires the hook into each
-agent's own config file. Then:
+`.stop-rules/stop-rules.mjs` there, writes a starter `.stop-rules.md`, and wires the hook into
+each agent's own config file. That is one 384 KB file and no grammar files, because cutting by
+git diff hunk parses nothing. It says so:
+
+```
+  cutting by git diff hunk, no grammar files needed (.stop-rules is 0.3 MB)
+  run init --cut functions to cut by whole function with tree-sitter
+```
+
+Then:
 
 ```bash
 cd /path/to/your/repo
@@ -33,11 +45,14 @@ Edit `.stop-rules.md` so it says what your team cares about, then commit `.stop-
 the `.stop-rules/` folder and the agent config files. Your key is not in any of them: it
 lives in `~/.config/stop-rules/jev-key`, mode 0600.
 
-`.stop-rules/` holds the checker, the parser and one grammar file per language, so it is a few
-megabytes. Commit it and teammates and cloud agents get the check with nothing to install. If
-you would rather not have binaries in git, leave the grammars out and each person runs `init`
-again on their own machine; a language whose grammar is missing is reported as not checked and
-nothing else breaks.
+`.stop-rules/` holds the checker, one file. Commit it and teammates and cloud agents get the
+check with nothing to install.
+
+If you ran `init --cut functions`, that folder also holds the parser and one grammar file per
+language your repo uses, so it is a few megabytes. Commit those too. If you would rather not
+have binaries in git, leave the grammars out and each person runs `init` again on their own
+machine; a language whose grammar is missing is reported as not checked and nothing else
+breaks.
 
 ## Quick start, a team
 
@@ -97,7 +112,10 @@ contract, so if your Cline never runs it, that is why.
 
 ## Which languages it can cut into pieces
 
-A change is judged one piece at a time, and a piece is normally one whole function. That
+Every language, by default. A change is judged one piece at a time, and by default a piece is
+one git diff hunk, which needs no parser and no grammar file.
+
+A piece can be one whole function instead, with `--cut functions` or `"cut": "functions"`. That
 needs a parser, so these are the languages it has one for:
 
 <!-- languages -->
@@ -115,7 +133,7 @@ needs a parser, so these are the languages it has one for:
 | Swift | `.swift` |
 <!-- /languages -->
 
-Any other file is cut by diff hunk instead, which works and is a little blunter.
+In that mode any other file is cut by diff hunk instead, which works and is a little blunter.
 `check --json` says which files that happened to and why.
 
 ## Writing good rules
@@ -179,23 +197,22 @@ September 2026, which reported its version as `jev-1.13.0`. Both samples are sma
 1. **What changed.** The working tree is written to a git tree object through a temporary
    index, so your own index and staged changes are never touched. That snapshot is diffed
    against the tree from the last check, so each turn only pays for new work.
-2. **Pieces.** Each changed file is parsed, and its diff is cut into pieces. A function,
-   method, constructor or accessor is always a piece of its own, whatever its size, so a rule
-   one function breaks never drags a neighbour in with it. Everything else, meaning imports,
-   top level statements, constants, type declarations and plain fields, groups with the
-   neighbours next to it into a piece of up to 40 added lines, and a function between them
-   ends that group. A file with no grammar is cut by diff hunk instead. Lock files, minified
-   bundles, data and log files, binaries and deletions are skipped. Two settings turn the
-   parser off: `"cut": "hunks"` gives one diff hunk per piece, and `"cut": "chunks"` groups a
-   file's hunks into pieces of up to 12,000 bytes. See [docs/TUNING.md](docs/TUNING.md) for
-   what each one costs and misses.
+2. **Pieces.** The diff is cut into pieces, one git diff hunk each. Nothing is parsed, so
+   every language is covered and a file that will not parse is still checked. A hunk with more
+   than 30 added lines is cut right after the 30th, taking up to 3 trailing context lines with
+   it. Lock files, minified bundles, data and log files, binaries and deletions are skipped.
+   `"cut": "functions"` turns the parser on instead: a function, method, constructor or
+   accessor is then always a piece of its own, whatever its size, everything else groups with
+   its neighbours up to 40 added lines, and a file with no grammar falls back to diff hunks.
+   `"cut": "chunks"` groups a file's hunks into pieces of up to 12,000 bytes, also with no
+   parser. See [docs/TUNING.md](docs/TUNING.md) for what you gain and lose by switching.
 3. **One yes or no score per rule.** Every piece is asked about every rule: does the added
    code break this rule. Jev answers each claim with a probability. At or above the cutoff
-   (0.6 by default) it is a finding. Up to four pieces ride in one request, and a request is
+   (0.5 by default) it is a finding. Up to four pieces ride in one request, and a request is
    also bounded at 60,000 bytes, so a normal turn is one or two requests.
-4. **Tell the agent.** One entry per piece: the file, the line range, the name of the
-   function, then every rule that piece broke with its score, and then the piece's diff once.
-   The agent gets the code that broke the rule, not a line number to go and find.
+4. **Tell the agent.** One entry per piece: the file, the line range, the name of the function
+   when there is one, then every rule that piece broke with its score, and then the piece's
+   diff once. The agent gets the code that broke the rule, not a line number to go and find.
 
 ### Where the report comes out, per agent
 
@@ -242,16 +259,34 @@ reword the rule or change the code.
 The first line of a report is picked from the facts, so it never claims more than was done:
 nothing changed since the last check, the change was checked and no rule was broken, part of
 it was checked and part was not, or something changed and none of it could be checked. The
-last one, for example a `.ts` file in a repo with no TypeScript grammar installed, is a could
-not run in hook mode: exit 1 with the reason, not silence, because silence reads as clean.
+last one, for example a repo in `functions` mode with no TypeScript grammar installed, is a
+could not run in hook mode: exit 1 with the reason, not silence, because silence reads as
+clean. Measured on 19 September 2026, in a repo whose `.stop-rules.json` says `functions` and
+that has no grammar files:
 
-### Why 0.6
+```
+stop-rules: 1 file changed and none of it could be checked.
+This does not say your code is clean. The reasons are below.
 
-The cutoff was measured on 240 real agent written changes, blind labelled and adjudicated.
-Cutting code into whole functions does not make Jev rank better, it shifts the scores up, so
-pieces need 0.6 where whole chunks needed 0.5. That is the only reason for the number. The
-table of what every bar from 0.3 to 0.7 caught and flagged is in
-[docs/TUNING.md](docs/TUNING.md), measured on this build.
+Not checked (1): no grammar installed for .ts, run stop-rules init again to add it
+```
+
+### Why the default bar is 0.5
+
+It is a default to look at, not a recommendation. Measured on 240 real agent written changes,
+blind labelled and adjudicated, cut one hunk per piece, which is the default cut:
+
+| Bar | Real problems caught, of 29 | Plainly false flags | Arguable flags |
+|---|---|---|---|
+| 0.5 | 22 | 6 | 5 |
+| 0.6 | 11 | 1 | 0 |
+
+So 0.5 finds twice as much and costs about five more flags to look at. That is the whole
+reason for the number, and a team that would rather be told less puts `"threshold": 0.6` in
+`.stop-rules.json`. A later scoring run of the same sample, with all six starter rules and no
+adjudication, gives lower counts and the same shape; both runs, every bar from 0.3 to 0.7, and
+every cut mode are in [docs/TUNING.md](docs/TUNING.md). Run `stop-rules score` on your own code
+before you settle on a bar.
 
 ### Not spamming Jev
 
@@ -271,14 +306,17 @@ Small samples, measured on this build, and worth knowing before you trust it. Th
 240 real agent written changes from 104 public repositories, labelled blind by reviewers.
 There are 32 real breaks in it, across the six starter rules.
 
-- At the default 0.6, cutting into whole functions: 10 of the 32 real breaks caught, and 19
-  flags the reviewers did not agree with. Of those 19, an adjudicator had earlier called 5
-  plainly not a break and 2 arguable; the other 12 nobody has ruled on.
-- At 0.6, cutting into 12,000 byte chunks: 9 of 32 caught and 1 disputed flag.
-- At 0.5, cutting into whole functions: 20 of 32 caught and 38 disputed flags.
-- Over the 172 changes all three cut modes were scored on, at 0.5: one hunk per piece caught
-  14 of 21 with 16 disputed flags, whole functions 11 of 21 with 26, and chunks 9 of 21 with
-  6.
+- **At the defaults**, one hunk per piece at 0.5, over the 172 of those changes that mode was
+  scored on and the 21 real breaks in them: 14 of 21 caught, and 16 flags the reviewers did not
+  agree with. On the same bar and the same 172 changes, whole functions caught 11 of 21 with 26
+  disputed flags, and chunks 9 of 21 with 6.
+- **The adjudicated run of the same sample**, four of the rules and 29 real breaks, is where
+  the default bar comes from: one hunk per piece caught 22 of 29 at 0.5, with 6 plainly false
+  flags and 5 arguable, and 11 of 29 at 0.6, with 1 plainly false flag.
+- **Whole functions over all 240 changes** and their 32 real breaks: 20 of 32 caught at 0.5
+  with 38 disputed flags, and 10 of 32 at 0.6 with 19. Of those 19, an adjudicator had earlier
+  called 5 plainly not a break and 2 arguable; the other 12 nobody has ruled on. Chunks at 0.6
+  caught 9 of 32 with 1 disputed flag.
 - On planted examples, measured earlier: stubs 20 of 20, hardcoded test values 12 of 20, and
   0 of 40 harmless look-alikes flagged.
 
@@ -286,9 +324,10 @@ Those come from one scoring run per cut mode. Asked seven times, a confident sco
 hundredth or two and a borderline one moved from 0.45 to 0.80, so the counts near a bar would
 move a little in another run.
 
-So it is quiet rather than thorough. It will miss things. Scores also move between Jev model
-versions, so run `stop-rules score` on your own code and see. Every number above, per rule
-and per bar, is in [docs/TUNING.md](docs/TUNING.md).
+Either way it misses things: two thirds of the real breaks on the low count, a third on the
+high one. Scores also move between Jev model versions, so run `stop-rules score` on your own
+code and see. Every number above, per rule and per bar, is in
+[docs/TUNING.md](docs/TUNING.md).
 
 ## What leaves your machine
 
@@ -319,8 +358,9 @@ stop-rules baseline --reset [--dir <repo>]
 ```
 
 - **init** installs into a repo. `--dir` picks the repo, `--agents` overrides detection,
-  `--team` switches the repo to team mode, `--cut hunks` or `--cut chunks` installs with no
-  parser files at all, `--json` prints the same facts for an agent to read.
+  `--team` switches the repo to team mode, `--cut functions` adds the parser and the grammars
+  for the languages the repo uses and writes `"cut": "functions"` into `.stop-rules.json`,
+  `--json` prints the same facts for an agent to read.
 - **check** runs the same pipeline in a terminal, for a pre-commit hook or CI. `check`
   prints its report on stdout and exits 2 when a rule is broken. Exit 0 clean, 2 findings,
   1 could not run. With `--base <rev>` it diffs that revision against your working tree;
@@ -336,8 +376,8 @@ stop-rules baseline --reset [--dir <repo>]
 - **baseline --reset** forgets what was checked, so the next run starts from HEAD.
 
 Shared flags: `--dir <path>` (the repository to work on), `--rules <path>` (default
-`<repo root>/.stop-rules.md`), `--cut <mode>` (default functions), `--threshold <0..1>`
-(default 0.6), `--max-calls <n>` (default 60), `--help`, `--version`.
+`<repo root>/.stop-rules.md`), `--cut <mode>` (default hunks), `--threshold <0..1>`
+(default 0.5), `--max-calls <n>` (default 60), `--help`, `--version`.
 
 Which repository a command works on is one rule: `--dir` when you give it, and otherwise the
 repository that holds the folder you are in. The copy of stop-rules that `init` vendors into
@@ -353,16 +393,17 @@ committed and holds no secret. Every key is optional, and a flag beats the file.
 ```json
 {
   "endpoint": "https://stop-rules.your-team.example.com",
-  "cut": "functions",
-  "threshold": 0.6,
+  "cut": "hunks",
+  "threshold": 0.5,
   "maxCalls": 60
 }
 ```
 
-`cut` is `functions` (tree-sitter, one function per piece), `hunks` (one diff hunk per piece,
-no parser) or `chunks` (a file's hunks grouped into pieces of up to 12,000 bytes, no parser).
-A key stop-rules does not know, a value of the wrong type or a value out of range stops the
-run with one line naming the key.
+Those are the defaults for the three knobs that have one, so a file like that changes nothing.
+`cut` is `hunks` (one diff hunk per piece, no parser, the default), `functions` (tree-sitter,
+one whole function per piece) or `chunks` (a file's hunks grouped into pieces of up to 12,000
+bytes, no parser). A key stop-rules does not know, a value of the wrong type or a value out of
+range stops the run with one line naming the key.
 
 [docs/TUNING.md](docs/TUNING.md) goes through each knob: what it does, what happens when you
 turn it each way, real examples with the scores the live service gave them, what each setting
@@ -379,9 +420,13 @@ that is set but empty is an error, not a shrug.
 - You need a Jev API key from TypeSafe.
 - Each piece is judged on its own, so rules about cross-file architecture or consistency
   across a codebase are weak.
-- A piece is one function, so a rule about how two functions fit together is not seen at all.
-- A file in a language with no grammar here is cut by diff hunk, which is blunter. A file
-  that will not parse is reported as not checked, never checked half way.
+- A piece is one diff hunk, so the agent is handed the hunk the fault sits in and finds the
+  exact line itself. A hunk can also start in the middle of a function, so the piece can have
+  no head. `"cut": "functions"` hands over the one function instead, and then a rule about how
+  two functions fit together is not seen at all.
+- In `functions` mode a file in a language with no grammar here is cut by diff hunk, and a file
+  that will not parse is reported as not checked, never checked half way. The default mode
+  parses nothing, so neither case exists there.
 - Only Claude Code can run the check in the background. Everywhere else the hook blocks
   for about a second.
 - In `claude -p` (print mode) background hooks are killed when the process exits, so use
