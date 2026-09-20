@@ -263,7 +263,9 @@ Never commit, and never print:
 | `in <config file>, "hooks" is not an object. Nothing was changed: fix the file and run init again.` | That config file has a hand written value where a list or an object belongs. Fix the file; `init` never overwrites it. |
 | `could not reach Jev for any piece of this diff.` | Network or server problem. Nothing was marked as checked, so the next run tries the same code again. |
 | `still N violations after 3 rounds, leaving them for the user` | The agent has had three tries at the same findings. They are for the human now. |
-| `stop-rules: no changes to check.` | Nothing changed since the last check. Not an error. |
+| `stop-rules: nothing changed since the last check.` | Nothing changed since the last check. Not an error. |
+| `stop-rules: 1 file changed and none of it could be checked.` | Something did change and none of it was judged, so this is not a clean result. The reasons follow on the "Not checked" lines, usually a missing grammar or a file that will not parse. In `hook` mode the same case exits 1 with that reason instead of staying quiet. |
+| `stop-rules: no rule violations in the 3 pieces that were checked, and 2 not checked, listed below.` | Part of the change was judged and part was not. The part that was judged broke no rule. |
 | `Jev is busy on this machine, this change will be checked on the next run` | Eight Jev calls from other stop-rules runs on this machine were in flight for a minute. Nothing was marked as checked, so the next turn checks the same code. Nothing to fix. |
 | `no grammar installed for .go, run stop-rules init again to add it` | This repo gained a language after `init` ran. Run `init` again in the repo; it copies the missing grammar and leaves everything else alone. |
 | `<file> lines 10-40: could not be parsed as TypeScript` | The file does not parse, so it was not cut into pieces and not checked. Usually the file really is broken: open it. |

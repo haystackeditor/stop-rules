@@ -69,6 +69,11 @@ export interface RunStats {
   files: number;
   /** Pieces the diff was cut into. Each one is judged on its own. */
   pieces: number;
+  /**
+   * Pieces that got at least one answer, from Jev or from the cache. Zero with files above
+   * zero means nothing in this change was checked, whatever else the report says.
+   */
+  checked: number;
   skipped: number;
   calls: number;
   /** How many pieces rode in each call, in call order. */
@@ -123,6 +128,11 @@ export interface ScoreReport {
 export interface CheckReport {
   /** One entry per piece that broke a rule, in file then line order. */
   pieces: PieceFinding[];
+  /**
+   * What the working tree was compared with, in plain words: "the last check", or the
+   * revision `--base` named. The headline says it, so it can never claim the wrong baseline.
+   */
+  against: string;
   notChecked: NotChecked[];
   skipped: SkippedFile[];
   stats: RunStats;

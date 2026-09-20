@@ -20,7 +20,7 @@ import {
   snapshotWorkingTree,
 } from "./git.js";
 import { AUTH_REJECTED, BILLING_EXHAUSTED, type FetchLike } from "./jev.js";
-import { cutWords, renderReport, renderScores } from "./report.js";
+import { coverage, cutWords, noneCheckedReason, renderReport, renderScores } from "./report.js";
 import { loadRules } from "./rules.js";
 import { DEFAULT_CUT, loadSettings } from "./settings.js";
 import { acquireSlot, MACHINE_BUSY, slotsDir } from "./slots.js";
@@ -210,6 +210,8 @@ interface Work {
   cut: CutMode;
   /** What was scored or checked, in plain words, for the score report. */
   source: string;
+  /** What the change was compared with, for the check report's headline. */
+  against: string;
 }
 
 type WorkResult = { ok: true; work: Work } | { ok: false; reason: string };
@@ -247,6 +249,7 @@ async function diffFileWork(args: LockedArgs, diffFile: string): Promise<WorkRes
       snapshot: null,
       cut,
       source: `${diffFile}, cut into ${cutWords(cut)}${why}`,
+      against: diffFile,
     },
   };
 }
@@ -301,6 +304,7 @@ async function workingTreeWork(args: LockedArgs, state: StopRulesState): Promise
       snapshot,
       cut: knobs.cut,
       source: `the working tree against ${against}, cut into ${cutWords(knobs.cut)}`,
+      against,
     },
   };
 }
@@ -378,6 +382,7 @@ async function runLocked(args: LockedArgs): Promise<RunOutcome> {
     cut: work.cut,
     files: work.files.length,
     pieces: pieces.length,
+    checked: engineResult.scores.length,
     skipped: work.skipped.length,
     calls: engineResult.calls,
     piecesPerCall: engineResult.piecesPerCall,
@@ -404,6 +409,7 @@ async function runLocked(args: LockedArgs): Promise<RunOutcome> {
   } else {
     const report: CheckReport = {
       pieces: engineResult.pieces,
+      against: work.against,
       notChecked,
       skipped: work.skipped,
       stats,
@@ -416,7 +422,11 @@ async function runLocked(args: LockedArgs): Promise<RunOutcome> {
       work.snapshot,
       engineResult.holdBaseline,
     );
-    if (options.mode === "hook") await saveState(stateDir, state);
+    // A hook run that could not check anything leaves the baseline and the reported list
+    // alone, so the next turn tries the same change again.
+    if (options.mode === "hook" && outcome.kind !== "cannot-run") {
+      await saveState(stateDir, state);
+    }
   }
 
   await saveCache(stateDir, cache);
@@ -426,6 +436,7 @@ async function runLocked(args: LockedArgs): Promise<RunOutcome> {
     cut: stats.cut,
     files: stats.files,
     pieces: stats.pieces,
+    checked: stats.checked,
     piecesPerCall: stats.piecesPerCall,
     cutByHunk: stats.cutByHunk.length,
     skipped: stats.skipped,
@@ -461,6 +472,9 @@ function decide(
   if (snapshot === null) {
     throw new Error("internal error: hook mode ran without a working tree snapshot");
   }
+  // A change nothing could be checked in is a could not run, not a clean turn. Staying
+  // quiet here is what makes a missing grammar look like a passing check.
+  if (coverage(report) === "none-checked") return cannotRun(noneCheckedReason(report));
 
   const sessionId = options.sessionId;
   if (sessionId === undefined) {

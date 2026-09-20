@@ -223,6 +223,8 @@ export interface RunLogLine {
   cut: string;
   files: number;
   pieces: number;
+  /** Pieces that got at least one answer. Zero with files above zero means nothing was. */
+  checked: number;
   /** How many pieces rode in each call, in call order. */
   piecesPerCall: number[];
   /** How many files had no grammar and were cut by diff hunk. */

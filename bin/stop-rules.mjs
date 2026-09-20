@@ -7556,13 +7556,39 @@ function notCheckedSections(notChecked) {
   }
   return [];
 }
+function coverage(report) {
+  const { stats, notChecked } = report;
+  if (stats.checked > 0) return notChecked.length === 0 ? "all-checked" : "partly-checked";
+  if (stats.files > 0 || notChecked.length > 0) return "none-checked";
+  return "nothing-changed";
+}
+function plural(count, word) {
+  return count === 1 ? `1 ${word}` : `${count} ${word}s`;
+}
+function noneCheckedReason(report) {
+  const head = `${plural(report.stats.files, "file")} changed and none of it could be checked`;
+  const reasons = report.notChecked.map(notCheckedLine);
+  return reasons.length === 0 ? `${head}.` : `${head}: ${reasons.join("; ")}`;
+}
+function headline(report) {
+  const { notChecked, stats } = report;
+  switch (coverage(report)) {
+    case "nothing-changed":
+      return stats.skipped === 0 ? `stop-rules: nothing changed since ${report.against}.` : `stop-rules: nothing to check since ${report.against}: the ${plural(stats.skipped, "file")} that changed ${stats.skipped === 1 ? "is a kind" : "are kinds"} stop-rules skips.`;
+    case "all-checked":
+      return "stop-rules: no rule violations in your latest changes.";
+    case "partly-checked":
+      return `stop-rules: no rule violations in the ${plural(stats.checked, "piece")} that ${stats.checked === 1 ? "was" : "were"} checked, and ${notChecked.length} not checked, listed below.`;
+    case "none-checked":
+      return `stop-rules: ${plural(stats.files, "file")} changed and none of it could be checked.
+This does not say your code is clean. The reasons are below.`;
+  }
+}
 function renderReport(report) {
-  const { pieces, notChecked, stats } = report;
+  const { pieces, notChecked } = report;
   const sections = [];
   if (pieces.length === 0) {
-    sections.push(
-      stats.pieces === 0 ? "stop-rules: no changes to check." : "stop-rules: no rule violations in your latest changes."
-    );
+    sections.push(headline(report));
   } else {
     const broken = pieces.reduce((total, piece) => total + piece.rules.length, 0);
     const count = broken === 1 ? "1 rule violation" : `${broken} rule violations`;
@@ -8088,7 +8114,8 @@ async function diffFileWork(args2, diffFile) {
       readSource: async () => null,
       snapshot: null,
       cut,
-      source: `${diffFile}, cut into ${cutWords(cut)}${why}`
+      source: `${diffFile}, cut into ${cutWords(cut)}${why}`,
+      against: diffFile
     }
   };
 }
@@ -8129,7 +8156,8 @@ async function workingTreeWork(args2, state) {
       readSource: (file) => readBlob(repo.root, snapshot, file),
       snapshot,
       cut: knobs.cut,
-      source: `the working tree against ${against}, cut into ${cutWords(knobs.cut)}`
+      source: `the working tree against ${against}, cut into ${cutWords(knobs.cut)}`,
+      against
     }
   };
 }
@@ -8187,6 +8215,7 @@ async function runLocked(args2) {
     cut: work.cut,
     files: work.files.length,
     pieces: pieces.length,
+    checked: engineResult.scores.length,
     skipped: work.skipped.length,
     calls: engineResult.calls,
     piecesPerCall: engineResult.piecesPerCall,
@@ -8212,6 +8241,7 @@ async function runLocked(args2) {
   } else {
     const report = {
       pieces: engineResult.pieces,
+      against: work.against,
       notChecked,
       skipped: work.skipped,
       stats
@@ -8224,7 +8254,9 @@ async function runLocked(args2) {
       work.snapshot,
       engineResult.holdBaseline
     );
-    if (options.mode === "hook") await saveState(stateDir, state);
+    if (options.mode === "hook" && outcome.kind !== "cannot-run") {
+      await saveState(stateDir, state);
+    }
   }
   await saveCache(stateDir, cache);
   await appendRunLog(stateDir, {
@@ -8233,6 +8265,7 @@ async function runLocked(args2) {
     cut: stats.cut,
     files: stats.files,
     pieces: stats.pieces,
+    checked: stats.checked,
     piecesPerCall: stats.piecesPerCall,
     cutByHunk: stats.cutByHunk.length,
     skipped: stats.skipped,
@@ -8257,6 +8290,7 @@ function decide(options, report, state, findings, snapshot, holdBaseline) {
   if (snapshot === null) {
     throw new Error("internal error: hook mode ran without a working tree snapshot");
   }
+  if (coverage(report) === "none-checked") return cannotRun(noneCheckedReason(report));
   const sessionId = options.sessionId;
   if (sessionId === void 0) {
     throw new Error("internal error: hook mode ran without a session id");
@@ -8279,8 +8313,8 @@ function decide(options, report, state, findings, snapshot, holdBaseline) {
     });
   }
   if (handoff) {
-    const headline = `stop-rules: still ${report.stats.violations} violations after ${LOOP_GUARD_ROUNDS} rounds, leaving them for the user`;
-    return { kind: "handoff", report, text: `${headline}
+    const headline2 = `stop-rules: still ${report.stats.violations} violations after ${LOOP_GUARD_ROUNDS} rounds, leaving them for the user`;
+    return { kind: "handoff", report, text: `${headline2}
 
 ${text}` };
   }

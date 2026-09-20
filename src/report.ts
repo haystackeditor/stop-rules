@@ -91,17 +91,57 @@ function notCheckedSections(notChecked: readonly NotChecked[]): string[] {
   return [];
 }
 
+/** How much of the change this run managed to check. Read off the facts, never guessed. */
+export type Coverage = "nothing-changed" | "all-checked" | "partly-checked" | "none-checked";
+
+export function coverage(report: CheckReport): Coverage {
+  const { stats, notChecked } = report;
+  if (stats.checked > 0) return notChecked.length === 0 ? "all-checked" : "partly-checked";
+  if (stats.files > 0 || notChecked.length > 0) return "none-checked";
+  return "nothing-changed";
+}
+
+function plural(count: number, word: string): string {
+  return count === 1 ? `1 ${word}` : `${count} ${word}s`;
+}
+
+/**
+ * The one sentence a run with nothing checked owes the reader. The hook uses it as a could
+ * not run reason, because staying quiet there would read as a clean turn.
+ */
+export function noneCheckedReason(report: CheckReport): string {
+  const head = `${plural(report.stats.files, "file")} changed and none of it could be checked`;
+  const reasons = report.notChecked.map(notCheckedLine);
+  return reasons.length === 0 ? `${head}.` : `${head}: ${reasons.join("; ")}`;
+}
+
+/** The first line, from the facts: what changed, what was checked, what was not. */
+function headline(report: CheckReport): string {
+  const { notChecked, stats } = report;
+  switch (coverage(report)) {
+    case "nothing-changed":
+      return stats.skipped === 0
+        ? `stop-rules: nothing changed since ${report.against}.`
+        : `stop-rules: nothing to check since ${report.against}: the ${plural(stats.skipped, "file")} that changed ${stats.skipped === 1 ? "is a kind" : "are kinds"} stop-rules skips.`;
+    case "all-checked":
+      return "stop-rules: no rule violations in your latest changes.";
+    case "partly-checked":
+      return `stop-rules: no rule violations in the ${plural(stats.checked, "piece")} that ${stats.checked === 1 ? "was" : "were"} checked, and ${notChecked.length} not checked, listed below.`;
+    case "none-checked":
+      return (
+        `stop-rules: ${plural(stats.files, "file")} changed and none of it could be checked.\n` +
+        "This does not say your code is clean. The reasons are below."
+      );
+  }
+}
+
 /** Plain text for the agent. No colours, no em dashes. */
 export function renderReport(report: CheckReport): string {
-  const { pieces, notChecked, stats } = report;
+  const { pieces, notChecked } = report;
   const sections: string[] = [];
 
   if (pieces.length === 0) {
-    sections.push(
-      stats.pieces === 0
-        ? "stop-rules: no changes to check."
-        : "stop-rules: no rule violations in your latest changes.",
-    );
+    sections.push(headline(report));
   } else {
     const broken = pieces.reduce((total, piece) => total + piece.rules.length, 0);
     const count = broken === 1 ? "1 rule violation" : `${broken} rule violations`;
