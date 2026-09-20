@@ -59,7 +59,10 @@ Read the JSON it prints. The fields you need:
 - `mode`: `team` or `local`. It decides which secret the human stores in step 7.
 - `grammars`: which languages this repo has, which grammar files were copied into
   `.stop-rules/`, and how big that folder now is. A language with no grammar here is cut by
-  diff hunk instead, which still works.
+  diff hunk instead, which still works. `languages` is read from the files git tracks and the
+  untracked ones it would add, so a repository with no commit yet still gets its grammars. When
+  the repository has no file in a supported language at all, `todo[]` says so and asks you to
+  run `init` again once there is one.
 - `agents[]`: one entry per agent, with `files` (what was written), `changed`, `ok`,
   `notes`, and `effect` in plain words. `feedback` is `continues-agent` when that agent can
   be told to fix violations, or `shown-to-user-only` when it can only show them.
@@ -68,6 +71,11 @@ Read the JSON it prints. The fields you need:
 If `init` says no coding agent was detected, ask the human which agent they use and run it
 again with `--agents <name>`. Running `init` twice is safe: it only refreshes the copied
 file and leaves every config entry alone.
+
+Install from the clone's `bin/stop-rules.mjs`, as above. Every command works on the repository
+`--dir` names, or the one holding the folder you are in when you do not pass it, and the copy
+`init` vendors into a repository works on that repository only: run it from elsewhere and it
+stops and names both repositories instead of quietly checking the wrong one.
 
 ## 5. Show the human the knobs, and ask
 
@@ -118,6 +126,26 @@ Rules for writing rules:
 - If a linter can check it, use the linter, not a rule in this file.
 - A rule must be something a reviewer could judge from one piece of a change, without
   seeing the rest of the codebase.
+- Prefer "never call X, use Y instead", where X is a name the code shows. That kind was
+  measured working: in a 16 session experiment on 19 September 2026 a raw HTTP call in a
+  codebase with its own helper scored 0.88 and the agent fixed it, and planted `fetch(`,
+  `console.log` and `toFixed` scored 0.92, 0.94 and 0.87. Our own example pair scores 0.92 on
+  the call the rule forbids and 0.10 on the helper it asks for.
+- Do not write a rule about something that is missing, such as "every exported function has a
+  doc comment". In the same experiment the one real breach scored 0.21 and permitted code
+  scored up to 0.48, the wrong way round. A linter does this properly.
+- Do not write a rule that needs the rest of the file or the codebase. A piece is all Jev
+  sees.
+- Be careful with a rule whose answer depends on which layer or folder a file is in
+  ("handlers must not touch storage, services may"). In the experiment it inverted, scoring
+  0.69 on the services the rule allows and 0.11 on a real breach; on our own small example it
+  did not invert at all. If the team wants one, run `score` on their code first and show them
+  the numbers.
+- Tell them the honest headline: in a codebase that already shows its conventions, Sonnet and
+  Haiku followed all 8 house rules by imitation in 14 of those 16 sessions, with 3 real breaks
+  in total, 1 caught, 2 missed and 1 false alarm. The check earns its keep where the agent
+  builds something new with nothing nearby to copy. [docs/TUNING.md](docs/TUNING.md) has both
+  sets of numbers and the commands that produced ours.
 - Skip anything a linter or formatter in this repo already enforces.
 - 5 to 15 rules. More than that costs more per turn and adds noise.
 - Every top-level list item is one rule. Headings and paragraphs are ignored, so you can
@@ -209,6 +237,29 @@ it breaks and its diff, and exits 2. Step 5 prints "no rule violations" and exit
 Match the throwaway file to a rule the team actually has, and to the language of the repo.
 The example above breaks "do not silently swallow errors".
 
+### Where the report comes out, per agent
+
+Measured on 19 September 2026 by feeding each adapter the payload its own agent documents.
+When a rule is broken:
+
+| Agent | Where the report goes | Exit code |
+|---|---|---|
+| Claude Code, Codex, Gemini CLI, Factory Droid, Windsurf Cascade | stderr | 2 |
+| OpenCode, Amp, plain | stdout and stderr, the same text on both | 2 |
+| Aider | stdout, as lint output | 2 |
+| Cursor | stdout, as JSON in `followup_message` | 0 |
+| GitHub Copilot CLI, Kiro | stdout, as JSON in `reason`, next to `"decision": "block"` | 0 |
+| Cline | stdout, as JSON in `contextModification` | 0 |
+
+Tell the human this if anything of theirs wraps the hook. A wrapper that captures only stdout
+loses the entire report for the five agents that write it to stderr, and four of the thirteen
+deliver a report while exiting 0, so the exit code alone does not say whether the turn was
+clean. On a clean turn every adapter exits 0 and writes nothing, except Gemini CLI and Cursor,
+which write `{}`, and Cline, which writes `{"cancel":false}`.
+
+In CI or a script, use `check`, not `hook`: `check` prints its report on stdout and exits 2
+when a rule is broken.
+
 If the agent is Claude Code, tell the human this: if `disableAllHooks` is set in their
 Claude Code settings, no hook runs at all and nothing warns them.
 
@@ -236,6 +287,15 @@ Never commit, and never print:
 - Which agents will be told to fix violations themselves, and which can only show them.
   Take this from `agents[].effect` in the JSON, word for word.
 - That a clean turn is silent and costs nothing on a second run.
+- That the hook tells the agent once and never nags. If the agent decides the rule does not
+  apply and changes nothing, the next turn is silent while the code still breaks the rule, so
+  a quiet hook is not a clean codebase. In a 16 session experiment on 19 September 2026, 3
+  sessions ended exactly that way: the agent argued, the code stayed, and
+  `stop-rules check --base HEAD` still reported the finding.
+- That `stop-rules check --base <rev>` is therefore the gate to trust, in a pre-commit hook or
+  in CI. It is read only and reports the same finding every time. It also has no way to mark a
+  finding as accepted, so a false alarm keeps being reported there until they reword the rule
+  or change the code. There is no accept or ignore list.
 - In team mode: how a teammate joins. They pull, then run the one `login --token-stdin`
   line with the token from the password manager.
 - In local mode: every teammate needs their own Jev key, or the team should move to team
@@ -256,6 +316,9 @@ Never commit, and never print:
 | `no rules file at <path>. Run "stop-rules init" to create one.` | `.stop-rules.md` is missing. Run `init` in that repo. |
 | `no rules found in <path>. Each top-level list item is one rule.` | The rules file has no top-level bullets. Rules are `- ` items at column 0. |
 | `<dir> is not inside a git repository.` | `--dir` pointed somewhere that is not a repo. |
+| `there is no directory at <path>.` | `--dir` pointed at a path that is not there. Check the spelling. |
+| `this is the copy of stop-rules vendored in <repo A>, and it was about to work on <repo B>.` | A repository's own `.stop-rules/stop-rules.mjs` only works on that repository. Pass `--dir <repo A>`, or change into the repository you meant, or use the clone's `bin/stop-rules.mjs` to install somewhere else. |
+| `no source files in a supported language yet: run stop-rules init again after you add some` | `init` found no file in a language it can parse, so it copied no grammar. Add the first source files, then run `init` again in that repo. |
 | `the saved baseline is gone (git cleaned it up). Run stop-rules baseline --reset to start again from HEAD.` | Run that command. The next check starts from HEAD. |
 | `<path>/state.json is not valid JSON ... Run stop-rules baseline --reset to start again.` | Same command fixes it. |
 | `<path>/cache.json is not a stop-rules cache. Delete it and run again.` | Delete that one file. Answers are re-fetched. |

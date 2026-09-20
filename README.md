@@ -142,6 +142,38 @@ Then write each rule as one checkable sentence that says what to do instead:
 Rules that work less well are the vague ones ("write clean code") and the ones about things
 one piece of a change cannot show ("keep the service boundaries tidy").
 
+### Which kinds of rule Jev can judge, measured
+
+Two sources, kept apart. The **experiment** is 16 real coding agent sessions, Sonnet and
+Haiku, on one small service with 8 team rules the agent could not see, run on 19 September
+2026; its numbers are that experiment's, not a run of ours. The **example scores** are ours:
+the files in [`examples/tuning/`](examples/tuning), scored against the live service on 19
+September 2026, which reported its version as `jev-1.13.0`. Both samples are small.
+
+- **Works: "never call X, use Y instead", where X is a name the code shows.** In the
+  experiment a raw HTTP call in a codebase that has a helper for it scored 0.88 in a real
+  session and the agent fixed it, and planted `fetch(`, `console.log` and `toFixed` scored
+  0.92, 0.94 and 0.87, one of each. Our own example agrees:
+  [`helper.diff`](examples/tuning/helper.diff) scores 0.92 on the function that calls `fetch`
+  and 0.10 on the one that calls the helper, twice each.
+- **Does not work: a rule about something that is missing** ("every exported function has a
+  doc comment"). In the experiment the one real breach scored 0.21 while code the rule allows
+  scored up to 0.48. A linter does this properly.
+- **Does not work: a rule that needs the rest of the file or the codebase**, because a piece
+  is all Jev sees.
+- **Careful: a rule whose answer depends on which layer or folder the file is in** ("handlers
+  must not touch storage, services may"). In the experiment it inverted: the highest scores
+  landed on the services the rule allows (0.69) and a real breach scored 0.11. Our own
+  example [`layers.diff`](examples/tuning/layers.diff) did the opposite, scoring 0.93 and 0.89
+  on the two handlers that touch the database and 0.19 and 0.10 on the two services that do
+  the same thing. So this kind depends on whether the piece itself shows which layer the file
+  is in. Do not trust it without running `score` on your own code. Both sets of numbers are
+  in [docs/TUNING.md](docs/TUNING.md).
+- **And the honest headline.** In a codebase that already shows its own conventions, Sonnet
+  and Haiku followed all 8 house rules by imitation in 14 of the 16 sessions. There were 3
+  real breaks in total: 1 caught, 2 missed, and 1 false alarm. The tool earned its keep where
+  the agent built something new with nothing nearby to copy from.
+
 ## How it works
 
 1. **What changed.** The working tree is written to a git tree object through a temporary
@@ -165,12 +197,53 @@ one piece of a change cannot show ("keep the service boundaries tidy").
    function, then every rule that piece broke with its score, and then the piece's diff once.
    The agent gets the code that broke the rule, not a line number to go and find.
 
+### Where the report comes out, per agent
+
+Measured on 19 September 2026 by feeding each adapter the payload its own agent documents.
+When a rule is broken:
+
+| Agent | Where the report goes | Exit code |
+|---|---|---|
+| Claude Code, Codex, Gemini CLI, Factory Droid, Windsurf Cascade | stderr | 2 |
+| OpenCode, Amp, plain | stdout and stderr, the same text on both | 2 |
+| Aider | stdout, as lint output | 2 |
+| Cursor | stdout, as JSON in `followup_message` | 0 |
+| GitHub Copilot CLI, Kiro | stdout, as JSON in `reason`, next to `"decision": "block"` | 0 |
+| Cline | stdout, as JSON in `contextModification` | 0 |
+
+Read that before you wrap the hook in anything. A wrapper that captures only stdout loses
+the entire report for the five agents that write it to stderr, and four of the thirteen
+deliver a report while exiting 0, so an exit code alone does not tell you whether the turn
+was clean. On a clean turn every adapter exits 0 and writes nothing, except Gemini CLI and
+Cursor, which write `{}`, and Cline, which writes `{"cancel":false}`.
+
+`check` is the one to use in a script: it prints its report on stdout and exits 2 when a
+rule is broken.
+
+### Quiet is not the same as clean
+
 It never nags twice: a finding the hook has already delivered in this repo is not delivered
 again. A second run over the same code costs nothing, because every answer is cached in the
 repo's git directory, keyed on the model, the exact claim and the exact piece text. Packing
 does not change that key, so re-packing never throws answers away. And every run has a hard
 ceiling on requests (60 by default, `--max-calls`), counted across retries and splits. When
 it runs out, the work left over is reported as "not checked".
+
+That cuts both ways, and it is worth being plain about. The hook tells the agent once. If
+the agent decides the rule does not apply and changes nothing, the next turn is silent while
+the code still breaks the rule, so a quiet hook is not a clean codebase. In our own
+experiment on 19 September 2026, 3 of 16 sessions ended that way: the agent argued and
+changed nothing, the hook stayed quiet, and `check --base HEAD` still reported the finding.
+`check --base <rev>` is the honest gate, because it is read only, skips nothing it has
+already told an agent about, and reports the same finding every time you run it. It also has
+no way to mark a finding as accepted, so a false alarm keeps coming back there until you
+reword the rule or change the code.
+
+The first line of a report is picked from the facts, so it never claims more than was done:
+nothing changed since the last check, the change was checked and no rule was broken, part of
+it was checked and part was not, or something changed and none of it could be checked. The
+last one, for example a `.ts` file in a repo with no TypeScript grammar installed, is a could
+not run in hook mode: exit 1 with the reason, not silence, because silence reads as clean.
 
 ### Why 0.6
 
@@ -236,22 +309,22 @@ the repo, printed, or included in an error message.
 
 ```
 stop-rules init [--dir <repo>] [--agents a,b,c] [--team <url>] [--cut <mode>] [--json]
-stop-rules check [--base <rev>] [--json]
-stop-rules score [--base <rev>] [--diff <file>] [--json]
-stop-rules hook --agent <name>
-stop-rules team <url>
-stop-rules login --jev-key-stdin | --token-stdin | --check
+stop-rules check [--dir <repo>] [--base <rev>] [--json]
+stop-rules score [--dir <repo>] [--base <rev>] [--diff <file>] [--json]
+stop-rules hook [--dir <repo>] --agent <name>
+stop-rules team [--dir <repo>] <url>
+stop-rules login --jev-key-stdin | --token-stdin | --check [--dir <repo>]
 stop-rules serve [--port n]
-stop-rules baseline --reset
+stop-rules baseline --reset [--dir <repo>]
 ```
 
 - **init** installs into a repo. `--dir` picks the repo, `--agents` overrides detection,
   `--team` switches the repo to team mode, `--cut hunks` or `--cut chunks` installs with no
   parser files at all, `--json` prints the same facts for an agent to read.
-- **check** runs the same pipeline in a terminal, for a pre-commit hook or CI. Exit 0
-  clean, 2 findings, 1 could not run. With `--base <rev>` it diffs that revision against
-  your working tree; without it, it uses the incremental baseline but never moves it, so it
-  is safe to repeat.
+- **check** runs the same pipeline in a terminal, for a pre-commit hook or CI. `check`
+  prints its report on stdout and exits 2 when a rule is broken. Exit 0 clean, 2 findings,
+  1 could not run. With `--base <rev>` it diffs that revision against your working tree;
+  without it, it uses the incremental baseline but never moves it, so it is safe to repeat.
 - **score** prints every piece with every rule's score and applies no cutoff, so you can see
   where your own code sits before you pick a bar. It changes nothing. `--diff <file>` scores
   a unified diff file instead of the working tree.
@@ -262,9 +335,15 @@ stop-rules baseline --reset
 - **serve** runs the team server on a laptop or a plain VM.
 - **baseline --reset** forgets what was checked, so the next run starts from HEAD.
 
-Shared flags: `--rules <path>` (default `<repo root>/.stop-rules.md`), `--cut <mode>`
-(default functions), `--threshold <0..1>` (default 0.6), `--max-calls <n>` (default 60),
-`--help`, `--version`.
+Shared flags: `--dir <path>` (the repository to work on), `--rules <path>` (default
+`<repo root>/.stop-rules.md`), `--cut <mode>` (default functions), `--threshold <0..1>`
+(default 0.6), `--max-calls <n>` (default 60), `--help`, `--version`.
+
+Which repository a command works on is one rule: `--dir` when you give it, and otherwise the
+repository that holds the folder you are in. The copy of stop-rules that `init` vendors into
+a repository works on that repository only; run it from somewhere else and it stops, names
+both repositories and tells you to pass `--dir` or change folder. Use the clone's
+`bin/stop-rules.mjs` to install into a different repository.
 
 ## Settings, and tuning
 

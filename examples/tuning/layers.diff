@@ -1,0 +1,61 @@
+diff --git a/src/handlers/orders.ts b/src/handlers/orders.ts
+new file mode 100644
+index 0000000..4000001
+--- /dev/null
++++ b/src/handlers/orders.ts
+@@ -0,0 +1,10 @@
++import { db } from "../db.js";
++
++export async function getOrder(request: Request): Promise<Response> {
++  const id = new URL(request.url).searchParams.get("id");
++  if (id === null) return new Response("id is required", { status: 400 });
++  const rows = await db.query("select id, total from orders where id = $1", [id]);
++  const order = rows[0];
++  if (order === undefined) return new Response("no such order", { status: 404 });
++  return Response.json(order);
++}
+diff --git a/src/services/orders.ts b/src/services/orders.ts
+new file mode 100644
+index 0000000..4000002
+--- /dev/null
++++ b/src/services/orders.ts
+@@ -0,0 +1,11 @@
++import { db } from "../db.js";
++
++export interface Order {
++  id: string;
++  total: number;
++}
++
++export async function findOrder(id: string): Promise<Order | null> {
++  const rows = await db.query("select id, total from orders where id = $1", [id]);
++  return (rows[0] as Order | undefined) ?? null;
++}
+diff --git a/src/handlers/report.ts b/src/handlers/report.ts
+new file mode 100644
+index 0000000..4000003
+--- /dev/null
++++ b/src/handlers/report.ts
+@@ -0,0 +1,8 @@
++import { db } from "../db.js";
++
++export async function monthlyTotal(month: string): Promise<number> {
++  const rows = await db.query("select sum(total) as total from orders where month = $1", [
++    month,
++  ]);
++  return Number(rows[0]?.total ?? 0);
++}
+diff --git a/src/services/report.ts b/src/services/report.ts
+new file mode 100644
+index 0000000..4000004
+--- /dev/null
++++ b/src/services/report.ts
+@@ -0,0 +1,8 @@
++import { db } from "../db.js";
++
++export async function weeklyTotal(week: string): Promise<number> {
++  const rows = await db.query("select sum(total) as total from orders where week = $1", [
++    week,
++  ]);
++  return Number(rows[0]?.total ?? 0);
++}

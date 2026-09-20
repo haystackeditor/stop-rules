@@ -1,0 +1,32 @@
+diff --git a/src/user.ts b/src/user.ts
+new file mode 100644
+index 0000000..3000001
+--- /dev/null
++++ b/src/user.ts
+@@ -0,0 +1,10 @@
++export interface User {
++  id: string;
++  name: string;
++}
++
++export async function loadUser(id: string): Promise<User> {
++  const response = await fetch(`https://api.example.com/users/${id}`);
++  const body = (await response.json()) as User;
++  return body;
++}
+diff --git a/src/team.ts b/src/team.ts
+new file mode 100644
+index 0000000..3000002
+--- /dev/null
++++ b/src/team.ts
+@@ -0,0 +1,10 @@
++import { httpGet } from "./http.js";
++
++export interface Team {
++  id: string;
++  name: string;
++}
++
++export async function loadTeam(id: string): Promise<Team> {
++  return httpGet<Team>(`https://api.example.com/teams/${id}`);
++}

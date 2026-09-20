@@ -309,7 +309,7 @@ The parse behaviours are worth seeing for real. A file with broken syntax and a 
 in functions mode:
 
 ```
-stop-rules: no rule violations in your latest changes.
+stop-rules: no rule violations in the 1 piece that was checked, and 1 not checked, listed below.
 
 Not checked (1): broken.ts lines 1-5: could not be parsed as TypeScript
 ```
@@ -330,6 +330,111 @@ The same repository in hunks mode checks the broken file and finds the fault in 
 
 Rules are not in `.stop-rules.json`. They are in `.stop-rules.md`, one top-level list item
 each, and they are the knob that changes the most. Every rule adds one question per piece.
+
+### Which rules Jev can judge
+
+This is the part that decides whether the tool is worth running at all, so it is the part
+with the most honest numbers we have. Two sources, and they are kept apart on purpose.
+
+- **The experiment.** On 19 September 2026, 16 real Claude Code sessions (Sonnet and Haiku)
+  worked on one small service that had 8 team specific rules the agent could not see. Its
+  numbers below are that experiment's own, not something re-run for this file.
+- **The examples.** The small files in [`examples/tuning/`](../examples/tuning), scored
+  against the live service on 19 September 2026. Asked for its version on the same day, the
+  service answered `jev-1.13.0`. Every example score below was printed by the command shown
+  next to it, twice, with a cold cache each time.
+
+Both samples are small. Sample sizes are beside every number.
+
+#### Works: "never call X, use Y instead", where X is a name the code shows
+
+The rule names something that is either in the added lines or is not, and the piece is
+enough to tell. In the experiment, a raw HTTP call in a codebase that has its own helper
+scored 0.88 in a real session and the agent fixed it (1 case). Planted `fetch(`,
+`console.log` and `toFixed` scored 0.92, 0.94 and 0.87 (1 case each).
+
+Our own pair is [`rules-helper.md`](../examples/tuning/rules-helper.md) and
+[`helper.diff`](../examples/tuning/helper.diff): one function that calls `fetch` and one
+that calls the team's helper, nothing else different.
+
+```bash
+stop-rules score --diff examples/tuning/helper.diff --rules examples/tuning/rules-helper.md
+```
+
+| Piece | What it is | Scores seen |
+|---|---|---|
+| `src/user.ts` | calls `fetch` directly, which the rule forbids | 0.92, 0.92 |
+| `src/team.ts` | calls `httpGet`, which the rule asks for | 0.10, 0.10 |
+
+Two runs, cold cache each, 0.82 apart. That gap is what a rule of this kind buys you: any bar
+between 0.2 and 0.9 gives the same answer.
+
+#### Careful: a rule whose answer depends on which layer or folder the file is in
+
+The rule we mean is "handlers must not touch storage, services may". In the experiment it
+inverted: the highest scores landed on the services the rule allows (0.69) and a real breach
+in a handler scored 0.11 (1 real breach, 8 rules, 16 sessions).
+
+Our own pair is [`rules-layers.md`](../examples/tuning/rules-layers.md) and
+[`layers.diff`](../examples/tuning/layers.diff), four files, two per layer, where the second
+pair is the same function written twice so the folder is the only difference.
+
+```bash
+stop-rules score --diff examples/tuning/layers.diff --rules examples/tuning/rules-layers.md
+```
+
+| Piece | What it is | Scores seen |
+|---|---|---|
+| `src/handlers/orders.ts` | a handler taking a `Request`, querying the database | 0.93, 0.93 |
+| `src/handlers/report.ts` | a plain function in `handlers/`, querying the database | 0.89, 0.89 |
+| `src/services/report.ts` | the same function in `services/`, which the rule allows | 0.19, 0.19 |
+| `src/services/orders.ts` | a service reading one row, which the rule allows | 0.10, 0.11 |
+
+That is the opposite of the experiment, and we are not going to pretend the two agree. On
+these four files the folder in the path was enough, even for the pair whose code is identical.
+In the experiment, on real handlers and services, it was not. The difference we can point at
+is what the piece carries: a path with `handlers/` in it and code that obviously belongs to
+one layer is a signal, and a real file whose name says nothing about its layer leaves Jev
+guessing. So this kind of rule is not reliable, it is conditional, and `score` on your own
+code is the only way to find out which side yours falls on. Two runs each, one pair of
+examples, one experiment.
+
+#### Does not work: a rule about something that is missing
+
+"Every exported function has a doc comment." In the experiment the one real breach scored
+0.21, while code the rule allows scored as high as 0.48 (1 real breach). The scores are not
+just low, they are in the wrong order. A linter checks this properly, for nothing, every
+time.
+
+#### Does not work: a rule that needs the rest of the file or the codebase
+
+A piece is all Jev is given, so "this option is used nowhere else" or "this duplicates
+something in another module" is a guess dressed as a number. The measured version of that is
+already in this file: the "do not add options nothing uses" rule caused 55 of 71 false alarms
+when code was judged piece by piece.
+
+#### The honest headline: imitation does most of the work
+
+In the same experiment, in a codebase that already shows its own conventions, Sonnet and
+Haiku followed all 8 house rules by imitation in 14 of the 16 sessions. There were 3 real
+breaks in 16 sessions: 1 caught, 2 missed, and 1 false alarm. The tool earned its keep in the
+sessions where the agent built something new with nothing nearby to copy.
+
+Set your expectations from that. Rules that repeat what your code already demonstrates buy
+little. Rules about the thing your codebase has no example of yet, and rules of the "never
+call X, use Y" kind, are where this is worth a Jev call.
+
+#### Told once, and quiet is not clean
+
+The hook delivers a finding once per repository and never nags. If the agent decides the rule
+does not apply and changes nothing, the next turn is silent while the code still breaks the
+rule. 3 of the 16 sessions ended exactly that way: the agent argued, the code stayed, the
+hook went quiet, and `stop-rules check --base HEAD` still reported the finding.
+
+So `check --base <rev>` is the gate to trust. It is read only, it skips nothing it has told an
+agent about, and it prints the same finding every time. It also has no way to mark a finding
+as accepted, so a false alarm keeps being reported there until you reword the rule or change
+the code. There is no accept or ignore list, on purpose: whether to have one is not decided.
 
 ### Four wordings, one change
 
@@ -396,7 +501,7 @@ stop-rules check --max-calls 1
 ```
 
 ```
-stop-rules: no rule violations in your latest changes.
+stop-rules: no rule violations in the 4 pieces that were checked, and 6 not checked, listed below.
 
 Not checked (6):
   src/step4.ts lines 1-4: call budget exhausted
@@ -411,9 +516,12 @@ The one request covered four pieces. The next run picks the rest up, and the fou
 answered cost nothing because they are in the cache:
 
 ```json
-{"mode":"check","cut":"functions","pieces":10,"calls":1,"cacheHits":0,"notChecked":6}
-{"mode":"check","cut":"functions","pieces":10,"calls":2,"cacheHits":4,"notChecked":0}
+{"mode":"check","cut":"functions","pieces":10,"checked":4,"calls":1,"cacheHits":0,"notChecked":6}
+{"mode":"check","cut":"functions","pieces":10,"checked":10,"calls":2,"cacheHits":4,"notChecked":0}
 ```
+
+`checked` is how many pieces got an answer. When it is 0 and `files` is not, nothing in the
+change was judged, and the first line of the report says so rather than reading as clean.
 
 In hook mode the baseline does not move when a run runs out of budget, so the same change is
 checked again on the next turn until it is finished.
