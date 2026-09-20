@@ -26,7 +26,7 @@
  */
 
 import type { Node } from "web-tree-sitter";
-import { codeText, functionContext, wideContext } from "./context.js";
+import { codeText, functionContext, wideContext, type LineRange } from "./context.js";
 import {
   chunkFile,
   chunkRange,
@@ -603,9 +603,12 @@ export function buildPieces(
     }
   }
 
-  // 8. Piece text: one hunk per contiguous run of the file's diff.
+  // 8. Piece text: one hunk per contiguous run of the file's diff. The lines each group owns
+  // are worked out first, because a piece that is not a function is widened up to, and never
+  // into, the lines that belong to another piece of this file.
+  const owned = groups.map(ownedLines);
   const pieces: Piece[] = [];
-  for (const group of groups) {
+  groups.forEach((group, groupIndex) => {
     const indexes = [...new Set(group.indexes)].sort((a, b) => a - b);
     const runs: number[][] = [];
     for (const index of indexes) {
@@ -638,10 +641,10 @@ export function buildPieces(
           break;
         }
       }
-      const owner =
+      const holder =
         group.atoms.find((atom) => at >= atom.span.start && at <= atom.span.end) ?? group.atoms[0];
-      if (owner === undefined) throw new Error("internal error: a piece with no unit");
-      hunks.push(makeHunk(lines, owner.firstLine));
+      if (holder === undefined) throw new Error("internal error: a piece with no unit");
+      hunks.push(makeHunk(lines, holder.firstLine));
     }
     const firstAtom = group.atoms[0];
     if (firstAtom === undefined) throw new Error("internal error: a piece group with no unit");
@@ -656,17 +659,35 @@ export function buildPieces(
       toLine: Math.max(...group.atoms.map((atom) => atom.span.end)),
       cut: "unit",
       // A piece that is one function goes to Jev with that whole function after the change.
-      // A run of statements and declarations is no function, so it gets the wide form, which
-      // is what the parser-free modes use.
+      // A run of statements and declarations is no function, so it gets the wide form, clamped
+      // to the lines no other piece of this file owns.
       context: group.fn
         ? functionContext(wholeFunctions(group.atoms, sourceLines))
-        : wideContext({ file: file.file, header: file.header, hunks }, source),
+        : wideContext(
+            { file: file.file, header: file.header, hunks },
+            source,
+            owned.filter((_, index) => index !== groupIndex).flat(),
+          ),
     };
     pieces.push(piece);
-  }
+  });
 
   assertEveryAddedLineOnce(file.file, addedNumbers, pieces);
   return pieces;
+}
+
+/**
+ * The new file lines a piece owns, which is what another piece's window stops at. For a
+ * function that is the whole function, doc comment and all, because that is the piece: handing
+ * its body to the piece next door as if it were unchanged background is what this stops. For a
+ * run of statements and declarations it is the lines its spans cover.
+ */
+function ownedLines(group: { atoms: Atom[]; fn: boolean }): LineRange[] {
+  return group.atoms.map((atom) =>
+    group.fn
+      ? { from: atom.span.unitStart, to: atom.span.node.endPosition.row + 1 }
+      : { from: atom.span.start, to: atom.span.end },
+  );
 }
 
 /**

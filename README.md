@@ -209,8 +209,9 @@ September 2026, which reported its version as `jev-1.13.0`. Both samples are sma
 3. **The code around each piece.** A piece on its own is often too little to judge, so the
    diff that goes to Jev carries 25 unchanged lines above the change and 25 below, read out of
    the snapshot. In `"cut": "functions"` a piece that is one function carries that whole
-   function after the change instead. This is only what Jev is shown: the report still hands
-   the agent the piece.
+   function after the change instead, and a piece that is not a function is widened only into
+   lines no other piece of that file owns. This is only what Jev is shown: the report still
+   hands the agent the piece.
 4. **One yes or no score per rule.** Every piece is asked about every rule: does the added
    code break this rule. Jev answers each claim with a probability. At or above the cutoff
    (0.5 by default) it is a finding. Up to four pieces ride in one request, and a request is
@@ -232,6 +233,10 @@ real agent written changes, blind labelled and adjudicated, which hold 31 real b
 
 The middle row is what ships. It catches two fewer and argues with you a lot less, it needs no
 parser, and at a bar of 0.55 it caught 16 with fewer doubtful flags than either of the others.
+The measurement was on hunk pieces, so in `functions` mode, where a piece can be two lines, the
+window of a piece that is not a function stops at the first line another piece owns. Without that
+clamp two import lines in a 19 line file scored 0.84 on the swallowed errors rule, on a
+neighbour's fault; [docs/TUNING.md](docs/TUNING.md) has that example in full.
 On a second, smaller set of real agent sessions it caught 2 of the 3 real breaks against 1 for
 the piece alone, and it found a missing doc comment that the piece alone missed. The cost of
 the extra lines: 7 of 1,358 clean pairs were newly flagged, and input tokens go from about
@@ -470,7 +475,8 @@ that is set but empty is an error, not a shrug.
 - Those 25 lines are read out of the new file whether or not the same change wrote them, so a
   line the change added just outside the piece is shown to Jev as if it had always been there.
   It is the code as it now stands, which is what the rule is about, but it is not a record of
-  what changed.
+  what changed. In `functions` mode the window of a piece that is not a function stops at the
+  first line another piece owns, so there it never happens.
 - A piece that is bigger than 60,000 bytes on its own goes to Jev without those lines. The run
   says which piece, in the report, in `check --json` and in `run.log`.
 - A piece is one diff hunk, so the agent is handed the hunk the fault sits in and finds the

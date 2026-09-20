@@ -1662,12 +1662,26 @@ function render(window2) {
 ${window2.body.join("\n")}
 `;
 }
-function widePieceText(piece, fileText) {
+function widePieceText(piece, fileText, taken = []) {
   const lines = fileLines(fileText);
   const cores = piece.hunks.map(coreOf);
   const rendered = [];
   let open = null;
   let shownTo = 1;
+  const floorFor = (coreStart) => {
+    let floor = 1;
+    for (const range of taken) {
+      if (range.to < coreStart) floor = Math.max(floor, range.to + 1);
+    }
+    return floor;
+  };
+  const ceilingFor = (coreEnd) => {
+    let ceiling = lines.length + 1;
+    for (const range of taken) {
+      if (range.from >= coreEnd) ceiling = Math.min(ceiling, range.from);
+    }
+    return ceiling;
+  };
   const flush = () => {
     if (open === null) return;
     rendered.push(render(open));
@@ -1687,8 +1701,13 @@ function widePieceText(piece, fileText) {
       nextChange = later.newStart;
       break;
     }
-    const aboveFrom = Math.max(core.newStart - CONTEXT_LINES, shownTo, 1);
-    const belowTo = Math.min(core.newEnd + CONTEXT_LINES, nextChange, lines.length + 1);
+    const aboveFrom = Math.max(core.newStart - CONTEXT_LINES, shownTo, 1, floorFor(core.newStart));
+    const belowTo = Math.min(
+      core.newEnd + CONTEXT_LINES,
+      nextChange,
+      lines.length + 1,
+      ceilingFor(core.newEnd)
+    );
     const above = lines.slice(aboveFrom - 1, core.newStart - 1).map(contextLine);
     const below = lines.slice(core.newEnd - 1, belowTo - 1).map(contextLine);
     const held = open;
@@ -1711,8 +1730,8 @@ function widePieceText(piece, fileText) {
   return `${piece.header.join("\n")}
 ${rendered.join("")}`;
 }
-function wideContext(piece, fileText) {
-  return { kind: "wide", diff: widePieceText(piece, fileText) };
+function wideContext(piece, fileText, taken = []) {
+  return { kind: "wide", diff: widePieceText(piece, fileText, taken) };
 }
 
 // src/credentials.ts
@@ -2985,8 +3004,9 @@ function buildPieces(file, source, table, root) {
       groups.push({ atoms: [atom], added: [...atom.added], indexes: [...atom.indexes], fn });
     }
   }
+  const owned = groups.map(ownedLines);
   const pieces = [];
-  for (const group of groups) {
+  groups.forEach((group, groupIndex) => {
     const indexes = [...new Set(group.indexes)].sort((a, b) => a - b);
     const runs = [];
     for (const index of indexes) {
@@ -3012,9 +3032,9 @@ function buildPieces(file, source, table, root) {
           break;
         }
       }
-      const owner = group.atoms.find((atom) => at >= atom.span.start && at <= atom.span.end) ?? group.atoms[0];
-      if (owner === void 0) throw new Error("internal error: a piece with no unit");
-      hunks.push(makeHunk(lines, owner.firstLine));
+      const holder = group.atoms.find((atom) => at >= atom.span.start && at <= atom.span.end) ?? group.atoms[0];
+      if (holder === void 0) throw new Error("internal error: a piece with no unit");
+      hunks.push(makeHunk(lines, holder.firstLine));
     }
     const firstAtom = group.atoms[0];
     if (firstAtom === void 0) throw new Error("internal error: a piece group with no unit");
@@ -3029,14 +3049,23 @@ function buildPieces(file, source, table, root) {
       toLine: Math.max(...group.atoms.map((atom) => atom.span.end)),
       cut: "unit",
       // A piece that is one function goes to Jev with that whole function after the change.
-      // A run of statements and declarations is no function, so it gets the wide form, which
-      // is what the parser-free modes use.
-      context: group.fn ? functionContext(wholeFunctions(group.atoms, sourceLines)) : wideContext({ file: file.file, header: file.header, hunks }, source)
+      // A run of statements and declarations is no function, so it gets the wide form, clamped
+      // to the lines no other piece of this file owns.
+      context: group.fn ? functionContext(wholeFunctions(group.atoms, sourceLines)) : wideContext(
+        { file: file.file, header: file.header, hunks },
+        source,
+        owned.filter((_, index) => index !== groupIndex).flat()
+      )
     };
     pieces.push(piece);
-  }
+  });
   assertEveryAddedLineOnce(file.file, addedNumbers, pieces);
   return pieces;
+}
+function ownedLines(group) {
+  return group.atoms.map(
+    (atom) => group.fn ? { from: atom.span.unitStart, to: atom.span.node.endPosition.row + 1 } : { from: atom.span.start, to: atom.span.end }
+  );
 }
 function wholeFunctions(atoms, sourceLines) {
   const out3 = [];

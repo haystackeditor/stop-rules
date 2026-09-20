@@ -85,9 +85,17 @@ measured without it, the text says so.
 Jev is sent, for each piece: the path of the file, the piece's diff with **25 unchanged lines
 above the change and 25 below**, read out of the snapshot, and the rules. In `functions` mode a
 piece that is one function carries **that whole function after the change** instead of the wide
-diff, and a piece of statements and declarations carries the wide diff. None of this changes
-what the agent is handed: the report prints the piece with the tool's own 8 lines of context,
-and the first line of the report says what Jev saw, once.
+diff, and a piece of statements and declarations carries the wide diff, clamped so it never
+reaches into a line another piece of that file owns. None of this changes what the agent is
+handed: the report prints the piece with the tool's own 8 lines of context, and the first line of
+the report says what Jev saw, once.
+
+The clamp is only in `functions` mode, and only for the pieces that are not functions. In
+`hunks` and `chunks` a piece is a whole hunk or a group of them, which is what the table below
+was measured on, and the window there is left exactly as measured. In `functions` a piece can be
+two lines inside a file, and pieces that small were never in that measurement: unclamped, two
+import lines in a 19 line file scored 0.84 on the swallowed errors rule, because the window
+reached into a neighbouring function's empty `catch`. Section 2 has the whole example.
 
 ```bash
 stop-rules score --show-context     # prints exactly what Jev saw, per piece
@@ -351,52 +359,48 @@ stop-rules score: 4 pieces, 4 scores, 1 Jev calls, 0 answers from the cache.
 Scored the working tree against the last check, cut into whole functions, with tree-sitter.
 
 1. notify.ts lines 7-14 in loadTemplate
-   0.86  Do not silently swallow errors. ...
+   0.92  Do not silently swallow errors. ...
 
-2. notify.ts lines 1-2 in top-level code
-   0.84  Do not silently swallow errors. ...
+2. notify.ts lines 15-19 in notify
+   0.42  Do not silently swallow errors. ...
 
-3. notify.ts lines 15-19 in notify
-   0.17  Do not silently swallow errors. ...
+3. notify.ts lines 1-2 in top-level code
+   0.11  Do not silently swallow errors. ...
 
 4. notify.ts lines 3-6 in subjectFor
-   0.06  Do not silently swallow errors. ...
+   0.07  Do not silently swallow errors. ...
 ```
 
-Look at the second one, and be warned by it. The piece is two import lines, which break no
-rule, and it scored 0.08 before. It is not a function, so it goes to Jev with 25 lines around
-it, and in a 19 line file that window is the whole file, `loadTemplate` and its empty `catch`
-included. Jev now answers about what it can see: 0.84, over the default bar, on a piece whose
-added lines are two imports. Cutting into functions and then widening the pieces that are not
-functions works against itself on a small file. If you run `functions` mode and get flags on
-`top-level code`, run `score --show-context` on it and see what the window pulled in.
+The third one is worth knowing the story of. The piece is two import lines, which break no rule.
+The first build of this widened it like any other piece, and in a 19 line file the window is the
+whole file, `loadTemplate` and its empty `catch` included, so it came back **0.84**, over the
+default bar, on a piece whose added lines are two imports. So in `functions` mode a piece that is
+not a function is now widened only into lines no other piece of the file owns: the window stops
+at the first line of a neighbouring function, doc comment and all. Here that leaves the imports
+and the blank line after them, and the score is 0.11. Measured on 20 September 2026 on
+`jev-1.13.0`, in the same call, the same piece scored 0.84 unclamped and 0.07 clamped; the three
+function pieces came straight back from the unclamped build's cache, so the clamp changed one
+piece's question and no other. If a `top-level code` flag ever surprises you, run
+`score --show-context` on it and read the window.
 
 Cutting into chunks gives the same single piece as the default here. A new file is one hunk, and
 19 added lines is under both the 30 line cut and the 12,000 byte one. The two part company on
 bigger changes: over the 240 change sample, `hunks` makes 804 pieces where `chunks` makes 240.
 
 `notify` scored 0.45 when it was sent alone, a function that breaks no rule but calls the one
-that does. With the whole function it is 0.17. Cutting small does not make every piece obviously
+that does. With the whole function it is 0.42. Cutting small does not make every piece obviously
 clean, and the numbers near a bar move: read the shape.
 
-At the default bar of 0.5 the two parser-free modes flag this change once and `functions` flags
-it twice, and the agent is handed something different. `--cut functions`:
+At the default bar of 0.5 all three modes flag this change once, and the agent is handed
+something different. `--cut functions`, eight lines:
 
 ```
-stop-rules: 2 rule violations in 2 places in your latest changes. Jev saw the whole function for 3 pieces and 25 lines around the other 1.
+stop-rules: 1 rule violation in 1 place in your latest changes. Jev saw the whole function for 3 pieces and 25 lines around the other 1.
 Fix each one. If a rule truly should not apply here, leave the code and tell the user why.
 
-1. notify.ts lines 1-2 in top-level code breaks 1 rule
+1. notify.ts lines 7-14 in loadTemplate breaks 1 rule
    Rule: Do not silently swallow errors. ...
-   Confidence: 0.84
-   The change this is about:
-   @@ -0,0 +1,2 @@ import { readFileSync } from "node:fs";
-   +import { readFileSync } from "node:fs";
-   +import { sendEmail } from "./email.js";
-
-2. notify.ts lines 7-14 in loadTemplate breaks 1 rule
-   Rule: Do not silently swallow errors. ...
-   Confidence: 0.87
+   Confidence: 0.92
    The change this is about:
    @@ -0,0 +7,8 @@ export function loadTemplate(file: string): string {
    +
@@ -443,7 +447,7 @@ score. The pieces, calls and token rows were re-run on 20 September 2026.
 | Jev requests, 172 changes | 214 | 247 | 172 |
 | Input tokens, 172 changes | 433,421 | 490,231 | 269,307 |
 | Pieces, calls and tokens on `cutting.diff` with one rule, 20 September 2026 | 1 piece, 1 call, 582 in and 23 out | 4 pieces, 1 call, 1,448 in and 80 out | 1 piece, 1 call, 582 in and 23 out |
-| What Jev is shown per piece | the piece plus 25 lines each way | the whole function, or 25 lines each way when the piece is not one | the piece plus 25 lines each way |
+| What Jev is shown per piece | the piece plus 25 lines each way | the whole function, or, when the piece is not one, up to 25 lines each way of what no other piece owns | the piece plus 25 lines each way |
 | Real breaks caught at the default 0.5, of 21 | 14 | 11 | 9 |
 | Disputed flags at 0.5 | 16 | 26 | 6 |
 | Real breaks caught at 0.6, of 21 | 8 | 5 | 5 |
@@ -468,10 +472,10 @@ What you gain by switching, and lose:
 - **`functions`** buys the agent exactly one function, named, with nothing else in it, and Jev
   the whole of that function. It costs the grammar files, which are megabytes in the repository,
   and it only knows the ten languages listed above. A file it cannot parse is not checked at
-  all, and a language whose grammar is missing is not checked either. It has one more cost now:
-  the pieces that are not functions, which are the imports, constants and type declarations, are
-  small, and widening them by 25 lines each way pulls their neighbours in. The example above
-  turned two import lines into a 0.84.
+  all, and a language whose grammar is missing is not checked either. Its pieces that are not
+  functions, meaning the imports, constants and type declarations, are small, so their window is
+  clamped to the lines no other piece owns and is often only a line or two wide. That is on
+  purpose: unclamped, the example above turned two import lines into a 0.84.
 - **`chunks`** buys the fewest requests and the fewest tokens. It costs the most dilution: one
   bad line sits in a big diff, which is the quietest setting of the three and the one that
   misses most at a low bar, and the agent is handed a large diff to search.

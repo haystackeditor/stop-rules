@@ -134,6 +134,12 @@ function render(window: Window): string {
   return `${header}\n${window.body.join("\n")}\n`;
 }
 
+/** A run of new file lines another piece of the same file owns. */
+export interface LineRange {
+  from: number;
+  to: number;
+}
+
 /**
  * The piece's diff with `CONTEXT_LINES` unchanged lines above and below each change, taken
  * straight from the new file, with a recomputed `@@` header. Ported from the workbench's
@@ -141,14 +147,44 @@ function render(window: Window): string {
  * one hunk: a window never runs into the next change or back over the previous one, and two
  * windows that meet become one hunk, so no line is shown twice and no added line is ever
  * shown as unchanged.
+ *
+ * `taken` holds the lines other pieces of the same file own, and a window stops at them. Only
+ * `functions` mode passes it, and only for a piece that is not a function, and the two modes
+ * differ on purpose:
+ *
+ *  - In `hunks` and `chunks` a piece is a whole hunk or a group of them, the window is what was
+ *    measured, and it is left exactly as measured. Do not add a clamp there without measuring
+ *    it: the table in docs/TUNING.md would no longer describe the code.
+ *  - In `functions` a piece can be a few lines inside a file, and pieces that small were never
+ *    in that measurement. Measured on 20 September 2026: a piece of two import lines in a 19
+ *    line file went from 0.08 to 0.84 on the swallowed errors rule, because its window reached
+ *    into a neighbouring function's empty `catch` block. So there the window stops at the first
+ *    line another piece owns and Jev only ever sees unowned code around the change.
  */
-export function widePieceText(piece: Chunk, fileText: string): string {
+export function widePieceText(piece: Chunk, fileText: string, taken: readonly LineRange[] = []): string {
   const lines = fileLines(fileText);
   const cores = piece.hunks.map(coreOf);
   const rendered: string[] = [];
   let open: Window | null = null;
   /** New file line just after the last line already shown, so nothing is shown twice. */
   let shownTo = 1;
+
+  /** The first line this window may show, given what other pieces own below the change. */
+  const floorFor = (coreStart: number): number => {
+    let floor = 1;
+    for (const range of taken) {
+      if (range.to < coreStart) floor = Math.max(floor, range.to + 1);
+    }
+    return floor;
+  };
+  /** The line this window must stop before, given what other pieces own above the change. */
+  const ceilingFor = (coreEnd: number): number => {
+    let ceiling = lines.length + 1;
+    for (const range of taken) {
+      if (range.from >= coreEnd) ceiling = Math.min(ceiling, range.from);
+    }
+    return ceiling;
+  };
 
   const flush = (): void => {
     if (open === null) return;
@@ -170,8 +206,13 @@ export function widePieceText(piece: Chunk, fileText: string): string {
       nextChange = later.newStart;
       break;
     }
-    const aboveFrom = Math.max(core.newStart - CONTEXT_LINES, shownTo, 1);
-    const belowTo = Math.min(core.newEnd + CONTEXT_LINES, nextChange, lines.length + 1);
+    const aboveFrom = Math.max(core.newStart - CONTEXT_LINES, shownTo, 1, floorFor(core.newStart));
+    const belowTo = Math.min(
+      core.newEnd + CONTEXT_LINES,
+      nextChange,
+      lines.length + 1,
+      ceilingFor(core.newEnd),
+    );
     const above = lines.slice(aboveFrom - 1, core.newStart - 1).map(contextLine);
     const below = lines.slice(core.newEnd - 1, belowTo - 1).map(contextLine);
     const held = open;
@@ -196,6 +237,10 @@ export function widePieceText(piece: Chunk, fileText: string): string {
 }
 
 /** The wide form of a piece, ready to hang on it. */
-export function wideContext(piece: Chunk, fileText: string): PieceContext {
-  return { kind: "wide", diff: widePieceText(piece, fileText) };
+export function wideContext(
+  piece: Chunk,
+  fileText: string,
+  taken: readonly LineRange[] = [],
+): PieceContext {
+  return { kind: "wide", diff: widePieceText(piece, fileText, taken) };
 }
