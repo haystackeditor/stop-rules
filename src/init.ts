@@ -18,6 +18,14 @@ import { grammarWasmPath, runtimeWasmPath, vendorDir } from "./treesitter.js";
 import type { CutMode } from "./types.js";
 import { isBundled } from "./version.js";
 
+/**
+ * What init says when it is installing the parser but the repository has no file in a
+ * language stop-rules can parse. It is the text line, the `--json` line and one of the
+ * things left for the user, because a silent "0 grammars" reads as a working install.
+ */
+export const NO_LANGUAGES =
+  "no source files in a supported language yet: run stop-rules init again after you add some";
+
 /** Where the vendored single file lands inside the target repository. */
 export const BUNDLE_PATH = ".stop-rules/stop-rules.mjs";
 const BUNDLE_NAME = "stop-rules.mjs";
@@ -268,7 +276,15 @@ export async function init(options: InitOptions): Promise<InitReport> {
       : 'Give it your own Jev key from TypeSafe: set TYPESAFE_API_KEY, or run printf %s "$KEY" | stop-rules login --jev-key-stdin',
   );
   report.todo.push(`Edit ${report.rules.path} so it says what your team actually cares about.`);
-  const vendored = cut === "functions" ? "the checker and its grammars" : "the checker";
+  // Nothing to parse means nothing was installed to parse it with, and the user is the only
+  // one who can change that, so it is on the list rather than buried in an empty array.
+  if (cut === "functions" && report.grammars.languages.length === 0) {
+    report.todo.push(NO_LANGUAGES);
+  }
+  const vendored =
+    cut === "functions" && report.grammars.languages.length > 0
+      ? "the checker and its grammars"
+      : "the checker";
   report.todo.push(
     report.mode === "team"
       ? `Commit ${VENDOR_DIR}/ (${vendored}), ${SETTINGS_FILE} and the config files, so teammates and cloud agents get the check too.`
@@ -279,11 +295,14 @@ export async function init(options: InitOptions): Promise<InitReport> {
 }
 
 /**
- * Which grammars this repository needs, from the extensions of its tracked files. Files the
- * check skips anyway, including our own vendored bundle, do not earn a grammar.
+ * Which grammars this repository needs, from the extensions of the files in it: both the
+ * tracked ones and the ones git would add, meaning untracked files that .gitignore does not
+ * cover. A repository with no commit yet holds only untracked files, and reading just the
+ * tracked ones installed no grammar at all there. Files the check skips anyway, including
+ * our own vendored bundle, do not earn a grammar.
  */
 async function languagesInRepo(root: string): Promise<GrammarKey[]> {
-  const listed = await runGit(root, ["ls-files"]);
+  const listed = await runGit(root, ["ls-files", "--cached", "--others", "--exclude-standard"]);
   if (listed.code !== 0) {
     throw new Error(`git ls-files failed in ${root}: ${listed.stderr.trim()}`);
   }
@@ -380,7 +399,7 @@ export function renderInit(report: InitReport): string[] {
   } else {
     lines.push(
       grammars.languages.length === 0
-        ? `  no file in this repo has a language stop-rules can parse, so it copied no grammars (${VENDOR_DIR} is ${megabytes} MB)`
+        ? `  ${NO_LANGUAGES}, so it copied no grammars (${VENDOR_DIR} is ${megabytes} MB)`
         : `  grammars for ${grammars.languages.join(", ")}: ${grammars.added.length} copied, ${grammars.kept.length} already there (${VENDOR_DIR} is ${megabytes} MB)`,
     );
   }

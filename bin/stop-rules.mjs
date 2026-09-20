@@ -8294,6 +8294,7 @@ ${text}` };
 // src/init.ts
 import { promises as fs16 } from "node:fs";
 import * as path21 from "node:path";
+var NO_LANGUAGES = "no source files in a supported language yet: run stop-rules init again after you add some";
 var BUNDLE_PATH = ".stop-rules/stop-rules.mjs";
 var BUNDLE_NAME = "stop-rules.mjs";
 var VENDOR_DIR = ".stop-rules";
@@ -8446,7 +8447,10 @@ async function init2(options) {
     report.mode === "team" ? 'Store the team token: printf %s "$TOKEN" | stop-rules login --token-stdin' : 'Give it your own Jev key from TypeSafe: set TYPESAFE_API_KEY, or run printf %s "$KEY" | stop-rules login --jev-key-stdin'
   );
   report.todo.push(`Edit ${report.rules.path} so it says what your team actually cares about.`);
-  const vendored = cut === "functions" ? "the checker and its grammars" : "the checker";
+  if (cut === "functions" && report.grammars.languages.length === 0) {
+    report.todo.push(NO_LANGUAGES);
+  }
+  const vendored = cut === "functions" && report.grammars.languages.length > 0 ? "the checker and its grammars" : "the checker";
   report.todo.push(
     report.mode === "team" ? `Commit ${VENDOR_DIR}/ (${vendored}), ${SETTINGS_FILE} and the config files, so teammates and cloud agents get the check too.` : `Commit ${VENDOR_DIR}/ (${vendored}) and the config files, so teammates and cloud agents get the check too.`
   );
@@ -8454,7 +8458,7 @@ async function init2(options) {
   return report;
 }
 async function languagesInRepo(root) {
-  const listed = await runGit(root, ["ls-files"]);
+  const listed = await runGit(root, ["ls-files", "--cached", "--others", "--exclude-standard"]);
   if (listed.code !== 0) {
     throw new Error(`git ls-files failed in ${root}: ${listed.stderr.trim()}`);
   }
@@ -8535,7 +8539,7 @@ function renderInit(report) {
     );
   } else {
     lines.push(
-      grammars.languages.length === 0 ? `  no file in this repo has a language stop-rules can parse, so it copied no grammars (${VENDOR_DIR} is ${megabytes} MB)` : `  grammars for ${grammars.languages.join(", ")}: ${grammars.added.length} copied, ${grammars.kept.length} already there (${VENDOR_DIR} is ${megabytes} MB)`
+      grammars.languages.length === 0 ? `  ${NO_LANGUAGES}, so it copied no grammars (${VENDOR_DIR} is ${megabytes} MB)` : `  grammars for ${grammars.languages.join(", ")}: ${grammars.added.length} copied, ${grammars.kept.length} already there (${VENDOR_DIR} is ${megabytes} MB)`
     );
   }
   lines.push(
