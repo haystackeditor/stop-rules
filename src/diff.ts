@@ -5,7 +5,7 @@ export const CHUNK_MAX_BYTES = 12_000;
 /**
  * A diff line longer than this is data, not code: a minified bundle, a log record, a
  * base64 blob. Sending it costs a fortune in tokens and teaches Jev nothing, so the text
- * is replaced by a marker and the line never becomes a localisation claim.
+ * is replaced by a marker, so a piece never carries it.
  */
 export const LONG_LINE_LIMIT = 1000;
 

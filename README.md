@@ -209,6 +209,10 @@ There are 32 real breaks in it, across the six starter rules.
 - On planted examples, measured earlier: stubs 20 of 20, hardcoded test values 12 of 20, and
   0 of 40 harmless look-alikes flagged.
 
+Those come from one scoring run per cut mode. Asked seven times, a confident score moved by a
+hundredth or two and a borderline one moved from 0.45 to 0.80, so the counts near a bar would
+move a little in another run.
+
 So it is quiet rather than thorough. It will miss things. Scores also move between Jev model
 versions, so run `stop-rules score` on your own code and see. Every number above, per rule
 and per bar, is in [docs/TUNING.md](docs/TUNING.md).

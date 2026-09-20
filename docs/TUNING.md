@@ -56,10 +56,12 @@ Two kinds of number appear below.
   is a real answer from the live service on 19 September 2026. Asked on the same day, the
   service reported its version as `jev-1.13.0`. The tool asks for `jev-latest`.
 
-Two things about the numbers themselves. Scores drift between model versions. They also move
-a little between runs: the same piece and the same rule came back 0.92 once and 0.93 another
-time, minutes apart, on the same version. Treat every number here as the shape of the thing,
-not as a constant, and re-run `score` on your own code after a model change.
+Two things about the numbers themselves. Scores drift between model versions, and they also
+move between runs on one version. We asked the five examples below seven times, with a cold
+cache each time, minutes apart. The confident answers moved by a hundredth or two. The
+borderline one moved from 0.45 to 0.80. So treat every number here as the shape of the thing,
+not as a constant, re-run `score` on your own code, and do not set a bar that sits right next
+to a score you care about.
 
 ## 1. The bar: `threshold`
 
@@ -80,35 +82,40 @@ The rule is the starter rule about swallowed errors
 stop-rules score --diff examples/tuning/bar.diff --rules examples/tuning/rules-errors.md
 ```
 
-| Example | What it is | Score |
+Seven runs, cold cache each time, same day, same model version:
+
+| Example | What it is | Scores seen |
 |---|---|---|
-| `subtle.ts` | `await writeRow(...).catch(() => {})` and then a line that logs success | 0.92 |
-| `swallow.ts` | an empty `catch` block, then a made up default | 0.90 |
-| `cachemiss.ts` | a cache read whose `catch` returns `undefined`, which its comment says is the intended "ask the source" path | 0.80 |
-| `notfound.ts` | returns `false` for `ENOENT` and rethrows everything else | 0.25 |
-| `lookalike.ts` | logs the error with the file name and rethrows it | 0.06 |
+| `subtle.ts` | `await writeRow(...).catch(() => {})` and then a line that logs success | 0.92, 0.92, 0.92, 0.92, 0.92, 0.93, 0.93 |
+| `swallow.ts` | an empty `catch` block, then a made up default | 0.89, 0.90, 0.90, 0.91, 0.91, 0.91, 0.92 |
+| `cachemiss.ts` | a cache read whose `catch` returns `undefined`, which its comment says is the intended "ask the source" path | 0.45, 0.46, 0.47, 0.47, 0.48, 0.50, 0.80 |
+| `notfound.ts` | returns `false` for `ENOENT` and rethrows everything else | 0.25, 0.30, 0.30, 0.31, 0.31, 0.32, 0.32 |
+| `lookalike.ts` | logs the error with the file name and rethrows it | 0.06, 0.06, 0.06, 0.07, 0.07, 0.08, 0.08 |
 
-Which bar lets which one through:
+How often each bar flagged each example, out of those seven runs:
 
-| Bar | Flags |
-|---|---|
-| 0.3 | subtle, swallow, cachemiss |
-| 0.5 | subtle, swallow, cachemiss |
-| 0.6 | subtle, swallow, cachemiss |
-| 0.7 | subtle, swallow, cachemiss |
-| 0.9 | subtle, swallow |
+| Bar | subtle | swallow | cachemiss | notfound | lookalike |
+|---|---|---|---|---|---|
+| 0.3 | 7 | 7 | 7 | 6 | 0 |
+| 0.5 | 7 | 7 | 2 | 0 | 0 |
+| 0.6 | 7 | 7 | 1 | 0 | 0 |
+| 0.7 | 7 | 7 | 1 | 0 | 0 |
+| 0.9 | 7 | 6 | 0 | 0 | 0 |
 
-Three things to take from that.
+Four things to take from that.
 
-- On clear cases the bar does not matter. Anything from 0.3 to 0.7 gives the same three
-  flags here, because the service is not sitting on the fence about any of these five.
-- `cachemiss.ts` is the one that will annoy you. It scores 0.80, and whether it is a real
-  break depends on a decision the piece cannot show: is a broken cache the same as a cache
-  miss for this caller. If your codebase is full of that pattern on purpose, a bar of 0.6
-  will keep flagging it, and the answer is to reword the rule, not to move the bar.
-- We hoped `notfound.ts` would be a plain false alarm to show off a low score. It scored
-  0.25, so it is not one. That is what the example really shows: a `catch` that rethrows what
-  it cannot answer for reads as fine to the service.
+- On clear cases the bar does not matter. Anything from 0.5 to 0.7 gives the same two flags
+  here, every time, because the service is not sitting on the fence about them.
+- The borderline example is where the bar earns its keep, and where it is least reliable.
+  `cachemiss.ts` came back between 0.45 and 0.50 six times and 0.80 once. A bar of 0.5 flags
+  it on some turns and not others. If your codebase is full of that pattern on purpose, the
+  answer is to reword the rule, not to hunt for a bar that splits 0.47 from 0.50.
+- Whether `cachemiss.ts` is a real break depends on something the piece cannot show: is a
+  broken cache the same as a cache miss for this caller. That is the kind of question a score
+  cannot answer for you.
+- We hoped `notfound.ts` would be a plain false alarm to show off a low score. It never went
+  above 0.32, so it is not one. That is what the example really shows: a `catch` that rethrows
+  what it cannot answer for reads as fine to the service.
 
 ### The measured tables
 
@@ -119,6 +126,10 @@ Most have **no ruling**: the adjudicator only looked at the disputes that came u
 whole chunks, so a flag with no ruling is neither a false alarm nor a real break. It is
 unjudged, and we are not guessing. Pairs the adjudicator called arguable are left out of both
 counts: 12 of them in the 240 change set.
+
+Each table below is one scoring run of the whole sample per cut mode. Given the movement shown
+above, a pair sitting near a bar could land on either side of it in another run, so read the
+shape of these tables and not the last digit.
 
 Cut into whole functions, the default, over all 240 changes and their 32 real breaks:
 
@@ -200,7 +211,7 @@ Cut into whole functions, four pieces:
    0.92  Do not silently swallow errors. ...
 
 2. notify.ts lines 15-19 in notify
-   0.47  Do not silently swallow errors. ...
+   0.47  Do not silently swallow errors. ...   (0.43 in a second run)
 
 3. notify.ts lines 1-2 in top-level code
    0.08  Do not silently swallow errors. ...
@@ -329,23 +340,25 @@ comment, a local variable nothing reads, and an option nothing uses.
 stop-rules score --diff examples/tuning/rules-demo.diff --rules examples/tuning/rules-with-examples.md
 ```
 
-| Rules file | The rule | Score |
-|---|---|---|
-| [`rules-with-examples.md`](../examples/tuning/rules-with-examples.md) | Do not write comments that only restate what the code does, or that narrate the change being made ("now we also handle X", "fixed the bug where"). A comment that explains why the code must be this way is fine. | 0.89 |
-| [`rules-terse.md`](../examples/tuning/rules-terse.md) | No useless comments. | 0.28 |
-| [`rules-linter.md`](../examples/tuning/rules-linter.md) | Do not leave a variable that nothing reads. | 0.57 |
-| [`rules-codebase.md`](../examples/tuning/rules-codebase.md) | Do not add configuration options, parameters or abstractions that nothing in this change uses. | 0.62 |
+Two runs each, on different days of the same version:
 
-The same comment, in the same change, is a 0.89 under the long rule and a 0.28 under the
+| Rules file | The rule | Scores seen |
+|---|---|---|
+| [`rules-with-examples.md`](../examples/tuning/rules-with-examples.md) | Do not write comments that only restate what the code does, or that narrate the change being made ("now we also handle X", "fixed the bug where"). A comment that explains why the code must be this way is fine. | 0.89, 0.89 |
+| [`rules-terse.md`](../examples/tuning/rules-terse.md) | No useless comments. | 0.25, 0.28 |
+| [`rules-linter.md`](../examples/tuning/rules-linter.md) | Do not leave a variable that nothing reads. | 0.57, 0.62 |
+| [`rules-codebase.md`](../examples/tuning/rules-codebase.md) | Do not add configuration options, parameters or abstractions that nothing in this change uses. | 0.62, 0.66 |
+
+The same comment, in the same change, is a 0.89 under the long rule and a 0.25 under the
 short one. The examples inside the rule are doing the work.
 
-The linter rule scores 0.57 on a variable that really is unused. ESLint's `no-unused-vars`
-gives you the same answer for nothing, every time, with the line number. Paying a Jev
-question for it buys you a maybe.
+The linter rule scores around 0.6 on a variable that really is unused. ESLint's
+`no-unused-vars` gives you the same answer for nothing, every time, with the line number.
+Paying a Jev question for it buys you a maybe.
 
-The codebase rule scores 0.62 on an option that nothing in the piece uses. Whether anything
-in the repository uses it is a question this piece cannot answer, so a score like that is a
-guess dressed as a number.
+The codebase rule scores around 0.64 on an option that nothing in the piece uses. Whether
+anything in the repository uses it is a question this piece cannot answer, so a score like
+that is a guess dressed as a number.
 
 ### What we measured about rules
 
