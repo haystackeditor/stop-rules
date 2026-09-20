@@ -1,0 +1,24 @@
+diff --git a/retry.ts b/retry.ts
+new file mode 100644
+index 0000000..3000001
+--- /dev/null
++++ b/retry.ts
+@@ -0,0 +1,18 @@
++export interface RetryOptions {
++  attempts: number;
++  backoffMs?: number;
++}
++
++// Now we also retry the request when the network drops.
++export async function fetchWithRetry(url: string, options: RetryOptions): Promise<Response> {
++  const timeout = 5000;
++  let last: unknown = new Error(`no attempt was made for ${url}`);
++  for (let i = 0; i < options.attempts; i += 1) {
++    try {
++      return await fetch(url);
++    } catch (error) {
++      last = error;
++    }
++  }
++  throw last;
++}

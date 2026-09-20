@@ -153,7 +153,9 @@ one piece of a change cannot show ("keep the service boundaries tidy").
    top level statements, constants, type declarations and plain fields, groups with the
    neighbours next to it into a piece of up to 40 added lines, and a function between them
    ends that group. A file with no grammar is cut by diff hunk instead. Lock files, minified
-   bundles, data and log files, binaries and deletions are skipped.
+   bundles, data and log files, binaries and deletions are skipped. Set `"cut": "hunks"` and
+   no parser is used at all: every file is cut by diff hunk. See
+   [docs/TUNING.md](docs/TUNING.md) for what that trade costs.
 3. **One yes or no score per rule.** Every piece is asked about every rule: does the added
    code break this rule. Jev answers each claim with a probability. At or above the cutoff
    (0.6 by default) it is a finding. Up to four pieces ride in one request, and a request is
@@ -173,7 +175,9 @@ it runs out, the work left over is reported as "not checked".
 
 The cutoff was measured on 240 real agent written changes, blind labelled and adjudicated.
 Cutting code into whole functions does not make Jev rank better, it shifts the scores up, so
-pieces need 0.6 where whole chunks needed 0.5. That is the only reason for the number.
+pieces need 0.6 where whole chunks needed 0.5. That is the only reason for the number. The
+table of what every bar from 0.3 to 0.7 caught and flagged is in
+[docs/TUNING.md](docs/TUNING.md), measured on this build.
 
 ### Not spamming Jev
 
@@ -189,14 +193,22 @@ machine. Three things keep this one polite:
 
 ### How accurate is it
 
-Small samples, measured, and worth knowing before you trust it:
+Small samples, measured on this build, and worth knowing before you trust it. The sample is
+240 real agent written changes from 104 public repositories, labelled blind by reviewers.
+There are 32 real breaks in it, across the six starter rules.
 
-- On 240 real agent written changes, with whole chunks at 0.5, none of the 16 flags was a
-  plain false alarm, and about 1 real break in 3 was caught.
-- On planted examples: stubs 20 of 20, hardcoded test values 12 of 20, and 0 of 40 harmless
-  look-alikes flagged.
+- At the default 0.6, cutting into whole functions: 10 of the 32 real breaks caught, and 19
+  flags the reviewers did not agree with. Of those 19, an adjudicator had earlier called 5
+  plainly not a break and 2 arguable; the other 12 nobody has ruled on.
+- At 0.6, cutting by diff hunk: 9 of 32 caught and 1 flag the reviewers did not agree with.
+- At 0.5, cutting into whole functions: 20 of 32 caught and 38 flags the reviewers did not
+  agree with.
+- On planted examples, measured earlier: stubs 20 of 20, hardcoded test values 12 of 20, and
+  0 of 40 harmless look-alikes flagged.
 
-So it is quiet rather than thorough. It will miss things. What it does flag is usually real.
+So it is quiet rather than thorough. It will miss things. Scores also move between Jev model
+versions, so run `stop-rules score` on your own code and see. Every number above, per rule
+and per bar, is in [docs/TUNING.md](docs/TUNING.md).
 
 ## What leaves your machine
 
@@ -216,8 +228,9 @@ the repo, printed, or included in an error message.
 ## Commands
 
 ```
-stop-rules init [--dir <repo>] [--agents a,b,c] [--team <url>] [--json]
+stop-rules init [--dir <repo>] [--agents a,b,c] [--team <url>] [--cut <mode>] [--json]
 stop-rules check [--base <rev>] [--json]
+stop-rules score [--base <rev>] [--diff <file>] [--json]
 stop-rules hook --agent <name>
 stop-rules team <url>
 stop-rules login --jev-key-stdin | --token-stdin | --check
@@ -226,21 +239,46 @@ stop-rules baseline --reset
 ```
 
 - **init** installs into a repo. `--dir` picks the repo, `--agents` overrides detection,
-  `--team` switches the repo to team mode, `--json` prints the same facts for an agent to
-  read.
+  `--team` switches the repo to team mode, `--cut hunks` installs with no parser files at
+  all, `--json` prints the same facts for an agent to read.
 - **check** runs the same pipeline in a terminal, for a pre-commit hook or CI. Exit 0
   clean, 2 findings, 1 could not run. With `--base <rev>` it diffs that revision against
   your working tree; without it, it uses the incremental baseline but never moves it, so it
   is safe to repeat.
+- **score** prints every piece with every rule's score and applies no cutoff, so you can see
+  where your own code sits before you pick a bar. It changes nothing. `--diff <file>` scores
+  a unified diff file instead of the working tree.
 - **hook** is what the agents call. `--agent` says whose protocol to speak.
-- **team** writes `.stop-rules.json` with your server's URL. Commit that file.
+- **team** writes the endpoint into `.stop-rules.json`. Commit that file.
 - **login** stores your Jev key or your team token, read from stdin so it never lands in
   shell history. `--check` calls your server's health route and makes one real Jev call.
 - **serve** runs the team server on a laptop or a plain VM.
 - **baseline --reset** forgets what was checked, so the next run starts from HEAD.
 
-Shared flags: `--rules <path>` (default `<repo root>/.stop-rules.md`), `--threshold <0..1>`
-(default 0.6), `--max-calls <n>` (default 60), `--help`, `--version`.
+Shared flags: `--rules <path>` (default `<repo root>/.stop-rules.md`), `--cut <mode>`
+(default functions), `--threshold <0..1>` (default 0.6), `--max-calls <n>` (default 60),
+`--help`, `--version`.
+
+## Settings, and tuning
+
+`.stop-rules.json` in your repository root is the one place a team sets the knobs. It is
+committed and holds no secret. Every key is optional, and a flag beats the file.
+
+```json
+{
+  "endpoint": "https://stop-rules.your-team.example.com",
+  "cut": "functions",
+  "threshold": 0.6,
+  "maxCalls": 60
+}
+```
+
+A key stop-rules does not know, a value of the wrong type or a value out of range stops the
+run with one line naming the key.
+
+[docs/TUNING.md](docs/TUNING.md) goes through each knob: what it does, what happens when you
+turn it either way, real examples with the scores the live service gave them, and what each
+setting caught and flagged on 240 real agent written changes.
 
 Environment: `TYPESAFE_API_KEY` or `TYPESAFE_API_KEY_FILE` for your own key,
 `STOP_RULES_ENDPOINT` and `STOP_RULES_TOKEN` for team mode,

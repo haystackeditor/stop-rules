@@ -24,7 +24,7 @@ Wait for the answers. Do not guess them.
 
 - **Which coding agents this repo uses.** `init` detects them from the files in the repo.
   Pass `--agents` only if the human named agents that `init` did not find.
-- **The first draft of the rules.** You write it from the team's own documents. Step 5.
+- **The first draft of the rules.** You write it from the team's own documents. Step 6.
 
 ## 3. Get the tool
 
@@ -56,7 +56,7 @@ node /tmp/stop-rules/bin/stop-rules.mjs init --dir /path/to/repo --team https://
 Read the JSON it prints. The fields you need:
 
 - `ok`: false means nothing was installed. `errors` says why.
-- `mode`: `team` or `local`. It decides which secret the human stores in step 6.
+- `mode`: `team` or `local`. It decides which secret the human stores in step 7.
 - `grammars`: which languages this repo has, which grammar files were copied into
   `.stop-rules/`, and how big that folder now is. A language with no grammar here is cut by
   diff hunk instead, which still works.
@@ -69,7 +69,44 @@ If `init` says no coding agent was detected, ask the human which agent they use 
 again with `--agents <name>`. Running `init` twice is safe: it only refreshes the copied
 file and leaves every config entry alone.
 
-## 5. Write the rules from the team's own documents
+## 5. Show the human the knobs, and ask
+
+There are four knobs, they all live in `.stop-rules.json` in the repository root, and you do
+not pick them silently. Show the human this list, say what each default is, and ask which
+ones they want to change. [docs/TUNING.md](docs/TUNING.md) has the real examples and the
+measured totals behind each one, so read it before you answer questions about it.
+
+| Knob | Default | What turning it does |
+|---|---|---|
+| `cut` | `functions` | `functions` uses tree-sitter, hands the agent the one function at fault, and copies a few megabytes of parser files into `.stop-rules/`. `hunks` uses no parser, is one 384 KB file, covers every language, and hands the agent the whole diff hunk. |
+| `threshold` | `0.6` | The bar a score must reach to count. Lower catches more and flags more. On our 240 change sample, dropping from 0.6 to 0.5 doubled both the real breaks caught and the flags the reviewers disagreed with. |
+| `maxCalls` | `60` | Requests to Jev in one run. When it runs out, the rest of the change is reported as not checked and picked up on the next run. |
+| `endpoint` | none, so each person uses their own Jev key | Team mode: questions go to your team's server, which holds the one key. |
+
+What to say, in plain words: the defaults are the defaults because they were measured, not
+because they are right for this repository. If the human does not want to decide now, leave
+every knob alone and do not write the file: `init` writes `.stop-rules.json` only when it has
+something to put in it.
+
+Once they choose:
+
+```bash
+# hunks mode, no parser files at all
+node /tmp/stop-rules/bin/stop-rules.mjs init --dir /path/to/repo --cut hunks --json
+```
+
+`threshold` and `maxCalls` you put in `.stop-rules.json` by hand, next to whatever `init`
+wrote. Then show them the scores on their own code, which costs a few Jev calls and no
+guesswork:
+
+```bash
+node .stop-rules/stop-rules.mjs score
+```
+
+That prints every piece with every rule's score and applies no bar, so the human can see
+where their own code sits before they settle on one.
+
+## 6. Write the rules from the team's own documents
 
 `init` wrote a starter `.stop-rules.md`. Replace its bullets with the team's real rules,
 which you take from what they have already written: `CLAUDE.md`, `AGENTS.md`,
@@ -88,7 +125,7 @@ Rules for writing rules:
 
 Show the list to the human and get their approval before you commit it.
 
-## 6. Store the secret without letting it leak
+## 7. Store the secret without letting it leak
 
 In team mode, the human's team token:
 
@@ -116,7 +153,7 @@ Rules you must follow here:
 The file it writes is `~/.config/stop-rules/token` or `~/.config/stop-rules/jev-key`, mode
 0600, outside the repo.
 
-## 7. Only if the team server is not deployed yet
+## 8. Only if the team server is not deployed yet
 
 Follow [DEPLOY.md](DEPLOY.md) for the cloud the human named. The targets are listed fastest
 first.
@@ -135,7 +172,7 @@ first.
 - Then run `init --team <endpoint>` from step 4, or `stop-rules team <endpoint>` if the repo
   is already installed.
 
-## 8. Prove it works before you say done
+## 9. Prove it works before you say done
 
 Run all five steps and show the human the output of the middle three:
 
@@ -175,7 +212,7 @@ The example above breaks "do not silently swallow errors".
 If the agent is Claude Code, tell the human this: if `disableAllHooks` is set in their
 Claude Code settings, no hook runs at all and nothing warns them.
 
-## 9. Commit, and never commit
+## 10. Commit, and never commit
 
 Commit:
 
@@ -186,7 +223,7 @@ Commit:
   that each person runs `init` again once on their own machine; until they do, files in that
   language are reported as not checked and nothing else breaks.
 - The agent config files `init` wrote or changed, listed in `agents[].files`.
-- `.stop-rules.json` in team mode. It holds the endpoint and no secret.
+- `.stop-rules.json`, if there is one. It holds the knobs and the team endpoint, and no secret.
 
 Never commit, and never print:
 
@@ -194,7 +231,7 @@ Never commit, and never print:
 - The team token.
 - Anything from `~/.config/stop-rules/`.
 
-## 10. What to tell the human at the end
+## 11. What to tell the human at the end
 
 - Which agents will be told to fix violations themselves, and which can only show them.
   Take this from `agents[].effect` in the JSON, word for word.
@@ -205,16 +242,16 @@ Never commit, and never print:
   mode.
 - That they can run `node .stop-rules/stop-rules.mjs check` by hand any time, and in CI.
 
-## 11. Troubleshooting: what the real messages mean
+## 12. Troubleshooting: what the real messages mean
 
 | Message | What to do |
 |---|---|
-| `no Jev API key and no team endpoint. Set TYPESAFE_API_KEY, or store a key with stop-rules login --jev-key-stdin, or point this repo at your team server with stop-rules team <url>` | Nothing is configured yet. Do step 6. |
+| `no Jev API key and no team endpoint. Set TYPESAFE_API_KEY, or store a key with stop-rules login --jev-key-stdin, or point this repo at your team server with stop-rules team <url>` | Nothing is configured yet. Do step 7. |
 | `the Jev account is out of credits. Add credits at TypeSafe, then run again.` | The account behind the key has no credits. The check did not run and the same change is checked again next time. The human adds credits at TypeSafe. |
 | `Jev rejected the API key.` | The key is wrong or revoked. Store the right one. |
 | `the team token is missing or wrong; run stop-rules login` | The server said 401. Get the current token from the human and store it again. |
 | `no team token for <url>. Store one with: printf %s "$TOKEN" \| stop-rules login --token-stdin` | Team mode is configured but this machine has no token. |
-| `<repo>/.stop-rules.json has no endpoint. Write one with stop-rules team <url>, or delete the file to use your own Jev key.` | The team config file is half written. Fix it either way. |
+| `<repo>/.stop-rules.json sets "x", which stop-rules does not know. The settings are endpoint, cut, threshold, maxCalls.` | A typo in the settings file. Fix that one key. The same shape of message names a wrong type or a value out of range. |
 | `TYPESAFE_API_KEY is set but empty. Unset it or put your key in it.` | An empty variable beats a stored key, so it has to be one or the other. Same for any other variable set to nothing. |
 | `no rules file at <path>. Run "stop-rules init" to create one.` | `.stop-rules.md` is missing. Run `init` in that repo. |
 | `no rules found in <path>. Each top-level list item is one rule.` | The rules file has no top-level bullets. Rules are `- ` items at column 0. |
