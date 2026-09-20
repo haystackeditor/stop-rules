@@ -2,9 +2,9 @@
 
 `stop-rules` holds your coding agent to your team's written coding rules. When the agent
 finishes a turn, it cuts the code changed since the last check into pieces, one git diff hunk
-each, and asks [Jev](https://typesafe.ai) one yes or no question per piece and per rule. If a
-rule is likely broken, it hands that piece of code back to the agent so it fixes it before you
-see it.
+each, and asks [Jev](https://typesafe.ai) one yes or no question per piece and per rule, with 25
+lines of the surrounding file so the question can be answered. If a rule is likely broken, it
+hands that piece of code back to the agent so it fixes it before you see it.
 
 Cutting by git diff hunk is the default, and it needs nothing installed. A team that would
 rather have one whole function per piece switches to tree-sitter with
@@ -206,13 +206,50 @@ September 2026, which reported its version as `jev-1.13.0`. Both samples are sma
    its neighbours up to 40 added lines, and a file with no grammar falls back to diff hunks.
    `"cut": "chunks"` groups a file's hunks into pieces of up to 12,000 bytes, also with no
    parser. See [docs/TUNING.md](docs/TUNING.md) for what you gain and lose by switching.
-3. **One yes or no score per rule.** Every piece is asked about every rule: does the added
+3. **The code around each piece.** A piece on its own is often too little to judge, so the
+   diff that goes to Jev carries 25 unchanged lines above the change and 25 below, read out of
+   the snapshot. In `"cut": "functions"` a piece that is one function carries that whole
+   function after the change instead. This is only what Jev is shown: the report still hands
+   the agent the piece.
+4. **One yes or no score per rule.** Every piece is asked about every rule: does the added
    code break this rule. Jev answers each claim with a probability. At or above the cutoff
    (0.5 by default) it is a finding. Up to four pieces ride in one request, and a request is
    also bounded at 60,000 bytes, so a normal turn is one or two requests.
-4. **Tell the agent.** One entry per piece: the file, the line range, the name of the function
+5. **Tell the agent.** One entry per piece: the file, the line range, the name of the function
    when there is one, then every rule that piece broke with its score, and then the piece's
    diff once. The agent gets the code that broke the rule, not a line number to go and find.
+
+### What Jev sees
+
+Measured on the workbench on 20 September 2026, at the default bar of 0.5, over the same 240
+real agent written changes, blind labelled and adjudicated, which hold 31 real breaks:
+
+| What Jev was shown | Real breaks caught, of 31 | Plainly false flags | Flags nobody has ruled on |
+|---|---|---|---|
+| the piece alone, which is what it sent before | 23 | 10 | 23 |
+| the piece with 25 lines around it, no parser | 21 | 7 | 13 |
+| the whole function, with tree-sitter | 21 | 10 | not counted |
+
+The middle row is what ships. It catches two fewer and argues with you a lot less, it needs no
+parser, and at a bar of 0.55 it caught 16 with fewer doubtful flags than either of the others.
+On a second, smaller set of real agent sessions it caught 2 of the 3 real breaks against 1 for
+the piece alone, and it found a missing doc comment that the piece alone missed. The cost of
+the extra lines: 7 of 1,358 clean pairs were newly flagged, and input tokens go from about
+$0.11 to $0.21 per 1,000 changes at TypeSafe's published price.
+
+Two things we tried and did not build, so nobody spends the time again:
+
+- **Asking Jev whether it needs more information.** It answered "not enough" to 98% of the
+  questions, and its answer had no relation to whether more context changed the score (AUC
+  0.27). There is no signal there to act on.
+- **Widening only where that question asked for it.** 2 to 4 times the calls, and no gain over
+  widening every piece.
+
+Also measured: sending the whole file when it is small looked good where it applied, but 57% of
+the real pieces come from files over 12 KB, so it does not apply often enough to build.
+
+Because the claim and the piece text both changed, every cached answer from an older version is
+a miss: after upgrading, each piece is asked once more. See the changelog at the end.
 
 ### Where the report comes out, per agent
 
@@ -241,8 +278,9 @@ rule is broken.
 
 It never nags twice: a finding the hook has already delivered in this repo is not delivered
 again. A second run over the same code costs nothing, because every answer is cached in the
-repo's git directory, keyed on the model, the exact claim and the exact piece text. Packing
-does not change that key, so re-packing never throws answers away. And every run has a hard
+repo's git directory, keyed on the model, the exact claim and the exact text Jev was sent,
+which includes the lines around the change. Packing does not change that key, so re-packing
+never throws answers away. And every run has a hard
 ceiling on requests (60 by default, `--max-calls`), counted across retries and splits. When
 it runs out, the work left over is reported as "not checked".
 
@@ -302,9 +340,14 @@ machine. Three things keep this one polite:
 
 ### How accurate is it
 
-Small samples, measured on this build, and worth knowing before you trust it. The sample is
-240 real agent written changes from 104 public repositories, labelled blind by reviewers.
-There are 32 real breaks in it, across the six starter rules.
+Small samples, and worth knowing before you trust it. The sample is 240 real agent written
+changes from 104 public repositories, labelled blind by reviewers. There are 32 real breaks in
+it, across the six starter rules.
+
+Every count in this section was measured with the piece alone, before Jev was given the code
+around it. The comparison that led to the change is in "What Jev sees" above: at the default
+bar the wide form caught two fewer real breaks and raised three fewer plainly false flags. So
+read what follows as the shape of the thing on the same sample, not as this build's score.
 
 - **At the defaults**, one hunk per piece at 0.5, over the 172 of those changes that mode was
   scored on and the 21 real breaks in them: 14 of 21 caught, and 16 flags the reviewers did not
@@ -332,8 +375,9 @@ code and see. Every number above, per rule and per bar, is in
 ## What leaves your machine
 
 Sent to Jev, per request: up to four pieces of your diff, the path of the file each one came
-from, and the text of your rules. Nothing else: no repo name, no history, no file the diff
-does not touch. In team mode the same request goes to your own server, which adds the Jev key
+from, 25 unchanged lines of that file above and below each change (or, in `functions` mode, the
+whole function the change sits in), and the text of your rules. Nothing else: no repo name, no
+history, no file the diff does not touch. In team mode the same request goes to your own server, which adds the Jev key
 and forwards it.
 
 Kept on your machine and never committed, in `<git dir>/stop-rules/`: `state.json` (the
@@ -349,7 +393,7 @@ the repo, printed, or included in an error message.
 ```
 stop-rules init [--dir <repo>] [--agents a,b,c] [--team <url>] [--cut <mode>] [--json]
 stop-rules check [--dir <repo>] [--base <rev>] [--json]
-stop-rules score [--dir <repo>] [--base <rev>] [--diff <file>] [--json]
+stop-rules score [--dir <repo>] [--base <rev>] [--diff <file>] [--show-context] [--json]
 stop-rules hook [--dir <repo>] --agent <name>
 stop-rules team [--dir <repo>] <url>
 stop-rules login --jev-key-stdin | --token-stdin | --check [--dir <repo>]
@@ -367,7 +411,9 @@ stop-rules baseline --reset [--dir <repo>]
   without it, it uses the incremental baseline but never moves it, so it is safe to repeat.
 - **score** prints every piece with every rule's score and applies no cutoff, so you can see
   where your own code sits before you pick a bar. It changes nothing. `--diff <file>` scores
-  a unified diff file instead of the working tree.
+  a unified diff file instead of the working tree; a diff file has no file content, so there
+  are no lines around a change to send and the output says so. `--show-context` prints exactly
+  what Jev saw for each piece, which is the way to see the 25 lines for yourself.
 - **hook** is what the agents call. `--agent` says whose protocol to speak.
 - **team** writes the endpoint into `.stop-rules.json`. Commit that file.
 - **login** stores your Jev key or your team token, read from stdin so it never lands in
@@ -418,12 +464,20 @@ that is set but empty is an error, not a shrug.
 ## Limits, honestly
 
 - You need a Jev API key from TypeSafe.
-- Each piece is judged on its own, so rules about cross-file architecture or consistency
-  across a codebase are weak.
+- Each piece is judged on its own, with 25 lines of the same file around it and nothing from
+  any other file, so rules about cross-file architecture or consistency across a codebase are
+  weak.
+- Those 25 lines are read out of the new file whether or not the same change wrote them, so a
+  line the change added just outside the piece is shown to Jev as if it had always been there.
+  It is the code as it now stands, which is what the rule is about, but it is not a record of
+  what changed.
+- A piece that is bigger than 60,000 bytes on its own goes to Jev without those lines. The run
+  says which piece, in the report, in `check --json` and in `run.log`.
 - A piece is one diff hunk, so the agent is handed the hunk the fault sits in and finds the
-  exact line itself. A hunk can also start in the middle of a function, so the piece can have
-  no head. `"cut": "functions"` hands over the one function instead, and then a rule about how
-  two functions fit together is not seen at all.
+  exact line itself. A hunk can also start in the middle of a function, so what the agent is
+  handed can have no head, even though Jev saw the lines around it. `"cut": "functions"` hands
+  over the one function instead, and then a rule about how two functions fit together is not
+  seen at all.
 - In `functions` mode a file in a language with no grammar here is cut by diff hunk, and a file
   that will not parse is reported as not checked, never checked half way. The default mode
   parses nothing, so neither case exists there.
@@ -438,6 +492,14 @@ that is set but empty is an error, not a shrug.
 - `npx github:haystackeditor/stop-rules` is untested until this repo is public, so we cannot
   say whether it works. There is no `build` script and no install script, so npm has nothing
   to rebuild, but the only path we have run is a clone plus `node bin/stop-rules.mjs`.
+
+## Changelog
+
+- **20 September 2026, the code around each piece.** Jev now sees 25 unchanged lines above and
+  below every change, or the whole function in `functions` mode, and the claim sentence says so.
+  Both go into the cache key, so the first run after this upgrade asks every piece once more and
+  costs what a first run costs. Nothing you have to do. `score --show-context` prints what Jev
+  saw. The numbers behind it are in "What Jev sees" above.
 
 ## Contributing
 

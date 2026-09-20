@@ -46,9 +46,14 @@ node /path/to/stop-rules/bin/stop-rules.mjs score --cut functions
 
 Drop the flag to see the same file as one piece, which is what a default install does.
 
-Scores move between model versions. The ones in `docs/TUNING.md` are from 19 September 2026,
-when the service reported `jev-1.13.0`, which is also the version that scored `helper.diff`
-and `layers.diff`.
+Scores move between model versions. The ones in `docs/TUNING.md` were last run on 20 September
+2026, when the service reported `jev-1.13.0`, which is also the version that scored
+`helper.diff` and `layers.diff` the day before.
+
+A `--diff` run is the one case where Jev sees no code around the change, because a diff file has
+no file content to read it from. The scratch repository runs at the bottom of this file do carry
+it: 25 unchanged lines each way, or the whole function in `functions` mode. Add `--show-context`
+to any `score` run to print what Jev was sent.
 
 `layers.diff` is worth reading before you write a rule of that kind. Its last two files hold
 the same function twice, once under `handlers/` and once under `services/`, so the folder is

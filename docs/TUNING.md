@@ -47,7 +47,11 @@ you are looking at your code and not at ours.
 `stop-rules score --diff some.diff` scores a diff file instead of the working tree. A diff
 file has no file content, so it can never be cut into functions: in the default mode it is cut
 into one piece per hunk, which is what was asked for anyway, and if you ask for `functions` the
-output says it used hunks instead and why.
+output says it used hunks instead and why. It also has no lines around a change to send Jev, so
+that is the one mode where Jev sees the diff alone, and the output says that too.
+
+`stop-rules score --show-context` prints, under each piece, exactly what Jev was sent for it:
+the widened diff, or the diff and the whole function. Use it whenever a score surprises you.
 
 ## About the numbers in this file
 
@@ -59,10 +63,11 @@ Two kinds of number appear below.
   Your code will give you different numbers.
 - **Example scores** come from the small examples in
   [`examples/tuning/`](../examples/tuning), which we wrote for this file. Every one of them
-  is a real answer from the live service on 19 September 2026. Asked on the same day, the
-  service reported its version as `jev-1.13.0`. The tool asks for `jev-latest`. The printed
-  outputs in sections 2 and 4 were run again on that same day and that same version, in the
-  default cut mode, when the default cut changed from `functions` to `hunks`.
+  is a real answer from the live service. The scores below were last run on 20 September 2026,
+  when Jev started seeing the code around each piece; asked on that day, the service reported
+  its version as `jev-1.13.0`, the same version as the runs the day before, so the movement
+  between the two days is the new claim wording plus the ordinary movement between runs, and not
+  a new model. The tool asks for `jev-latest`.
 
 Two things about the numbers themselves. Scores drift between model versions, and they also
 move between runs on one version. We asked the five examples below seven times, with a cold
@@ -70,6 +75,80 @@ cache each time, minutes apart. The confident answers moved by a hundredth or tw
 borderline one moved from 0.45 to 0.80. So treat every number here as the shape of the thing,
 not as a constant, re-run `score` on your own code, and do not set a bar that sits right next
 to a score you care about.
+
+## What Jev sees
+
+This is not a knob, and it is the thing that changed most recently, so it comes before the
+knobs. Every score below was produced with it, and the last time a number in this file was
+measured without it, the text says so.
+
+Jev is sent, for each piece: the path of the file, the piece's diff with **25 unchanged lines
+above the change and 25 below**, read out of the snapshot, and the rules. In `functions` mode a
+piece that is one function carries **that whole function after the change** instead of the wide
+diff, and a piece of statements and declarations carries the wide diff. None of this changes
+what the agent is handed: the report prints the piece with the tool's own 8 lines of context,
+and the first line of the report says what Jev saw, once.
+
+```bash
+stop-rules score --show-context     # prints exactly what Jev saw, per piece
+```
+
+### The measurement behind it
+
+On the workbench, on 20 September 2026, over the same 240 real agent written changes, blind
+labelled with an adjudicator on every disagreement, which hold 31 real breaks, at the default
+bar of 0.5, cut one hunk per piece:
+
+| What Jev was shown | Real breaks caught, of 31 | Plainly false flags | Flags nobody has ruled on |
+|---|---|---|---|
+| the piece alone, which is what it sent before | 23 | 10 | 23 |
+| the piece with 25 lines around it, no parser | 21 | 7 | 13 |
+| the whole function, with tree-sitter | 21 | 10 | not counted |
+
+At a bar of 0.55 the wide form caught 16, with fewer doubtful flags than either the piece alone
+or the whole function. On a second, much smaller set of real agent sessions it caught 2 of the 3
+real breaks against 1 for the piece alone, and it found a missing doc comment the piece alone
+missed. Whole functions caught the same 2 of 3, and needed the parser to do it.
+
+What it costs: 7 of 1,358 clean pairs were newly flagged, which is the price of showing code the
+rule is not about. Input tokens went from about $0.11 to $0.21 per 1,000 changes at TypeSafe's
+published price. The wide form ships because it needs no parser, it works in every language, and
+it argues with you less.
+
+### What was tried and not built
+
+- **A whole small file.** Good where it applied. 57% of the real pieces come from files over
+  12 KB, so it does not apply often enough to be worth the code.
+- **Asking Jev whether it needs more information.** A second question, "the code shown is not
+  enough to decide this", answered "not enough" to 98% of the questions asked, and its answer
+  had no relation to whether more context moved the score (AUC 0.27). No signal.
+- **Widening only where that question asked for it.** 2 to 4 times the calls for no gain over
+  widening every piece. Do not rebuild either of these two.
+
+Two smaller measurements from the same work. Packing four pieces per call rather than one moved
+answers by about 0.02, so the packing stays. The claim sentence that names the code around the
+piece moved answers by 0.011 against the older one that named only the diff, and it is the
+wording the table above was measured with, so it is the wording that ships.
+
+### When a piece is too big to widen
+
+A request is capped at 60,000 bytes. If the wide form of one piece would put a request carrying
+only that piece over the cap, that piece goes to Jev with its diff alone. That is a recorded
+fact, never a quiet retreat: the piece, its lines and the byte count go in `run.log`, the count
+goes in `check --json` under `stats.tooBigToWiden`, and the first line of the report says how
+many pieces it happened to. Measured on 20 September 2026, a change that rolls thirty 900
+character lines into one:
+
+```json
+"tooBigToWiden": [ { "file": "src/rows.ts", "fromLine": 32, "toLine": 48, "bytes": 74830 } ]
+```
+
+```
+stop-rules: no rule violations in your latest changes. 1 piece was too big to widen, so Jev saw it without the code around it.
+```
+
+`score --diff` is the one case with no lines around a change at all, because a diff file has no
+file content to read them from. The output says so on its first line.
 
 ## 1. The bar: `threshold`
 
@@ -110,7 +189,8 @@ The rule is the starter rule about swallowed errors
 stop-rules score --diff examples/tuning/bar.diff --rules examples/tuning/rules-errors.md
 ```
 
-Seven runs, cold cache each time, same day, same model version:
+A diff file has no file content, so these five are the one case Jev sees no code around the
+change. Seven runs, cold cache each time, same day, same model version:
 
 | Example | What it is | Scores seen |
 |---|---|---|
@@ -129,6 +209,10 @@ How often each bar flagged each example, out of those seven runs:
 | 0.6 | 7 | 7 | 1 | 0 | 0 |
 | 0.7 | 7 | 7 | 1 | 0 | 0 |
 | 0.9 | 7 | 6 | 0 | 0 | 0 |
+
+Re-run once on 20 September 2026 under the new claim sentence, on `jev-1.13.0`, those five came
+back 0.92, 0.90, 0.46, 0.27 and 0.07, which is inside every range above. The seven-run study was
+not repeated.
 
 Four things to take from that.
 
@@ -243,7 +327,7 @@ bounded at 60,000 bytes.
 [`cutting.diff`](../examples/tuning/cutting.diff) adds one file with three functions. The
 middle one swallows an error. The other two are fine.
 
-The runs below are `stop-rules score` on that file in a scratch repository, on 19 September
+The runs below are `stop-rules score` on that file in a scratch repository, on 20 September
 2026, when the service reported `jev-1.13.0`.
 
 The default cut, one hunk, so one piece:
@@ -256,6 +340,10 @@ Scored the working tree against the last check, cut into one diff hunk each, wit
    0.92  Do not silently swallow errors. ...
 ```
 
+The file is new, so the one hunk already covers all of it and there is nothing around it to
+add. That is why this score is the same as the one measured before Jev was given the lines
+around a change.
+
 `score --cut functions`, four pieces:
 
 ```
@@ -263,34 +351,52 @@ stop-rules score: 4 pieces, 4 scores, 1 Jev calls, 0 answers from the cache.
 Scored the working tree against the last check, cut into whole functions, with tree-sitter.
 
 1. notify.ts lines 7-14 in loadTemplate
-   0.92  Do not silently swallow errors. ...
+   0.86  Do not silently swallow errors. ...
 
-2. notify.ts lines 15-19 in notify
-   0.45  Do not silently swallow errors. ...
+2. notify.ts lines 1-2 in top-level code
+   0.84  Do not silently swallow errors. ...
 
-3. notify.ts lines 1-2 in top-level code
-   0.08  Do not silently swallow errors. ...
+3. notify.ts lines 15-19 in notify
+   0.17  Do not silently swallow errors. ...
 
 4. notify.ts lines 3-6 in subjectFor
-   0.08  Do not silently swallow errors. ...
+   0.06  Do not silently swallow errors. ...
 ```
+
+Look at the second one, and be warned by it. The piece is two import lines, which break no
+rule, and it scored 0.08 before. It is not a function, so it goes to Jev with 25 lines around
+it, and in a 19 line file that window is the whole file, `loadTemplate` and its empty `catch`
+included. Jev now answers about what it can see: 0.84, over the default bar, on a piece whose
+added lines are two imports. Cutting into functions and then widening the pieces that are not
+functions works against itself on a small file. If you run `functions` mode and get flags on
+`top-level code`, run `score --show-context` on it and see what the window pulled in.
 
 Cutting into chunks gives the same single piece as the default here. A new file is one hunk, and
 19 added lines is under both the 30 line cut and the 12,000 byte one. The two part company on
 bigger changes: over the 240 change sample, `hunks` makes 804 pieces where `chunks` makes 240.
 
-Notice the 0.45 on `notify`, a function that breaks no rule. It calls the function that does.
-Cutting small does not make every piece obviously clean. That score has come back as 0.43, 0.45
-and 0.47 on different runs, which is under the default bar of 0.5 but not far under it, so a run
-that puts it over would hand the agent a second piece.
+`notify` scored 0.45 when it was sent alone, a function that breaks no rule but calls the one
+that does. With the whole function it is 0.17. Cutting small does not make every piece obviously
+clean, and the numbers near a bar move: read the shape.
 
-At the default bar of 0.5 all three modes flag this change once, and the agent is handed
-something different. `--cut functions`, eight lines:
+At the default bar of 0.5 the two parser-free modes flag this change once and `functions` flags
+it twice, and the agent is handed something different. `--cut functions`:
 
 ```
-1. notify.ts lines 7-14 in loadTemplate breaks 1 rule
+stop-rules: 2 rule violations in 2 places in your latest changes. Jev saw the whole function for 3 pieces and 25 lines around the other 1.
+Fix each one. If a rule truly should not apply here, leave the code and tell the user why.
+
+1. notify.ts lines 1-2 in top-level code breaks 1 rule
    Rule: Do not silently swallow errors. ...
-   Confidence: 0.92
+   Confidence: 0.84
+   The change this is about:
+   @@ -0,0 +1,2 @@ import { readFileSync } from "node:fs";
+   +import { readFileSync } from "node:fs";
+   +import { sendEmail } from "./email.js";
+
+2. notify.ts lines 7-14 in loadTemplate breaks 1 rule
+   Rule: Do not silently swallow errors. ...
+   Confidence: 0.87
    The change this is about:
    @@ -0,0 +7,8 @@ export function loadTemplate(file: string): string {
    +
@@ -306,6 +412,9 @@ something different. `--cut functions`, eight lines:
 The default mode, and chunks, hand over the whole file and the agent finds the fault itself:
 
 ```
+stop-rules: 1 rule violation in 1 place in your latest changes. Jev saw 25 lines around it.
+Fix each one. If a rule truly should not apply here, leave the code and tell the user why.
+
 1. notify.ts lines 1-19 breaks 1 rule
    Rule: Do not silently swallow errors. ...
    Confidence: 0.92
@@ -321,7 +430,9 @@ The default mode, and chunks, hand over the whole file and the agent finds the f
 ### The trade-offs
 
 The measured columns are over the same 172 changes, because that is what all three modes have
-scores for.
+scores for. They were measured with the piece alone, before Jev was given the code around it,
+so read them as how the three ways of cutting compare with each other and not as this build's
+score. The pieces, calls and token rows were re-run on 20 September 2026.
 
 | | `hunks`, the default | `functions` | `chunks` |
 |---|---|---|---|
@@ -331,7 +442,8 @@ scores for.
 | Pieces, 172 changes | 532 | 643 | 172 |
 | Jev requests, 172 changes | 214 | 247 | 172 |
 | Input tokens, 172 changes | 433,421 | 490,231 | 269,307 |
-| Pieces, calls and tokens on `cutting.diff` with one rule | 1 piece, 1 call, 569 in and 23 out | 4 pieces, 1 call, 1,042 in and 80 out | 1 piece, 1 call, 569 in and 23 out |
+| Pieces, calls and tokens on `cutting.diff` with one rule, 20 September 2026 | 1 piece, 1 call, 582 in and 23 out | 4 pieces, 1 call, 1,448 in and 80 out | 1 piece, 1 call, 582 in and 23 out |
+| What Jev is shown per piece | the piece plus 25 lines each way | the whole function, or 25 lines each way when the piece is not one | the piece plus 25 lines each way |
 | Real breaks caught at the default 0.5, of 21 | 14 | 11 | 9 |
 | Disputed flags at 0.5 | 16 | 26 | 6 |
 | Real breaks caught at 0.6, of 21 | 8 | 5 | 5 |
@@ -352,20 +464,23 @@ What you gain by switching, and lose:
 - **`hunks`**, the default, is bad at this: a new file is one giant hunk, so it gets cut blindly
   every 30 added lines with no regard for where a function starts or ends. Two functions that
   sit next to each other share a hunk. A hunk can start in the middle of a function, so the
-  agent is handed a piece of code with no head.
-- **`functions`** buys the agent exactly one function, named, with nothing else in it. It costs
-  the grammar files, which are megabytes in the repository, and it only knows the ten languages
-  listed above. A file it cannot parse is not checked at all, and a language whose grammar is
-  missing is not checked either.
+  agent is handed a piece of code with no head, even though Jev saw 25 lines around it.
+- **`functions`** buys the agent exactly one function, named, with nothing else in it, and Jev
+  the whole of that function. It costs the grammar files, which are megabytes in the repository,
+  and it only knows the ten languages listed above. A file it cannot parse is not checked at
+  all, and a language whose grammar is missing is not checked either. It has one more cost now:
+  the pieces that are not functions, which are the imports, constants and type declarations, are
+  small, and widening them by 25 lines each way pulls their neighbours in. The example above
+  turned two import lines into a 0.84.
 - **`chunks`** buys the fewest requests and the fewest tokens. It costs the most dilution: one
   bad line sits in a big diff, which is the quietest setting of the three and the one that
   misses most at a low bar, and the agent is handed a large diff to search.
 
 The parse behaviours are worth seeing for real. A file with broken syntax and a `.sql` file,
-with `--cut functions`, on 19 September 2026:
+with `--cut functions`, on 20 September 2026:
 
 ```
-stop-rules: no rule violations in the 1 piece that was checked, and 1 not checked, listed below.
+stop-rules: no rule violations in the 1 piece that was checked, and 1 not checked, listed below. Jev saw 25 lines around it.
 
 Not checked (1): broken.ts lines 1-5: could not be parsed as TypeScript
 ```
@@ -377,6 +492,9 @@ Not checked (1): broken.ts lines 1-5: could not be parsed as TypeScript
 The same repository in the default mode checks the broken file and finds the fault in it:
 
 ```
+stop-rules: 1 rule violation in 1 place in your latest changes. Jev saw 25 lines around it.
+Fix each one. If a rule truly should not apply here, leave the code and tell the user why.
+
 1. broken.ts lines 1-5 breaks 1 rule
    Rule: Do not silently swallow errors. ...
    Confidence: 0.96
@@ -428,10 +546,10 @@ stop-rules score --diff examples/tuning/helper.diff --rules examples/tuning/rule
 
 | Piece | What it is | Scores seen |
 |---|---|---|
-| `src/user.ts` | calls `fetch` directly, which the rule forbids | 0.92, 0.92 |
-| `src/team.ts` | calls `httpGet`, which the rule asks for | 0.10, 0.10 |
+| `src/user.ts` | calls `fetch` directly, which the rule forbids | 0.92, 0.92, 0.93 |
+| `src/team.ts` | calls `httpGet`, which the rule asks for | 0.10, 0.10, 0.11 |
 
-Two runs, cold cache each, 0.82 apart. That gap is what a rule of this kind buys you: any bar
+Three runs, cold cache each, the third on 20 September 2026 under the new claim sentence, 0.82 apart. That gap is what a rule of this kind buys you: any bar
 between 0.2 and 0.9 gives the same answer.
 
 #### Careful: a rule whose answer depends on which layer or folder the file is in
@@ -450,10 +568,10 @@ stop-rules score --diff examples/tuning/layers.diff --rules examples/tuning/rule
 
 | Piece | What it is | Scores seen |
 |---|---|---|
-| `src/handlers/orders.ts` | a handler taking a `Request`, querying the database | 0.93, 0.93 |
-| `src/handlers/report.ts` | a plain function in `handlers/`, querying the database | 0.89, 0.89 |
-| `src/services/report.ts` | the same function in `services/`, which the rule allows | 0.19, 0.19 |
-| `src/services/orders.ts` | a service reading one row, which the rule allows | 0.10, 0.11 |
+| `src/handlers/orders.ts` | a handler taking a `Request`, querying the database | 0.93, 0.93, 0.93 |
+| `src/handlers/report.ts` | a plain function in `handlers/`, querying the database | 0.89, 0.89, 0.92 |
+| `src/services/report.ts` | the same function in `services/`, which the rule allows | 0.19, 0.19, 0.23 |
+| `src/services/orders.ts` | a service reading one row, which the rule allows | 0.10, 0.11, 0.10 |
 
 That is the opposite of the experiment, and we are not going to pretend the two agree. On
 these four files the folder in the path was enough, even for the pair whose code is identical.
@@ -461,7 +579,7 @@ In the experiment, on real handlers and services, it was not. The difference we 
 is what the piece carries: a path with `handlers/` in it and code that obviously belongs to
 one layer is a signal, and a real file whose name says nothing about its layer leaves Jev
 guessing. So this kind of rule is not reliable, it is conditional, and `score` on your own
-code is the only way to find out which side yours falls on. Two runs each, one pair of
+code is the only way to find out which side yours falls on. Three runs each, the third on 20 September 2026 under the new claim sentence, one pair of
 examples, one experiment.
 
 #### Does not work: a rule about something that is missing
@@ -510,23 +628,24 @@ comment, a local variable nothing reads, and an option nothing uses.
 stop-rules score --diff examples/tuning/rules-demo.diff --rules examples/tuning/rules-with-examples.md
 ```
 
-Two runs each, on different days of the same version:
+Three runs each, on three days of the same model version. The third, on 20 September 2026, is
+the first under the claim sentence that names the code around the piece:
 
 | Rules file | The rule | Scores seen |
 |---|---|---|
-| [`rules-with-examples.md`](../examples/tuning/rules-with-examples.md) | Do not write comments that only restate what the code does, or that narrate the change being made ("now we also handle X", "fixed the bug where"). A comment that explains why the code must be this way is fine. | 0.89, 0.89 |
-| [`rules-terse.md`](../examples/tuning/rules-terse.md) | No useless comments. | 0.25, 0.28 |
-| [`rules-linter.md`](../examples/tuning/rules-linter.md) | Do not leave a variable that nothing reads. | 0.57, 0.62 |
-| [`rules-codebase.md`](../examples/tuning/rules-codebase.md) | Do not add configuration options, parameters or abstractions that nothing in this change uses. | 0.62, 0.66 |
+| [`rules-with-examples.md`](../examples/tuning/rules-with-examples.md) | Do not write comments that only restate what the code does, or that narrate the change being made ("now we also handle X", "fixed the bug where"). A comment that explains why the code must be this way is fine. | 0.89, 0.89, 0.87 |
+| [`rules-terse.md`](../examples/tuning/rules-terse.md) | No useless comments. | 0.25, 0.28, 0.32 |
+| [`rules-linter.md`](../examples/tuning/rules-linter.md) | Do not leave a variable that nothing reads. | 0.57, 0.62, 0.66 |
+| [`rules-codebase.md`](../examples/tuning/rules-codebase.md) | Do not add configuration options, parameters or abstractions that nothing in this change uses. | 0.62, 0.66, 0.73 |
 
 The same comment, in the same change, is a 0.89 under the long rule and a 0.25 under the
-short one. The examples inside the rule are doing the work.
+short one, and on the third run 0.87 against 0.32. The examples inside the rule are doing the work.
 
-The linter rule scores around 0.6 on a variable that really is unused. ESLint's
+The linter rule scores between 0.57 and 0.66 on a variable that really is unused. ESLint's
 `no-unused-vars` gives you the same answer for nothing, every time, with the line number.
 Paying a Jev question for it buys you a maybe.
 
-The codebase rule scores around 0.64 on an option that nothing in the piece uses. Whether
+The codebase rule scores between 0.62 and 0.73 on an option that nothing in the piece uses. Whether
 anything in the repository uses it is a question this piece cannot answer, so a score like
 that is a guess dressed as a number.
 
@@ -545,11 +664,11 @@ The same change, [`cutting.diff`](../examples/tuning/cutting.diff), one piece, c
 
 | Rules | Questions | Calls | Input tokens | Output tokens |
 |---|---|---|---|---|
-| [3](../examples/tuning/rules-three.md) | 3 | 1 | 657 | 61 |
-| [12](../examples/tuning/rules-twelve.md) | 12 | 1 | 1,078 | 234 |
+| [3](../examples/tuning/rules-three.md) | 3 | 1 | 696 | 61 |
+| [12](../examples/tuning/rules-twelve.md) | 12 | 1 | 1,234 | 234 |
 
 Four times the rules is not four times the cost, because the piece is sent once and the rules
-ride along with it. It is about 1.6 times the input tokens here. Five to fifteen rules is the
+ride along with it. It is about 1.8 times the input tokens here. Five to fifteen rules is the
 range we would stay in, for noise rather than for money.
 
 ## 4. Calls per run: `maxCalls`
@@ -566,7 +685,7 @@ stop-rules check --max-calls 1
 ```
 
 ```
-stop-rules: no rule violations in the 4 pieces that were checked, and 6 not checked, listed below.
+stop-rules: no rule violations in the 4 pieces that were checked, and 6 not checked, listed below. Jev saw 25 lines around it.
 
 Not checked (6):
   src/step4.ts lines 1-4: call budget exhausted
@@ -581,8 +700,8 @@ The one request covered four pieces. The next run picks the rest up, and the fou
 answered cost nothing because they are in the cache:
 
 ```json
-{"mode":"check","cut":"hunks","pieces":10,"checked":4,"calls":1,"cacheHits":0,"notChecked":6}
-{"mode":"check","cut":"hunks","pieces":10,"checked":10,"calls":2,"cacheHits":4,"notChecked":0}
+{"mode":"check","cut":"hunks","pieces":10,"checked":4,"calls":1,"cacheHits":0,"notChecked":6,"widened":10,"withFunction":0,"tooBigToWiden":0}
+{"mode":"check","cut":"hunks","pieces":10,"checked":10,"calls":2,"cacheHits":4,"notChecked":0,"widened":10,"withFunction":0,"tooBigToWiden":0}
 ```
 
 `checked` is how many pieces got an answer. When it is 0 and `files` is not, nothing in the
@@ -604,22 +723,26 @@ That is <https://typesafe.ai/blog/introducing-system-one-models-and-jev>, posted
 this paragraph, and note that the price is theirs to set, not ours. Nothing in the tool
 knows a price: `check --json` and `run.log` give you input tokens, and you do the sum.
 
-At $0.042 per million input tokens, and output free, from our own measured runs:
+At $0.042 per million input tokens, and output free, from our own measured runs. The first four
+rows were re-run on 20 September 2026, with the lines around each piece in them. The three
+sample rows were measured before that change, with the piece alone:
 
 | What was measured | Input tokens | Cost |
 |---|---|---|
-| One 19 line file, one rule, cut the default way (1 piece) | 569 | $0.00002 |
-| The same file, cut into functions (4 pieces) | 1,042 | $0.00004 |
-| The same file with 3 rules | 657 | $0.00003 |
-| The same file with 12 rules | 1,078 | $0.00005 |
-| 172 sample changes, cut the default way | 433,421 | $0.018 |
-| All 240 sample changes, cut into functions | 668,891 | $0.028 |
-| All 240 sample changes, cut into chunks | 383,892 | $0.016 |
+| One 19 line file, one rule, cut the default way (1 piece) | 582 | $0.00002 |
+| The same file, cut into functions (4 pieces) | 1,448 | $0.00006 |
+| The same file with 3 rules | 696 | $0.00003 |
+| The same file with 12 rules | 1,234 | $0.00005 |
+| 172 sample changes, cut the default way, the piece alone | 433,421 | $0.018 |
+| All 240 sample changes, cut into functions, the piece alone | 668,891 | $0.028 |
+| All 240 sample changes, cut into chunks, the piece alone | 383,892 | $0.016 |
 
 Per change that works out at 2,520 input tokens on the default cut, which is $0.00011, and
 2,787 cut into whole functions, which is $0.00012. A thousand agent turns of that size cost
-about 11 or 12 cents. Going from 3 rules to 12 raised the input tokens by about 60 percent on
-our one piece test, and a second run over the same code is free because the answers are cached.
+about 11 or 12 cents with the piece alone. The lines around each piece roughly double that: the
+workbench measured $0.21 per 1,000 changes against $0.11 on the same sample. Going from 3 rules
+to 12 raised the input tokens by about 80 percent on our one piece test, and a second run over
+the same code is free because the answers are cached.
 
 Latency, from the same runs: the median change took 192 ms of Jev time on the default cut and
 203 ms cut into functions. The check itself adds the git snapshot, and in `functions` mode the
@@ -658,6 +781,9 @@ These are not knobs. Each one was measured, and none of them is worth a setting.
   merged up to 40 lines. A function is always its own piece, whatever its size.
 - **30 added lines and 3 trailing context lines per piece in hunks mode.** That is the
   splitting the sample was measured with.
+- **25 unchanged lines around each change, for Jev.** The width that was measured. Narrower was
+  not tried; wider was not tried either, because the whole file was, and it did not apply often
+  enough. See "What Jev sees" above for the table and for the two things that did not work.
 - **Three rounds.** After three turns of the same findings the tool stops waking the agent
   and leaves them for you. An agent that has not fixed something in three tries is not going
   to.

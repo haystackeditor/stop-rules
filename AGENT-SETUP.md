@@ -123,7 +123,9 @@ node .stop-rules/stop-rules.mjs score
 ```
 
 That prints every piece with every rule's score and applies no bar, so the human can see
-where their own code sits before they settle on one.
+where their own code sits before they settle on one. Jev is shown each piece with 25 unchanged
+lines of the file above and below the change, or the whole function in `functions` mode, so if a
+score surprises the human, run `score --show-context` and read what Jev actually saw.
 
 ## 6. Write the rules from the team's own documents
 
