@@ -96,8 +96,9 @@ five more flags that are plainly wrong. We picked the catching. A team that is m
 noise than by a miss sets `"threshold": 0.6` and gives up half the catches. Nobody has measured
 a bar between the two on this sample, so do not read anything into 0.55.
 
-The later run in the tables further down covers all six rules and no adjudication, so its
-counts are lower and its flags mostly unjudged. It puts the two bars in the same order.
+The later run in the tables further down uses all six starter rules, and nobody has ruled on
+most of the flags it raises, so its counts are lower and its noise column is mostly unjudged.
+It puts the two bars in the same order.
 
 ### Five examples, one rule
 

@@ -90,7 +90,7 @@ measured totals behind each one, so read it before you answer questions about it
 
 | Knob | Default | What turning it does |
 |---|---|---|
-| `cut` | `hunks` | `hunks` uses no parser, is one file of 334 KB, covers every language, and hands the agent the git diff hunk the fault sits in. `functions` uses tree-sitter, hands the agent the one function at fault instead, and copies a few megabytes of grammar files into `.stop-rules/`. `chunks` is the default install with bigger pieces, up to 12,000 bytes, which is the quietest of the three and hands over the most code. |
+| `cut` | `hunks` | `hunks` uses no parser, is one file of 334 KB, covers every language, and hands the agent the git diff hunk the fault sits in. `functions` uses tree-sitter, hands the agent the one function at fault instead, and copies a few megabytes of grammar files into `.stop-rules/`. `chunks` installs the same one file as the default and uses bigger pieces, up to 12,000 bytes, which is the quietest of the three and hands over the most code. |
 | `threshold` | `0.5` | The bar a score must reach to count. Lower catches more and flags more. Measured on 240 real changes cut the default way, with 29 real problems in them: 0.5 caught 22 with 6 plainly false flags and 5 arguable, and 0.6 caught 11 with 1 plainly false flag. |
 | `maxCalls` | `60` | Requests to Jev in one run. When it runs out, the rest of the change is reported as not checked and picked up on the next run. |
 | `endpoint` | none, so each person uses their own Jev key | Team mode: questions go to your team's server, which holds the one key. |
