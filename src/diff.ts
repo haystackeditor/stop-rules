@@ -113,7 +113,7 @@ export interface Piece extends Chunk {
   /** The new file lines this piece covers. */
   fromLine: number;
   toLine: number;
-  cut: "unit" | "hunk";
+  cut: "unit" | "hunk" | "chunk";
 }
 
 /**

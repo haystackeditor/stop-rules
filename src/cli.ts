@@ -32,7 +32,7 @@ Options:
   --dir <path>         init mode only: the repository to install into (default: this one)
   --team <endpoint>    init mode only: use your team's stop-rules server, not your own key
   --rules <path>       rules file (default <repo root>/.stop-rules.md)
-  --cut <mode>         functions (tree-sitter) or hunks (no parser) (default ${DEFAULT_CUT})
+  --cut <mode>         functions (tree-sitter), hunks or chunks (no parser) (default ${DEFAULT_CUT})
   --threshold <0..1>   score at or above which a rule counts as violated (default ${DEFAULT_THRESHOLD})
   --max-calls <n>      hard ceiling on requests to Jev in one run (default ${DEFAULT_MAX_CALLS})
   --base <rev>         check and score modes: diff this revision against the working tree
@@ -168,8 +168,8 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
       case "--cut": {
         i += 1;
         const value = take(i, "--cut");
-        if (value !== "functions" && value !== "hunks") {
-          throw new UsageError("--cut must be functions or hunks");
+        if (value !== "functions" && value !== "hunks" && value !== "chunks") {
+          throw new UsageError("--cut must be functions, hunks or chunks");
         }
         parsed.cut = value;
         break;

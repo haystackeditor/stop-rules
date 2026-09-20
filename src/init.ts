@@ -51,7 +51,7 @@ export interface InitGrammars {
 export interface InitReport {
   ok: boolean;
   repo: string;
-  /** How this repo will cut a change into pieces. `hunks` needs no parser files. */
+  /** How this repo will cut a change into pieces. Only `functions` needs parser files. */
   cut: CutMode;
   /** Team mode when this repo sends its questions to a team server, local mode otherwise. */
   mode: "team" | "local";
@@ -77,7 +77,7 @@ export interface InitOptions {
   selfPath: string;
   /** Team mode: the stop-rules server every developer's hook should send questions to. */
   team?: string;
-  /** How this repo cuts a change into pieces. `hunks` copies no parser files. */
+  /** How this repo cuts a change into pieces. Only `functions` copies parser files. */
   cut?: CutMode;
   /** Environment, so an endpoint already set in it counts as team mode. */
   env: NodeJS.ProcessEnv;
@@ -210,13 +210,13 @@ export async function init(options: InitOptions): Promise<InitReport> {
     }
   }
 
-  // 3b. The parser and the grammars, in functions mode. Hunks mode parses nothing, so it
-  // copies no wasm files and .stop-rules holds only the one script.
+  // 3b. The parser and the grammars, in functions mode. The other modes parse nothing, so
+  // they copy no wasm files and .stop-rules holds only the one script.
   try {
     report.grammars =
-      cut === "hunks"
-        ? { languages: [], added: [], kept: [], bytes: await folderBytes(path.join(root, VENDOR_DIR)) }
-        : await copyGrammars(root);
+      cut === "functions"
+        ? await copyGrammars(root)
+        : { languages: [], added: [], kept: [], bytes: await folderBytes(path.join(root, VENDOR_DIR)) };
   } catch (error) {
     return failure(root, error instanceof Error ? error.message : String(error));
   }
@@ -268,7 +268,7 @@ export async function init(options: InitOptions): Promise<InitReport> {
       : 'Give it your own Jev key from TypeSafe: set TYPESAFE_API_KEY, or run printf %s "$KEY" | stop-rules login --jev-key-stdin',
   );
   report.todo.push(`Edit ${report.rules.path} so it says what your team actually cares about.`);
-  const vendored = cut === "hunks" ? "the checker" : "the checker and its grammars";
+  const vendored = cut === "functions" ? "the checker and its grammars" : "the checker";
   report.todo.push(
     report.mode === "team"
       ? `Commit ${VENDOR_DIR}/ (${vendored}), ${SETTINGS_FILE} and the config files, so teammates and cloud agents get the check too.`
@@ -373,9 +373,9 @@ export function renderInit(report: InitReport): string[] {
   );
   const grammars = report.grammars;
   const megabytes = (grammars.bytes / 1_000_000).toFixed(1);
-  if (report.cut === "hunks") {
+  if (report.cut !== "functions") {
     lines.push(
-      `  cut: hunks, so no parser and no grammars were copied (${VENDOR_DIR} is ${megabytes} MB)`,
+      `  cut: ${report.cut}, so no parser and no grammars were copied (${VENDOR_DIR} is ${megabytes} MB)`,
     );
   } else {
     lines.push(

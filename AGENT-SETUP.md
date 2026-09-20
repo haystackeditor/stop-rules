@@ -78,7 +78,7 @@ measured totals behind each one, so read it before you answer questions about it
 
 | Knob | Default | What turning it does |
 |---|---|---|
-| `cut` | `functions` | `functions` uses tree-sitter, hands the agent the one function at fault, and copies a few megabytes of parser files into `.stop-rules/`. `hunks` uses no parser, is one 384 KB file, covers every language, and hands the agent the whole diff hunk. |
+| `cut` | `functions` | `functions` uses tree-sitter, hands the agent the one function at fault, and copies a few megabytes of parser files into `.stop-rules/`. `hunks` uses no parser, is one 384 KB file, covers every language, and hands the agent the whole diff hunk. `chunks` is the same install with bigger pieces, up to 12,000 bytes, which is the quietest of the three and hands over the most code. |
 | `threshold` | `0.6` | The bar a score must reach to count. Lower catches more and flags more. On our 240 change sample, dropping from 0.6 to 0.5 doubled both the real breaks caught and the flags the reviewers disagreed with. |
 | `maxCalls` | `60` | Requests to Jev in one run. When it runs out, the rest of the change is reported as not checked and picked up on the next run. |
 | `endpoint` | none, so each person uses their own Jev key | Team mode: questions go to your team's server, which holds the one key. |
@@ -91,7 +91,7 @@ something to put in it.
 Once they choose:
 
 ```bash
-# hunks mode, no parser files at all
+# hunks mode, no parser files at all (chunks is the same install, bigger pieces)
 node /tmp/stop-rules/bin/stop-rules.mjs init --dir /path/to/repo --cut hunks --json
 ```
 
@@ -251,7 +251,7 @@ Never commit, and never print:
 | `Jev rejected the API key.` | The key is wrong or revoked. Store the right one. |
 | `the team token is missing or wrong; run stop-rules login` | The server said 401. Get the current token from the human and store it again. |
 | `no team token for <url>. Store one with: printf %s "$TOKEN" \| stop-rules login --token-stdin` | Team mode is configured but this machine has no token. |
-| `<repo>/.stop-rules.json sets "x", which stop-rules does not know. The settings are endpoint, cut, threshold, maxCalls.` | A typo in the settings file. Fix that one key. The same shape of message names a wrong type or a value out of range. |
+| `<repo>/.stop-rules.json sets "x", which stop-rules does not know. The settings are endpoint, cut, threshold, maxCalls.` | A typo in the settings file. Fix that one key. The same shape of message names a wrong type, a value out of range, or a `cut` that is not functions, hunks or chunks. |
 | `TYPESAFE_API_KEY is set but empty. Unset it or put your key in it.` | An empty variable beats a stored key, so it has to be one or the other. Same for any other variable set to nothing. |
 | `no rules file at <path>. Run "stop-rules init" to create one.` | `.stop-rules.md` is missing. Run `init` in that repo. |
 | `no rules found in <path>. Each top-level list item is one rule.` | The rules file has no top-level bullets. Rules are `- ` items at column 0. |

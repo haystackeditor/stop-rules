@@ -21,7 +21,7 @@ Every key is optional.
 | Knob | File key | Flag | Default |
 |---|---|---|---|
 | Where questions go | `endpoint` | `--team <url>` on `init` | your own Jev key |
-| How a change is cut into pieces | `cut` | `--cut functions\|hunks` | `functions` |
+| How a change is cut into pieces | `cut` | `--cut functions\|hunks\|chunks` | `functions` |
 | The bar a score must reach | `threshold` | `--threshold <0..1>` | `0.6` |
 | Requests to Jev in one run | `maxCalls` | `--max-calls <n>` | `60` |
 
@@ -40,8 +40,8 @@ baseline moves and nothing is marked as checked. It is the honest way to pick a 
 you are looking at your code and not at ours.
 
 `stop-rules score --diff some.diff` scores a diff file instead of the working tree. A diff
-file has no file content to parse, so every file in it is cut by hunk, and the output says
-so.
+file has no file content, so it cannot be cut into functions, and the output says which cut
+was used instead.
 
 ## About the numbers in this file
 
@@ -56,8 +56,10 @@ Two kinds of number appear below.
   is a real answer from the live service on 19 September 2026. Asked on the same day, the
   service reported its version as `jev-1.13.0`. The tool asks for `jev-latest`.
 
-Scores drift between model versions. Treat every number here as the shape of the thing, not
-as a constant. Re-run `score` on your own code after a model change.
+Two things about the numbers themselves. Scores drift between model versions. They also move
+a little between runs: the same piece and the same rule came back 0.92 once and 0.93 another
+time, minutes apart, on the same version. Treat every number here as the shape of the thing,
+not as a constant, and re-run `score` on your own code after a model change.
 
 ## 1. The bar: `threshold`
 
@@ -96,31 +98,31 @@ Which bar lets which one through:
 | 0.7 | subtle, swallow, cachemiss |
 | 0.9 | subtle, swallow |
 
-Two things to take from that.
+Three things to take from that.
 
 - On clear cases the bar does not matter. Anything from 0.3 to 0.7 gives the same three
   flags here, because the service is not sitting on the fence about any of these five.
 - `cachemiss.ts` is the one that will annoy you. It scores 0.80, and whether it is a real
-  break depends on a decision the piece cannot show you: is a broken cache the same as a
-  cache miss for this caller. If your codebase is full of that pattern on purpose, a bar of
-  0.6 will keep flagging it, and the answer is to reword the rule, not to move the bar.
+  break depends on a decision the piece cannot show: is a broken cache the same as a cache
+  miss for this caller. If your codebase is full of that pattern on purpose, a bar of 0.6
+  will keep flagging it, and the answer is to reword the rule, not to move the bar.
 - We hoped `notfound.ts` would be a plain false alarm to show off a low score. It scored
   0.25, so it is not one. That is what the example really shows: a `catch` that rethrows what
   it cannot answer for reads as fine to the service.
 
-### The measured table
+### The measured tables
 
-Each row is one bar. "Real breaks caught" counts (change, rule) pairs the reviewers, with the
-adjudicator's ruling where there is one, call a real break: 32 of the 1,440 pairs, with 12
-more left out because the adjudicator called them arguable. "Flags the reviewers did not
-agree with" counts flags on a pair the reviewer marked clean. Those split four ways by what
-the adjudicator said in the earlier round. Most of them have **no ruling**: the adjudicator
-only looked at the disputes that came up at 0.5 on whole chunks, so a flag with no ruling
-here is neither a false alarm nor a real break. It is unjudged, and we are not guessing.
+"Real breaks caught" counts (change, rule) pairs the reviewers, with the adjudicator's ruling
+where there is one, call a real break. "Disputed flags" counts flags on a pair the reviewer
+marked clean, and they split four ways by what the adjudicator said in the earlier round.
+Most have **no ruling**: the adjudicator only looked at the disputes that came up at 0.5 on
+whole chunks, so a flag with no ruling is neither a false alarm nor a real break. It is
+unjudged, and we are not guessing. Pairs the adjudicator called arguable are left out of both
+counts: 12 of them in the 240 change set.
 
-Cut into whole functions, the default:
+Cut into whole functions, the default, over all 240 changes and their 32 real breaks:
 
-| Bar | Real breaks caught | Flags the reviewers did not agree with | Ruled not a break | Ruled arguable | Ruled real | No ruling |
+| Bar | Real breaks caught | Disputed flags | Ruled not a break | Ruled arguable | Ruled real | No ruling |
 |---|---|---|---|---|---|---|
 | 0.3 | 30 of 32 | 157 | 18 | 9 | 1 | 129 |
 | 0.4 | 27 of 32 | 79 | 15 | 7 | 1 | 56 |
@@ -128,9 +130,9 @@ Cut into whole functions, the default:
 | 0.6 | 10 of 32 | 19 | 5 | 2 | 0 | 12 |
 | 0.7 | 3 of 32 | 3 | 1 | 0 | 0 | 2 |
 
-Cut by diff hunk:
+Cut into chunks, over all 240 changes:
 
-| Bar | Real breaks caught | Flags the reviewers did not agree with | Ruled not a break | Ruled arguable | Ruled real | No ruling |
+| Bar | Real breaks caught | Disputed flags | Ruled not a break | Ruled arguable | Ruled real | No ruling |
 |---|---|---|---|---|---|---|
 | 0.3 | 28 of 32 | 90 | 18 | 10 | 1 | 61 |
 | 0.4 | 26 of 32 | 31 | 9 | 7 | 1 | 14 |
@@ -138,90 +140,91 @@ Cut by diff hunk:
 | 0.6 | 9 of 32 | 1 | 0 | 0 | 0 | 1 |
 | 0.7 | 4 of 32 | 1 | 0 | 0 | 0 | 1 |
 
-Per rule at 0.5, cut into whole functions:
+Cut into one hunk per piece, over the first 172 of those changes and their 21 real breaks.
+That mode stopped at 172 because the live call budget for this measurement ran out:
 
-| Rule | Real breaks caught | Pairs flagged | Flags the reviewers did not agree with |
+| Bar | Real breaks caught | Disputed flags | Ruled not a break | Ruled arguable | Ruled real | No ruling |
+|---|---|---|---|---|---|---|
+| 0.3 | 18 of 21 | 80 | 13 | 4 | 0 | 63 |
+| 0.4 | 18 of 21 | 33 | 8 | 3 | 0 | 22 |
+| 0.5 | 14 of 21 | 16 | 5 | 3 | 0 | 8 |
+| 0.6 | 8 of 21 | 2 | 1 | 0 | 0 | 1 |
+| 0.7 | 2 of 21 | 0 | 0 | 0 | 0 | 0 |
+
+Per rule at 0.5. Whole functions and chunks are over all 240 changes, hunks over 172:
+
+| Rule | functions | hunks | chunks |
 |---|---|---|---|
-| swallowed errors | 9 of 10 | 12 | 3 |
-| hidden fallbacks | 2 of 4 | 3 | 2 |
-| narrating comments | 5 of 11 | 16 | 11 |
-| weakened tests | 3 of 5 | 5 | 2 |
-| hardcoded to pass | 1 of 1 | 13 | 12 |
-| stubs and fake data | 0 of 1 | 8 | 8 |
-
-Per rule at 0.5, cut by diff hunk:
-
-| Rule | Real breaks caught | Pairs flagged | Flags the reviewers did not agree with |
-|---|---|---|---|
-| swallowed errors | 7 of 10 | 9 | 2 |
-| hidden fallbacks | 1 of 4 | 3 | 3 |
-| narrating comments | 5 of 11 | 8 | 3 |
-| weakened tests | 3 of 5 | 3 | 0 |
-| hardcoded to pass | 1 of 1 | 5 | 4 |
-| stubs and fake data | 0 of 1 | 0 | 0 |
+| swallowed errors | 9 of 10 caught, 3 disputed | 4 of 5, 2 | 7 of 10, 2 |
+| hidden fallbacks | 2 of 4, 2 | 1 of 3, 0 | 1 of 4, 3 |
+| narrating comments | 5 of 11, 11 | 5 of 8, 6 | 5 of 11, 3 |
+| weakened tests | 3 of 5, 2 | 3 of 4, 0 | 3 of 5, 0 |
+| hardcoded to pass | 1 of 1, 12 | 1 of 1, 8 | 1 of 1, 4 |
+| stubs and fake data | 0 of 1, 8 | 0 of 0, 0 | 0 of 1, 0 |
 
 What the shape says: every step down the bar buys catches and pays in noise, and the noise
 grows faster than the catches. From 0.6 to 0.5 on whole functions, catches double from 10 to
 20 and disputed flags double from 19 to 38. From 0.5 to 0.3, catches rise by half again and
 disputed flags go up four times.
 
-## 2. Cutting: `functions` or `hunks`
+## 2. Cutting: `functions`, `hunks` or `chunks`
 
-`functions` is the default. Each changed file is parsed with tree-sitter and each function,
-method, constructor or accessor becomes a piece of its own. Everything else groups with its
-neighbours, up to 40 added lines.
+Three ways to cut a change into the pieces that get judged.
 
-`hunks` uses no parser at all. Each file's diff is cut into pieces of whole diff hunks, up to
-12,000 bytes each, and a hunk bigger than that is halved until it fits.
+- **`functions`**, the default. Each changed file is parsed with tree-sitter. Each function,
+  method, constructor or accessor becomes a piece of its own. Everything else groups with its
+  neighbours, up to 40 added lines.
+- **`hunks`**. One diff hunk per piece, no parser. A hunk with more than 30 added lines is
+  cut right after the 30th, taking up to 3 trailing context lines with it, and each piece
+  carries a recomputed `@@` header.
+- **`chunks`**. Also no parser. A file's hunks are grouped into pieces of up to 12,000 bytes,
+  and a hunk bigger than that is halved until it fits.
 
 ```bash
 stop-rules init --dir /path/to/repo --cut hunks   # copies no parser files
-stop-rules check --cut hunks                      # one run, either way
+stop-rules check --cut chunks                     # one run, any mode
 ```
 
-### The same change, both ways
+All three then go through the same packing: four pieces per request, and a request is also
+bounded at 60,000 bytes.
+
+### The same change, three ways
 
 [`cutting.diff`](../examples/tuning/cutting.diff) adds one file with three functions. The
 middle one swallows an error. The other two are fine.
 
-Cut by hunk:
-
-```bash
-stop-rules score --diff examples/tuning/cutting.diff --rules examples/tuning/rules-errors.md
-```
-
-```
-1. notify.ts lines 1-19
-   0.93  Do not silently swallow errors. ...
-```
-
-Cut into whole functions, which needs the file itself, so this one runs in a repository. Put
-[`cutting/notify.ts`](../examples/tuning/cutting/notify.ts) in an empty repository with one
-commit, copy `rules-errors.md` to `.stop-rules.md`, and run `stop-rules score`:
+Cut into whole functions, four pieces:
 
 ```
 1. notify.ts lines 7-14 in loadTemplate
    0.92  Do not silently swallow errors. ...
 
 2. notify.ts lines 15-19 in notify
-   0.46  Do not silently swallow errors. ...
+   0.47  Do not silently swallow errors. ...
 
-3. notify.ts lines 3-6 in subjectFor
-   0.09  Do not silently swallow errors. ...
+3. notify.ts lines 1-2 in top-level code
+   0.08  Do not silently swallow errors. ...
 
-4. notify.ts lines 1-2 in top-level code
+4. notify.ts lines 3-6 in subjectFor
    0.08  Do not silently swallow errors. ...
 ```
 
-The same file scored 0.93 as one piece in the diff file and 0.92 as a function in the
-repository. A diff file's header lines are not the ones git writes, so the text asked about
-is not byte for byte the same, and the answer moved by a hundredth. Expect that much
-movement anywhere.
+Cut into hunks, and cut into chunks, one piece either way:
 
-At a bar of 0.6 both modes flag this change once, but the agent is handed something
-different.
+```
+1. notify.ts lines 1-19
+   0.93  Do not silently swallow errors. ...
+```
 
-Cut into whole functions, `check` hands over eight lines:
+A new file is one hunk, and 19 added lines is under both the 30 line cut and the 12,000 byte
+one, so `hunks` and `chunks` are the same single piece here. They part company on bigger
+changes: over the 240 change sample, `hunks` makes 804 pieces where `chunks` makes 240.
+
+Notice the 0.47 on `notify`, a function that breaks no rule. It calls the function that does.
+Cutting small does not make every piece obviously clean.
+
+At a bar of 0.6 all three modes flag this change once, and the agent is handed something
+different. Whole functions, eight lines:
 
 ```
 1. notify.ts lines 7-14 in loadTemplate breaks 1 rule
@@ -239,12 +242,12 @@ Cut into whole functions, `check` hands over eight lines:
    +}
 ```
 
-Cut by hunk, `check` hands over the whole file and lets the agent find the fault:
+Hunks or chunks, the whole file, and the agent finds the fault itself:
 
 ```
 1. notify.ts lines 1-19 breaks 1 rule
    Rule: Do not silently swallow errors. ...
-   Confidence: 0.92
+   Confidence: 0.93
    The change this is about:
    @@ -0,0 +1,19 @@
    +import { readFileSync } from "node:fs";
@@ -254,27 +257,45 @@ Cut by hunk, `check` hands over the whole file and lets the agent find the fault
    ... 15 more lines
 ```
 
-Notice the 0.46 on `notify`, a function that breaks no rule. It calls the function that
-does. Cutting small does not make every piece obviously clean.
-
 ### The trade-offs
 
-| | `functions` | `hunks` |
-|---|---|---|
-| Install size, a TypeScript and Python repo | 4 files, 4.2 MB (`stop-rules.mjs`, `tree-sitter.wasm`, `grammars/typescript.wasm`, `grammars/python.wasm`) | 1 file, 384 KB (`stop-rules.mjs`) |
-| Languages | 10 have a parser: TypeScript, TSX, JavaScript, Python, Go, Rust, Ruby, Java, Kotlin, Swift. Any other file is cut by hunk | every language, always |
-| What the agent is handed | the one function at fault | the whole hunk the fault sits in |
-| Pieces, on the 240 change sample | 864 | 240 |
-| Jev calls, on the same sample | 336 | 240 |
-| Tokens, on the same sample | 668,891 in and 99,840 out | 383,892 in and 28,320 out |
-| Calls and tokens, on `cutting.diff` with one rule | 4 pieces, 1 call, 1,042 in and 80 out | 1 piece, 1 call, 569 in and 23 out |
-| Real breaks caught at 0.6 | 10 of 32 | 9 of 32 |
-| Flags the reviewers did not agree with at 0.6 | 19 | 1 |
-| A file that will not parse | reported as not checked, never checked half way | checked, because nothing parses it |
-| A file whose grammar is not installed | reported once as not checked, with the command to fix it | not possible, there are no grammars |
+The measured columns are over the same 172 changes, because that is what all three modes have
+scores for.
 
-The last two rows are worth seeing for real. A file with broken syntax and a `.sql` file, in
-functions mode:
+| | `functions` | `hunks` | `chunks` |
+|---|---|---|---|
+| Install size, a TypeScript and Python repo | 4 files, 4,224 KB (`stop-rules.mjs`, `tree-sitter.wasm`, `grammars/typescript.wasm`, `grammars/python.wasm`) | 1 file, 384 KB | 1 file, 384 KB |
+| Languages | 10 have a parser: TypeScript, TSX, JavaScript, Python, Go, Rust, Ruby, Java, Kotlin, Swift. Any other file is cut into hunks | every language | every language |
+| What the agent is handed | the one function at fault | the hunk the fault sits in | up to 12,000 bytes of diff |
+| Pieces, 172 changes | 643 | 532 | 172 |
+| Jev requests, 172 changes | 247 | 214 | 172 |
+| Input tokens, 172 changes | 490,231 | 433,421 | 269,307 |
+| Pieces, calls and tokens on `cutting.diff` with one rule | 4 pieces, 1 call, 1,042 in and 80 out | 1 piece, 1 call, 569 in and 23 out | 1 piece, 1 call, 569 in and 23 out |
+| Real breaks caught at 0.5, of 21 | 11 | 14 | 9 |
+| Disputed flags at 0.5 | 26 | 16 | 6 |
+| Real breaks caught at 0.6, of 21 | 5 | 8 | 5 |
+| Disputed flags at 0.6 | 14 | 2 | 0 |
+| A file that will not parse | reported as not checked, never checked half way | checked, nothing parses it | checked, nothing parses it |
+| A file whose grammar is not installed | reported once as not checked, with the command to fix it | not possible | not possible |
+
+An earlier run of the same test, with four of the rules and truth corrected by an adjudicator
+over 29 real breaks, put the three modes in the same order at 0.5: one hunk per piece caught
+22 with 5 plainly false flags, tree-sitter pieces 16 with 4, and big chunks 12 with 0.
+
+What each one is bad at, plainly:
+
+- **`hunks`**: a new file is one giant hunk, so it gets cut blindly every 30 added lines with
+  no regard for where a function starts or ends. Two functions that sit next to each other
+  share a hunk. A hunk can start in the middle of a function, so the agent is handed a piece
+  of code with no head.
+- **`functions`**: it needs the grammar files, which are megabytes in the repository, and it
+  only knows the ten languages listed above. A file it cannot parse is not checked at all.
+- **`chunks`**: one bad line is diluted in a big diff, which is the quietest setting of the
+  three and the one that misses most at a low bar, and the agent is handed a large diff to
+  search.
+
+The parse behaviours are worth seeing for real. A file with broken syntax and a `.sql` file,
+in functions mode:
 
 ```
 stop-rules: no rule violations in your latest changes.
@@ -293,10 +314,6 @@ The same repository in hunks mode checks the broken file and finds the fault in 
    Rule: Do not silently swallow errors. ...
    Confidence: 0.95
 ```
-
-So `hunks` costs less, covers every language and never refuses a file, and it hands the agent
-more code and gives you fewer flags per run. `functions` cost 1.9 times the tokens on our
-sample, hands over the exact function, and is stricter about files it cannot read.
 
 ## 3. Rules
 
@@ -341,8 +358,7 @@ guess dressed as a number.
 
 ### What rules cost
 
-The same change, [`cutting.diff`](../examples/tuning/cutting.diff), one piece, with a cold
-cache:
+The same change, [`cutting.diff`](../examples/tuning/cutting.diff), one piece, cold cache:
 
 | Rules | Questions | Calls | Input tokens | Output tokens |
 |---|---|---|---|---|
@@ -350,8 +366,8 @@ cache:
 | [12](../examples/tuning/rules-twelve.md) | 12 | 1 | 1,078 | 234 |
 
 Four times the rules is not four times the cost, because the piece is sent once and the rules
-ride along with it. It is about 1.8 times here. Five to fifteen rules is the range we would
-stay in, for noise rather than for money.
+ride along with it. It is about 1.6 times the input tokens here. Five to fifteen rules is the
+range we would stay in, for noise rather than for money.
 
 ## 4. Calls per run: `maxCalls`
 
@@ -389,7 +405,41 @@ answered cost nothing because they are in the cache:
 In hook mode the baseline does not move when a run runs out of budget, so the same change is
 checked again on the next turn until it is finished.
 
-## 5. Background or blocking, one person or a team
+## 5. What it costs in money
+
+TypeSafe's launch post for System One and Jev says, word for word:
+
+> Input tokens: $0.042 / MTok ($42 per billion tokens).
+
+> Output tokens: FREE (too cheap to meter).
+
+That is <https://typesafe.ai/blog/introducing-system-one-models-and-jev>, posted 15 September
+2026 and read on 19 September 2026. Prices change, so check the post rather than trusting
+this paragraph, and note that the price is theirs to set, not ours. Nothing in the tool
+knows a price: `check --json` and `run.log` give you input tokens, and you do the sum.
+
+At $0.042 per million input tokens, and output free, from our own measured runs:
+
+| What was measured | Input tokens | Cost |
+|---|---|---|
+| One 19 line file, one rule, cut into functions (4 pieces) | 1,042 | $0.00004 |
+| The same file, cut into hunks or chunks (1 piece) | 569 | $0.00002 |
+| The same file with 3 rules | 657 | $0.00003 |
+| The same file with 12 rules | 1,078 | $0.00005 |
+| All 240 sample changes, cut into functions | 668,891 | $0.028 |
+| All 240 sample changes, cut into chunks | 383,892 | $0.016 |
+| 172 of them, cut into hunks | 433,421 | $0.018 |
+
+Per change, cutting into whole functions, the sample averages 2,787 input tokens, which is
+$0.00012. A thousand agent turns of that size cost about 12 cents. Going from 3 rules to 12
+raised the input tokens by about 60 percent on our one piece test, and a second run over the
+same code is free because the answers are cached.
+
+Latency, from the same runs: the median change took 203 ms of Jev time cut into functions and
+192 ms cut into hunks or chunks. The check itself adds the git snapshot and the parse, so a
+blocking hook feels like about a second.
+
+## 6. Background or blocking, one person or a team
 
 **In Claude Code** the hook entry `init` writes has `asyncRewake`, so the check runs in the
 background and the agent is woken when there is something to fix. The agent sees nothing at
@@ -411,7 +461,7 @@ per run, 8 per machine, and 12 per server instance. On serverless platforms the 
 per instance, so a busy team on a platform that starts many instances can still push the
 account over its limit.
 
-## 6. Things that are fixed, and why
+## 7. Things that are fixed, and why
 
 These are not knobs. Each one was measured, and none of them is worth a setting.
 
@@ -420,6 +470,8 @@ These are not knobs. Each one was measured, and none of them is worth a setting.
 - **40 added lines per piece for code that is not a function.** Single statements are too
   small to judge alone: 1,439 one-unit pieces became 441 useful ones when neighbours were
   merged up to 40 lines. A function is always its own piece, whatever its size.
+- **30 added lines and 3 trailing context lines per piece in hunks mode.** That is the
+  splitting the sample was measured with.
 - **Three rounds.** After three turns of the same findings the tool stops waking the agent
   and leaves them for you. An agent that has not fixed something in three tries is not going
   to.

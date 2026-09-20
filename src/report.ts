@@ -1,6 +1,7 @@
 import type {
   BrokenRule,
   CheckReport,
+  CutMode,
   NotChecked,
   PieceFinding,
   PieceScore,
@@ -117,8 +118,10 @@ export function renderReport(report: CheckReport): string {
 }
 
 /** How the change was cut, in plain words. */
-export function cutWords(cut: "functions" | "hunks"): string {
-  return cut === "functions" ? "whole functions, with tree-sitter" : "diff hunks, with no parser";
+export function cutWords(cut: CutMode): string {
+  if (cut === "functions") return "whole functions, with tree-sitter";
+  if (cut === "hunks") return "one diff hunk each, with no parser";
+  return "diff hunks grouped into 12,000 byte chunks, with no parser";
 }
 
 function scoreBlock(piece: PieceScore, index: number): string {

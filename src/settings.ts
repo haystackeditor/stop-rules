@@ -3,7 +3,7 @@
  * It is committed and holds no secret. Every key is optional. A flag on the command line
  * beats the file.
  *
- * Keys: `endpoint` (the team server), `cut` (functions or hunks), `threshold` (0 to 1),
+ * Keys: `endpoint` (the team server), `cut` (functions, hunks or chunks), `threshold` (0 to 1),
  * `maxCalls` (whole number of Jev requests per run). Anything else in the file, a value of
  * the wrong type, and a value out of range are all errors that name the key.
  */
@@ -65,10 +65,10 @@ function parseSettings(file: string, raw: unknown): SettingsLoad {
 
   const cut = record["cut"];
   if (cut !== undefined) {
-    if (cut !== "functions" && cut !== "hunks") {
+    if (cut !== "functions" && cut !== "hunks" && cut !== "chunks") {
       return {
         ok: false,
-        reason: `"cut" in ${file} must be "functions" or "hunks", not ${JSON.stringify(cut)}.`,
+        reason: `"cut" in ${file} must be "functions", "hunks" or "chunks", not ${JSON.stringify(cut)}.`,
       };
     }
     settings.cut = cut;

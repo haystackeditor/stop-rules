@@ -153,9 +153,10 @@ one piece of a change cannot show ("keep the service boundaries tidy").
    top level statements, constants, type declarations and plain fields, groups with the
    neighbours next to it into a piece of up to 40 added lines, and a function between them
    ends that group. A file with no grammar is cut by diff hunk instead. Lock files, minified
-   bundles, data and log files, binaries and deletions are skipped. Set `"cut": "hunks"` and
-   no parser is used at all: every file is cut by diff hunk. See
-   [docs/TUNING.md](docs/TUNING.md) for what that trade costs.
+   bundles, data and log files, binaries and deletions are skipped. Two settings turn the
+   parser off: `"cut": "hunks"` gives one diff hunk per piece, and `"cut": "chunks"` groups a
+   file's hunks into pieces of up to 12,000 bytes. See [docs/TUNING.md](docs/TUNING.md) for
+   what each one costs and misses.
 3. **One yes or no score per rule.** Every piece is asked about every rule: does the added
    code break this rule. Jev answers each claim with a probability. At or above the cutoff
    (0.6 by default) it is a finding. Up to four pieces ride in one request, and a request is
@@ -200,9 +201,11 @@ There are 32 real breaks in it, across the six starter rules.
 - At the default 0.6, cutting into whole functions: 10 of the 32 real breaks caught, and 19
   flags the reviewers did not agree with. Of those 19, an adjudicator had earlier called 5
   plainly not a break and 2 arguable; the other 12 nobody has ruled on.
-- At 0.6, cutting by diff hunk: 9 of 32 caught and 1 flag the reviewers did not agree with.
-- At 0.5, cutting into whole functions: 20 of 32 caught and 38 flags the reviewers did not
-  agree with.
+- At 0.6, cutting into 12,000 byte chunks: 9 of 32 caught and 1 disputed flag.
+- At 0.5, cutting into whole functions: 20 of 32 caught and 38 disputed flags.
+- Over the 172 changes all three cut modes were scored on, at 0.5: one hunk per piece caught
+  14 of 21 with 16 disputed flags, whole functions 11 of 21 with 26, and chunks 9 of 21 with
+  6.
 - On planted examples, measured earlier: stubs 20 of 20, hardcoded test values 12 of 20, and
   0 of 40 harmless look-alikes flagged.
 
@@ -239,8 +242,8 @@ stop-rules baseline --reset
 ```
 
 - **init** installs into a repo. `--dir` picks the repo, `--agents` overrides detection,
-  `--team` switches the repo to team mode, `--cut hunks` installs with no parser files at
-  all, `--json` prints the same facts for an agent to read.
+  `--team` switches the repo to team mode, `--cut hunks` or `--cut chunks` installs with no
+  parser files at all, `--json` prints the same facts for an agent to read.
 - **check** runs the same pipeline in a terminal, for a pre-commit hook or CI. Exit 0
   clean, 2 findings, 1 could not run. With `--base <rev>` it diffs that revision against
   your working tree; without it, it uses the incremental baseline but never moves it, so it
@@ -273,12 +276,15 @@ committed and holds no secret. Every key is optional, and a flag beats the file.
 }
 ```
 
+`cut` is `functions` (tree-sitter, one function per piece), `hunks` (one diff hunk per piece,
+no parser) or `chunks` (a file's hunks grouped into pieces of up to 12,000 bytes, no parser).
 A key stop-rules does not know, a value of the wrong type or a value out of range stops the
 run with one line naming the key.
 
 [docs/TUNING.md](docs/TUNING.md) goes through each knob: what it does, what happens when you
-turn it either way, real examples with the scores the live service gave them, and what each
-setting caught and flagged on 240 real agent written changes.
+turn it each way, real examples with the scores the live service gave them, what each setting
+caught and flagged on 240 real agent written changes, and what the tokens cost in money at
+TypeSafe's published price.
 
 Environment: `TYPESAFE_API_KEY` or `TYPESAFE_API_KEY_FILE` for your own key,
 `STOP_RULES_ENDPOINT` and `STOP_RULES_TOKEN` for team mode,

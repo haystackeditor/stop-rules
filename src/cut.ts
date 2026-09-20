@@ -6,8 +6,9 @@
  * diff hunk. A file whose grammar is not installed, or that will not parse, is reported as
  * not checked.
  *
- * In `hunks` mode no parser runs at all: every file is cut by diff hunk into pieces of up to
- * 12,000 bytes. Nothing here guesses and nothing falls back.
+ * In `hunks` mode no parser runs at all: every file is cut into one piece per diff hunk. In
+ * `chunks` mode, also with no parser, a file's hunks are grouped into pieces of up to 12,000
+ * bytes. Nothing here guesses and nothing falls back.
  */
 
 import { addedLines, chunkRange, type FileDiff, type Piece } from "./diff.js";
@@ -47,6 +48,10 @@ export async function cutFiles(
   const missing = new Set<string>();
 
   if (options.cut === "hunks") {
+    for (const file of files) pieces.push(...piecesByHunk(file));
+    return { pieces, notChecked, cutByHunk };
+  }
+  if (options.cut === "chunks") {
     for (const file of files) pieces.push(...chunkPieces(file));
     return { pieces, notChecked, cutByHunk };
   }

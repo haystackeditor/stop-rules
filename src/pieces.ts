@@ -694,24 +694,33 @@ export function assertEveryAddedLineOnce(
   );
 }
 
+/** Hunks mode: a piece holds at most this many added lines. Measured on the corpus. */
+export const HUNK_MAX_ADDED = 30;
+/** And after the last of those, this many context lines ride along before the cut. */
+export const HUNK_TRAILING_CONTEXT = 3;
+
 /**
- * Files with no grammar are cut by diff hunk. A hunk over 40 added lines is cut after the
- * 40th added line.
+ * Hunks mode, and files with no grammar in functions mode: one diff hunk per piece. A hunk
+ * with more than 30 added lines is cut right after the 30th, taking up to 3 trailing context
+ * lines with it, and each piece carries a recomputed `@@` header. A piece with no added line
+ * is dropped, because a claim about added lines has nothing to judge in it.
  */
 export function piecesByHunk(file: FileDiff): Piece[] {
   const pieces: Piece[] = [];
   const addedNumbers: number[] = [];
+
   for (const hunk of file.hunks) {
-    let newLine = hunk.newStart;
     let oldLine = hunk.oldStart;
+    let newLine = hunk.newStart;
     let segment: string[] = [];
-    let segmentNewStart = newLine;
+    let added = 0;
     let segmentOldStart = oldLine;
-    let addedInSegment = 0;
+    let segmentNewStart = newLine;
+    /** -1 until the added line cap is reached, then how many context lines have followed. */
+    let trailing = -1;
 
     const flush = (): void => {
-      if (segment.length === 0) return;
-      if (addedInSegment > 0) {
+      if (added > 0) {
         pieces.push({
           file: file.file,
           header: file.header,
@@ -730,34 +739,58 @@ export function piecesByHunk(file: FileDiff): Piece[] {
         });
       }
       segment = [];
-      addedInSegment = 0;
-      segmentNewStart = newLine;
+      added = 0;
       segmentOldStart = oldLine;
+      segmentNewStart = newLine;
+      trailing = -1;
     };
 
     for (const raw of hunk.lines) {
-      if (addedInSegment >= MAX_ADDED_PER_PIECE && raw.startsWith("+")) flush();
-      segment.push(raw);
       const marker = raw[0];
-      if (marker === "+") {
+      const kind =
+        marker === "+" ? "add" : marker === "-" ? "del" : marker === "\\" ? "nonl" : "ctx";
+
+      if (trailing >= 0) {
+        if (kind === "ctx" && trailing < HUNK_TRAILING_CONTEXT) {
+          segment.push(raw);
+          oldLine += 1;
+          newLine += 1;
+          trailing += 1;
+          continue;
+        }
+        if (kind === "nonl") {
+          segment.push(raw);
+          continue;
+        }
+        flush();
+      }
+
+      if (kind === "add") {
+        segment.push(raw);
         addedNumbers.push(newLine);
-        addedInSegment += 1;
+        added += 1;
         newLine += 1;
-      } else if (marker === "-") {
+        if (added >= HUNK_MAX_ADDED) trailing = 0;
+      } else if (kind === "del") {
+        segment.push(raw);
         oldLine += 1;
-      } else if (marker !== "\\") {
+      } else if (kind === "nonl") {
+        segment.push(raw);
+      } else {
+        segment.push(raw);
+        oldLine += 1;
         newLine += 1;
-        oldLine += 1;
       }
     }
     flush();
   }
+
   assertEveryAddedLineOnce(file.file, addedNumbers, pieces);
   return pieces;
 }
 
 /**
- * Hunks mode: no parser at all. A file's diff becomes one or more pieces of whole hunks, up
+ * Chunks mode: no parser either. A file's diff becomes one or more pieces of whole hunks, up
  * to 12,000 bytes each, and a hunk bigger than that is halved until it fits. This is how
  * stop-rules cut code before it had a parser.
  */
@@ -771,7 +804,7 @@ export function chunkPieces(file: FileDiff): Piece[] {
       unitName: null,
       fromLine: range.from,
       toLine: range.to,
-      cut: "hunk" as const,
+      cut: "chunk" as const,
     };
   });
   const added: number[] = [];

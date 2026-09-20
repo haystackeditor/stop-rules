@@ -14,8 +14,14 @@ export interface AddedLine {
   text: string;
 }
 
-/** How a change is cut into pieces. Set with `cut` in .stop-rules.json or `--cut`. */
-export type CutMode = "functions" | "hunks";
+/**
+ * How a change is cut into pieces. Set with `cut` in .stop-rules.json or `--cut`.
+ *
+ * functions  one whole function per piece, using tree-sitter.
+ * hunks      one diff hunk per piece, with no parser.
+ * chunks     hunks of a file grouped into pieces of up to 12,000 bytes, with no parser.
+ */
+export type CutMode = "functions" | "hunks" | "chunks";
 
 /** One rule a piece broke. */
 export interface BrokenRule {

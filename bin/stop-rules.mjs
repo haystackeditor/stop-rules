@@ -1574,10 +1574,10 @@ function parseSettings(file, raw) {
   }
   const cut = record["cut"];
   if (cut !== void 0) {
-    if (cut !== "functions" && cut !== "hunks") {
+    if (cut !== "functions" && cut !== "hunks" && cut !== "chunks") {
       return {
         ok: false,
-        reason: `"cut" in ${file} must be "functions" or "hunks", not ${JSON.stringify(cut)}.`
+        reason: `"cut" in ${file} must be "functions", "hunks" or "chunks", not ${JSON.stringify(cut)}.`
       };
     }
     settings.cut = cut;
@@ -2939,19 +2939,21 @@ function assertEveryAddedLineOnce(file, addedNumbers, pieces) {
     `stop-rules cut ${file} wrongly: ${parts2.join(", ")}. This is a bug in stop-rules, please report it.`
   );
 }
+var HUNK_MAX_ADDED = 30;
+var HUNK_TRAILING_CONTEXT = 3;
 function piecesByHunk(file) {
   const pieces = [];
   const addedNumbers = [];
   for (const hunk of file.hunks) {
-    let newLine = hunk.newStart;
     let oldLine = hunk.oldStart;
+    let newLine = hunk.newStart;
     let segment = [];
-    let segmentNewStart = newLine;
+    let added = 0;
     let segmentOldStart = oldLine;
-    let addedInSegment = 0;
+    let segmentNewStart = newLine;
+    let trailing = -1;
     const flush = () => {
-      if (segment.length === 0) return;
-      if (addedInSegment > 0) {
+      if (added > 0) {
         pieces.push({
           file: file.file,
           header: file.header,
@@ -2970,23 +2972,43 @@ function piecesByHunk(file) {
         });
       }
       segment = [];
-      addedInSegment = 0;
-      segmentNewStart = newLine;
+      added = 0;
       segmentOldStart = oldLine;
+      segmentNewStart = newLine;
+      trailing = -1;
     };
     for (const raw of hunk.lines) {
-      if (addedInSegment >= MAX_ADDED_PER_PIECE && raw.startsWith("+")) flush();
-      segment.push(raw);
       const marker = raw[0];
-      if (marker === "+") {
+      const kind = marker === "+" ? "add" : marker === "-" ? "del" : marker === "\\" ? "nonl" : "ctx";
+      if (trailing >= 0) {
+        if (kind === "ctx" && trailing < HUNK_TRAILING_CONTEXT) {
+          segment.push(raw);
+          oldLine += 1;
+          newLine += 1;
+          trailing += 1;
+          continue;
+        }
+        if (kind === "nonl") {
+          segment.push(raw);
+          continue;
+        }
+        flush();
+      }
+      if (kind === "add") {
+        segment.push(raw);
         addedNumbers.push(newLine);
-        addedInSegment += 1;
+        added += 1;
         newLine += 1;
-      } else if (marker === "-") {
+        if (added >= HUNK_MAX_ADDED) trailing = 0;
+      } else if (kind === "del") {
+        segment.push(raw);
         oldLine += 1;
-      } else if (marker !== "\\") {
+      } else if (kind === "nonl") {
+        segment.push(raw);
+      } else {
+        segment.push(raw);
+        oldLine += 1;
         newLine += 1;
-        oldLine += 1;
       }
     }
     flush();
@@ -3004,7 +3026,7 @@ function chunkPieces(file) {
       unitName: null,
       fromLine: range.from,
       toLine: range.to,
-      cut: "hunk"
+      cut: "chunk"
     };
   });
   const added = [];
@@ -7070,6 +7092,10 @@ async function cutFiles(files, options) {
   const cutByHunk = [];
   const missing = /* @__PURE__ */ new Set();
   if (options.cut === "hunks") {
+    for (const file of files) pieces.push(...piecesByHunk(file));
+    return { pieces, notChecked, cutByHunk };
+  }
+  if (options.cut === "chunks") {
     for (const file of files) pieces.push(...chunkPieces(file));
     return { pieces, notChecked, cutByHunk };
   }
@@ -7551,7 +7577,9 @@ Fix each one. If a rule truly should not apply here, leave the code and tell the
   return sections.join("\n\n");
 }
 function cutWords(cut) {
-  return cut === "functions" ? "whole functions, with tree-sitter" : "diff hunks, with no parser";
+  if (cut === "functions") return "whole functions, with tree-sitter";
+  if (cut === "hunks") return "one diff hunk each, with no parser";
+  return "diff hunks grouped into 12,000 byte chunks, with no parser";
 }
 function scoreBlock(piece, index) {
   const unit = piece.unit === null ? "" : ` in ${piece.unit}`;
@@ -8048,6 +8076,9 @@ async function diffFileWork(args2, diffFile) {
   if (parsed.files.length === 0 && parsed.failures.length === 0) {
     return { ok: false, reason: `${full} holds no diff with added lines.` };
   }
+  const asked = args2.knobs.cut;
+  const cut = asked === "functions" ? "hunks" : asked;
+  const why = asked === "functions" ? " (a diff file has no file content, so it cannot be cut into functions)" : "";
   return {
     ok: true,
     work: {
@@ -8056,8 +8087,8 @@ async function diffFileWork(args2, diffFile) {
       failures: parsed.failures.map((failure2) => ({ file: failure2.file, reason: failure2.reason })),
       readSource: async () => null,
       snapshot: null,
-      cut: "hunks",
-      source: `${diffFile}, cut by diff hunk because a diff file has no file content to parse`
+      cut,
+      source: `${diffFile}, cut into ${cutWords(cut)}${why}`
     }
   };
 }
@@ -8371,7 +8402,7 @@ async function init2(options) {
     }
   }
   try {
-    report.grammars = cut === "hunks" ? { languages: [], added: [], kept: [], bytes: await folderBytes(path21.join(root, VENDOR_DIR)) } : await copyGrammars(root);
+    report.grammars = cut === "functions" ? await copyGrammars(root) : { languages: [], added: [], kept: [], bytes: await folderBytes(path21.join(root, VENDOR_DIR)) };
   } catch (error) {
     return failure(root, error instanceof Error ? error.message : String(error));
   }
@@ -8415,7 +8446,7 @@ async function init2(options) {
     report.mode === "team" ? 'Store the team token: printf %s "$TOKEN" | stop-rules login --token-stdin' : 'Give it your own Jev key from TypeSafe: set TYPESAFE_API_KEY, or run printf %s "$KEY" | stop-rules login --jev-key-stdin'
   );
   report.todo.push(`Edit ${report.rules.path} so it says what your team actually cares about.`);
-  const vendored = cut === "hunks" ? "the checker" : "the checker and its grammars";
+  const vendored = cut === "functions" ? "the checker and its grammars" : "the checker";
   report.todo.push(
     report.mode === "team" ? `Commit ${VENDOR_DIR}/ (${vendored}), ${SETTINGS_FILE} and the config files, so teammates and cloud agents get the check too.` : `Commit ${VENDOR_DIR}/ (${vendored}) and the config files, so teammates and cloud agents get the check too.`
   );
@@ -8498,9 +8529,9 @@ function renderInit(report) {
   );
   const grammars = report.grammars;
   const megabytes = (grammars.bytes / 1e6).toFixed(1);
-  if (report.cut === "hunks") {
+  if (report.cut !== "functions") {
     lines.push(
-      `  cut: hunks, so no parser and no grammars were copied (${VENDOR_DIR} is ${megabytes} MB)`
+      `  cut: ${report.cut}, so no parser and no grammars were copied (${VENDOR_DIR} is ${megabytes} MB)`
     );
   } else {
     lines.push(
@@ -8865,7 +8896,7 @@ Options:
   --dir <path>         init mode only: the repository to install into (default: this one)
   --team <endpoint>    init mode only: use your team's stop-rules server, not your own key
   --rules <path>       rules file (default <repo root>/.stop-rules.md)
-  --cut <mode>         functions (tree-sitter) or hunks (no parser) (default ${DEFAULT_CUT})
+  --cut <mode>         functions (tree-sitter), hunks or chunks (no parser) (default ${DEFAULT_CUT})
   --threshold <0..1>   score at or above which a rule counts as violated (default ${DEFAULT_THRESHOLD})
   --max-calls <n>      hard ceiling on requests to Jev in one run (default ${DEFAULT_MAX_CALLS})
   --base <rev>         check and score modes: diff this revision against the working tree
@@ -8971,8 +9002,8 @@ function parseArgs(argv) {
       case "--cut": {
         i2 += 1;
         const value2 = take(i2, "--cut");
-        if (value2 !== "functions" && value2 !== "hunks") {
-          throw new UsageError("--cut must be functions or hunks");
+        if (value2 !== "functions" && value2 !== "hunks" && value2 !== "chunks") {
+          throw new UsageError("--cut must be functions, hunks or chunks");
         }
         parsed.cut = value2;
         break;

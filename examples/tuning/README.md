@@ -10,8 +10,9 @@ other from the root of this clone:
 stop-rules score --diff examples/tuning/bar.diff --rules examples/tuning/rules-errors.md
 ```
 
-A diff file has no file content to parse, so it is always cut by diff hunk. That is why one
-piece covers the whole of each file below.
+A diff file has no file content, so it cannot be cut into functions. It is cut into one piece
+per diff hunk instead, and the output says so. That is why one piece covers the whole of each
+file below.
 
 | File | What it is |
 |---|---|

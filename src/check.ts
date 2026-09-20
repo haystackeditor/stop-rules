@@ -214,7 +214,7 @@ interface Work {
 
 type WorkResult = { ok: true; work: Work } | { ok: false; reason: string };
 
-/** score --diff: a unified diff file. There is no file content, so it is cut by hunk. */
+/** score --diff: a unified diff file. There is no file content, so nothing can be parsed. */
 async function diffFileWork(args: LockedArgs, diffFile: string): Promise<WorkResult> {
   const full = path.resolve(args.options.cwd, diffFile);
   let text: string;
@@ -228,6 +228,15 @@ async function diffFileWork(args: LockedArgs, diffFile: string): Promise<WorkRes
   if (parsed.files.length === 0 && parsed.failures.length === 0) {
     return { ok: false, reason: `${full} holds no diff with added lines.` };
   }
+  // A diff file cannot be cut into functions: there is no file to parse. The other two modes
+  // need no file, so a repo that asked for one of them still gets it, and the output says
+  // which one was used either way.
+  const asked = args.knobs.cut;
+  const cut: CutMode = asked === "functions" ? "hunks" : asked;
+  const why =
+    asked === "functions"
+      ? " (a diff file has no file content, so it cannot be cut into functions)"
+      : "";
   return {
     ok: true,
     work: {
@@ -236,8 +245,8 @@ async function diffFileWork(args: LockedArgs, diffFile: string): Promise<WorkRes
       failures: parsed.failures.map((failure) => ({ file: failure.file, reason: failure.reason })),
       readSource: async () => null,
       snapshot: null,
-      cut: "hunks",
-      source: `${diffFile}, cut by diff hunk because a diff file has no file content to parse`,
+      cut,
+      source: `${diffFile}, cut into ${cutWords(cut)}${why}`,
     },
   };
 }
