@@ -25,8 +25,8 @@ No `npm install`, no build: `bin/stop-rules.mjs` is committed and ready to run.
 
 `init` finds which coding agents your repo already uses, copies itself into
 `.stop-rules/stop-rules.mjs` there, writes a starter `.stop-rules.md`, and wires the hook into
-each agent's own config file. That is one 384 KB file and no grammar files, because cutting by
-git diff hunk parses nothing. It says so:
+each agent's own config file. That is one file of 334 KB and no grammar files at all, because
+cutting by git diff hunk parses nothing. It says so:
 
 ```
   cutting by git diff hunk, no grammar files needed (.stop-rules is 0.3 MB)
