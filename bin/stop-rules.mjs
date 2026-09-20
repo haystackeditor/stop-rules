@@ -1223,8 +1223,8 @@ var BACKOFF_START_MS = 1e3;
 var BACKOFF_CAP_MS = 16e3;
 var STEP_UP_AFTER = 4;
 function defaultSleep(ms) {
-  return new Promise((resolve3) => {
-    globalThis.setTimeout(resolve3, ms);
+  return new Promise((resolve4) => {
+    globalThis.setTimeout(resolve4, ms);
   });
 }
 function parseRetryAfter(header) {
@@ -1448,12 +1448,12 @@ var JevClient = class {
     let active = 0;
     let settled = false;
     const stopsEverything = (failure2) => failure2 === "busy" || failure2 === "billing" || failure2 === "auth";
-    return new Promise((resolve3) => {
+    return new Promise((resolve4) => {
       const pump = () => {
         if (settled) return;
         if (queue.length === 0 && active === 0) {
           settled = true;
-          resolve3(results);
+          resolve4(results);
           return;
         }
         while (active < this.limit && queue.length > 0) {
@@ -5102,8 +5102,8 @@ var Module2 = (() => {
     var moduleRtn;
     var Module = moduleArg;
     var readyPromiseResolve, readyPromiseReject;
-    var readyPromise = new Promise((resolve3, reject) => {
-      readyPromiseResolve = resolve3;
+    var readyPromise = new Promise((resolve4, reject) => {
+      readyPromiseResolve = resolve4;
       readyPromiseReject = reject;
     });
     var ENVIRONMENT_IS_WEB = typeof window == "object";
@@ -5125,11 +5125,11 @@ var Module2 = (() => {
       throw toThrow;
     }, "quit_");
     var scriptDirectory = "";
-    function locateFile(path22) {
+    function locateFile(path23) {
       if (Module["locateFile"]) {
-        return Module["locateFile"](path22, scriptDirectory);
+        return Module["locateFile"](path23, scriptDirectory);
       }
-      return scriptDirectory + path22;
+      return scriptDirectory + path23;
     }
     __name(locateFile, "locateFile");
     var readAsync, readBinary;
@@ -5186,13 +5186,13 @@ var Module2 = (() => {
         }
         readAsync = /* @__PURE__ */ __name(async (url) => {
           if (isFileURI(url)) {
-            return new Promise((resolve3, reject) => {
+            return new Promise((resolve4, reject) => {
               var xhr = new XMLHttpRequest();
               xhr.open("GET", url, true);
               xhr.responseType = "arraybuffer";
               xhr.onload = () => {
                 if (xhr.status == 200 || xhr.status == 0 && xhr.response) {
-                  resolve3(xhr.response);
+                  resolve4(xhr.response);
                   return;
                 }
                 reject(xhr.status);
@@ -5416,10 +5416,10 @@ var Module2 = (() => {
       __name(receiveInstantiationResult, "receiveInstantiationResult");
       var info2 = getWasmImports();
       if (Module["instantiateWasm"]) {
-        return new Promise((resolve3, reject) => {
+        return new Promise((resolve4, reject) => {
           Module["instantiateWasm"](info2, (mod, inst) => {
             receiveInstance(mod, inst);
-            resolve3(mod.exports);
+            resolve4(mod.exports);
           });
         });
       }
@@ -7415,7 +7415,7 @@ import * as path17 from "node:path";
 import { randomBytes } from "node:crypto";
 var MAX_BUFFER = 256 * 1024 * 1024;
 function runGit(cwd, args2, extraEnv) {
-  return new Promise((resolve3, reject) => {
+  return new Promise((resolve4, reject) => {
     execFile(
       "git",
       args2,
@@ -7427,12 +7427,12 @@ function runGit(cwd, args2, extraEnv) {
       },
       (error, stdout, stderr) => {
         if (error === null) {
-          resolve3({ code: 0, stdout, stderr });
+          resolve4({ code: 0, stdout, stderr });
           return;
         }
         const withCode = error;
         if (typeof withCode.code === "number") {
-          resolve3({ code: withCode.code, stdout, stderr });
+          resolve4({ code: withCode.code, stdout, stderr });
           return;
         }
         reject(new Error(`could not run git ${args2.join(" ")}: ${error.message}`));
@@ -8023,11 +8023,7 @@ function fileCache(cache) {
     }
   };
 }
-async function resetBaseline(cwd) {
-  const repo = await findRepo(cwd);
-  if (repo === null) {
-    return { ok: false, lines: [`stop-rules: ${cwd} is not inside a git repository.`] };
-  }
+async function resetBaseline(repo) {
   const stateDir = stateDirFor(repo.gitDir);
   await resetState(stateDir);
   return {
@@ -8045,8 +8041,7 @@ async function run2(options) {
   const note = (message) => {
     notes.push(message);
   };
-  const repo = await findRepo(options.cwd);
-  if (repo === null) return cannotRun(`${options.cwd} is not inside a git repository.`);
+  const repo = options.repo;
   const rulesPath = options.rulesPath ? path20.resolve(options.cwd, options.rulesPath) : path20.join(repo.root, ".stop-rules.md");
   const rulesLoad = await loadRules(rulesPath);
   if (!rulesLoad.ok) return cannotRun(rulesLoad.reason);
@@ -8325,9 +8320,46 @@ ${text}` };
   return hasViolations2 ? { kind: "violations", report, text } : { kind: "clean", report, text };
 }
 
-// src/init.ts
+// src/repo.ts
 import { promises as fs16 } from "node:fs";
 import * as path21 from "node:path";
+var VENDORED_TAIL = path21.join(".stop-rules", "stop-rules.mjs");
+async function vendoredIn(selfPath) {
+  if (!selfPath.endsWith(VENDORED_TAIL)) return null;
+  const repo = await findRepo(path21.dirname(selfPath));
+  return repo === null ? null : repo.root;
+}
+async function resolveRepo(request) {
+  const from = request.dir === void 0 ? request.cwd : path21.resolve(request.cwd, request.dir);
+  try {
+    const info2 = await fs16.stat(from);
+    if (!info2.isDirectory()) return { ok: false, kind: "no-repo", reason: `${from} is not a directory.` };
+  } catch (error) {
+    const err2 = error;
+    return {
+      ok: false,
+      kind: "no-repo",
+      reason: err2.code === "ENOENT" ? `there is no directory at ${from}.` : `could not look at ${from}: ${err2.code ?? err2.message}`
+    };
+  }
+  const repo = await findRepo(from);
+  if (repo === null) {
+    return { ok: false, kind: "no-repo", reason: `${from} is not inside a git repository.` };
+  }
+  const home = await vendoredIn(request.selfPath);
+  if (home !== null && home !== repo.root) {
+    return {
+      ok: false,
+      kind: "other-repo",
+      reason: `this is the copy of stop-rules vendored in ${home}, and it was about to work on ${repo.root}. Pass --dir ${home} to work on the repository this copy belongs to, or change to a folder inside the repository you mean.`
+    };
+  }
+  return { ok: true, repo };
+}
+
+// src/init.ts
+import { promises as fs17 } from "node:fs";
+import * as path22 from "node:path";
 var NO_LANGUAGES = "no source files in a supported language yet: run stop-rules init again after you add some";
 var BUNDLE_PATH = ".stop-rules/stop-rules.mjs";
 var BUNDLE_NAME = "stop-rules.mjs";
@@ -8353,14 +8385,12 @@ function failure(repo, reason) {
 }
 function bundleSource(selfPath) {
   if (isBundled()) return selfPath;
-  return path21.join(path21.dirname(selfPath), BUNDLE_NAME);
+  return path22.join(path22.dirname(selfPath), BUNDLE_NAME);
 }
 async function init2(options) {
-  const repo = await findRepo(options.dir);
-  if (repo === null) {
-    return failure(options.dir, `${options.dir} is not inside a git repository.`);
-  }
-  const root = repo.root;
+  const resolved = await resolveRepo({ cwd: options.dir, selfPath: options.selfPath });
+  if (!resolved.ok) return failure(options.dir, resolved.reason);
+  const root = resolved.repo.root;
   let chosen;
   if (options.agents !== void 0) {
     const unknown = options.agents.filter((name2) => getAdapter(name2) === null);
@@ -8422,11 +8452,11 @@ async function init2(options) {
   }
   if (wroteKeys.length > 0) report.settings = { path: SETTINGS_FILE, wrote: wroteKeys };
   const source = bundleSource(options.selfPath);
-  const target = path21.join(root, BUNDLE_PATH);
-  if (path21.resolve(source) !== path21.resolve(target)) {
+  const target = path22.join(root, BUNDLE_PATH);
+  if (path22.resolve(source) !== path22.resolve(target)) {
     try {
-      await fs16.mkdir(path21.dirname(target), { recursive: true });
-      await fs16.copyFile(source, target);
+      await fs17.mkdir(path22.dirname(target), { recursive: true });
+      await fs17.copyFile(source, target);
       report.bundle.written = true;
     } catch (error) {
       const err2 = error;
@@ -8437,13 +8467,13 @@ async function init2(options) {
     }
   }
   try {
-    report.grammars = cut === "functions" ? await copyGrammars(root) : { languages: [], added: [], kept: [], bytes: await folderBytes(path21.join(root, VENDOR_DIR)) };
+    report.grammars = cut === "functions" ? await copyGrammars(root) : { languages: [], added: [], kept: [], bytes: await folderBytes(path22.join(root, VENDOR_DIR)) };
   } catch (error) {
     return failure(root, error instanceof Error ? error.message : String(error));
   }
-  const rulesPath = path21.join(root, ".stop-rules.md");
+  const rulesPath = path22.join(root, ".stop-rules.md");
   try {
-    await fs16.writeFile(rulesPath, STARTER_RULES, { encoding: "utf8", flag: "wx" });
+    await fs17.writeFile(rulesPath, STARTER_RULES, { encoding: "utf8", flag: "wx" });
     report.rules.created = true;
   } catch (error) {
     const err2 = error;
@@ -8508,15 +8538,15 @@ async function languagesInRepo(root) {
 async function copyIfNew(source, target) {
   let fresh = true;
   try {
-    await fs16.access(target);
+    await fs17.access(target);
     fresh = false;
   } catch (error) {
     const err2 = error;
     if (err2.code !== "ENOENT") throw new Error(`could not look at ${target}: ${err2.message}`);
   }
-  await fs16.mkdir(path21.dirname(target), { recursive: true });
+  await fs17.mkdir(path22.dirname(target), { recursive: true });
   try {
-    await fs16.copyFile(source, target);
+    await fs17.copyFile(source, target);
   } catch (error) {
     const err2 = error;
     throw new Error(
@@ -8527,24 +8557,24 @@ async function copyIfNew(source, target) {
 }
 async function folderBytes(dir) {
   let total = 0;
-  const entries = await fs16.readdir(dir, { withFileTypes: true });
+  const entries = await fs17.readdir(dir, { withFileTypes: true });
   for (const entry of entries) {
-    const full = path21.join(dir, entry.name);
+    const full = path22.join(dir, entry.name);
     if (entry.isDirectory()) total += await folderBytes(full);
-    else total += (await fs16.stat(full)).size;
+    else total += (await fs17.stat(full)).size;
   }
   return total;
 }
 async function copyGrammars(root) {
   const from = vendorDir();
-  const into = path21.join(root, VENDOR_DIR);
+  const into = path22.join(root, VENDOR_DIR);
   const languages = await languagesInRepo(root);
-  await copyIfNew(runtimeWasmPath(from), path21.join(into, "tree-sitter.wasm"));
+  await copyIfNew(runtimeWasmPath(from), path22.join(into, "tree-sitter.wasm"));
   const added = [];
   const kept = [];
   for (const key of languages) {
     const name2 = grammarWasmName(key);
-    const fresh = await copyIfNew(grammarWasmPath(key, from), path21.join(into, "grammars", name2));
+    const fresh = await copyIfNew(grammarWasmPath(key, from), path22.join(into, "grammars", name2));
     if (fresh) added.push(name2);
     else kept.push(name2);
   }
@@ -8774,9 +8804,9 @@ async function systemone(request, env) {
   );
 }
 async function route(request, env) {
-  const path22 = new URL(request.url).pathname.replace(/\/+$/, "");
-  if (request.method === "GET" && (path22 === "" || path22.endsWith("/health"))) return health(env);
-  if (request.method === "POST" && path22.endsWith("/v1/systemone")) return systemone(request, env);
+  const path23 = new URL(request.url).pathname.replace(/\/+$/, "");
+  if (request.method === "GET" && (path23 === "" || path23.endsWith("/health"))) return health(env);
+  if (request.method === "POST" && path23.endsWith("/v1/systemone")) return systemone(request, env);
   return json(404, {
     error: "not_found",
     message: "stop-rules serves GET /health and POST /v1/systemone"
@@ -8876,7 +8906,7 @@ function resolvePort(env, override) {
 }
 function startServer(port, env = process.env) {
   const server = createStopRulesServer(env);
-  return new Promise((resolve3, reject) => {
+  return new Promise((resolve4, reject) => {
     let listening = false;
     server.on("error", (error) => {
       if (!listening) {
@@ -8888,7 +8918,7 @@ function startServer(port, env = process.env) {
     });
     server.listen(port, HOST, () => {
       listening = true;
-      resolve3(server);
+      resolve4(server);
     });
   });
 }
@@ -8931,7 +8961,7 @@ Usage:
 Options:
   --agent <name>       hook mode only: which agent's protocol to speak (default ${DEFAULT_AGENT})
   --agents <a,b,c>     init mode only: which agents to wire up (default: the ones detected)
-  --dir <path>         init mode only: the repository to install into (default: this one)
+  --dir <path>         the repository to work on (default: the one holding the current folder)
   --team <endpoint>    init mode only: use your team's stop-rules server, not your own key
   --rules <path>       rules file (default <repo root>/.stop-rules.md)
   --cut <mode>         functions (tree-sitter), hunks or chunks (no parser) (default ${DEFAULT_CUT})
@@ -9100,11 +9130,21 @@ async function readStdin() {
 }
 function runningFile() {
   if (!import.meta.url.startsWith("file:")) {
-    throw new Error(
-      `stop-rules is running from ${import.meta.url}, which is not a file on disk, so init has nothing to copy`
-    );
+    throw new Error(`stop-rules is running from ${import.meta.url}, which is not a file on disk`);
   }
   return fileURLToPath2(import.meta.url);
+}
+async function repoFor(args2, cwd) {
+  return resolveRepo({
+    cwd,
+    selfPath: runningFile(),
+    ...args2.dir !== void 0 ? { dir: args2.dir } : {}
+  });
+}
+function reportRepo(resolution) {
+  process.stderr.write(`stop-rules: ${resolution.reason}
+`);
+  return 1;
 }
 function emit(delivery) {
   if (delivery.stdout.length > 0) process.stdout.write(delivery.stdout);
@@ -9142,10 +9182,12 @@ async function runHook(args2) {
 `);
     return 1;
   }
+  const cwd = input.cwd === void 0 ? process.cwd() : input.cwd;
+  const resolved = await repoFor(args2, cwd);
+  if (!resolved.ok) return emit(adapter.deliverError(`stop-rules: ${resolved.reason}`));
   const outcome = await run2({
-    // An adapter leaves cwd undefined only when its agent documents no directory field at
-    // all, and those agents run the hook in the project root. See HookContext.
-    cwd: input.cwd === void 0 ? process.cwd() : input.cwd,
+    repo: resolved.repo,
+    cwd,
     mode: "hook",
     sessionId: input.sessionId,
     stopHookActive: input.stopHookActive === true,
@@ -9163,7 +9205,10 @@ function knobArgs(args2) {
   };
 }
 async function runCheckCommand(args2) {
+  const resolved = await repoFor(args2, process.cwd());
+  if (!resolved.ok) return reportRepo(resolved);
   const outcome = await run2({
+    repo: resolved.repo,
     cwd: process.cwd(),
     mode: "check",
     ...knobArgs(args2),
@@ -9185,7 +9230,10 @@ async function runScoreCommand(args2) {
     process.stderr.write("stop-rules: score takes --diff or --base, not both\n");
     return 1;
   }
+  const resolved = await repoFor(args2, process.cwd());
+  if (!resolved.ok) return reportRepo(resolved);
   const outcome = await run2({
+    repo: resolved.repo,
     cwd: process.cwd(),
     mode: "score",
     ...knobArgs(args2),
@@ -9238,25 +9286,26 @@ async function runBaselineCommand(args2) {
     process.stderr.write("stop-rules: baseline only takes --reset, as in stop-rules baseline --reset\n");
     return 1;
   }
-  return writeResult(await resetBaseline(process.cwd()));
+  const resolved = await repoFor(args2, process.cwd());
+  if (!resolved.ok) return reportRepo(resolved);
+  return writeResult(await resetBaseline(resolved.repo));
 }
 async function runTeamCommand(args2) {
   if (args2.operand === void 0) {
     process.stderr.write("stop-rules: team needs an endpoint, as in stop-rules team https://example.com\n");
     return 1;
   }
-  const repo = await findRepo(process.cwd());
-  if (repo === null) {
-    process.stderr.write(`stop-rules: ${process.cwd()} is not inside a git repository.
-`);
-    return 1;
-  }
-  return writeResult(await writeTeamConfig(repo.root, args2.operand));
+  const resolved = await repoFor(args2, process.cwd());
+  if (!resolved.ok) return reportRepo(resolved);
+  return writeResult(await writeTeamConfig(resolved.repo.root, args2.operand));
 }
 async function runLoginCommand(args2) {
   if (args2.check) {
-    const repo = await findRepo(process.cwd());
-    const root = repo === null ? process.cwd() : repo.root;
+    const resolved = await repoFor(args2, process.cwd());
+    if (!resolved.ok && (resolved.kind === "other-repo" || args2.dir !== void 0)) {
+      return reportRepo(resolved);
+    }
+    const root = resolved.ok ? resolved.repo.root : process.cwd();
     return writeResult(await loginCheck(root, process.env));
   }
   if (args2.tokenStdin === args2.jevKeyStdin) {

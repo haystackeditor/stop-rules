@@ -5,7 +5,7 @@ import type { AgentAdapter, HookContext, HookOutput } from "./adapters/index.js"
 import { resetBaseline, run, type RunOutcome } from "./check.js";
 import { login, loginCheck, writeTeamConfig } from "./credentials.js";
 import { DEFAULT_MAX_CALLS, DEFAULT_THRESHOLD } from "./engine.js";
-import { findRepo } from "./git.js";
+import { resolveRepo, type RepoResolution } from "./repo.js";
 import { init, renderInit } from "./init.js";
 import { DEFAULT_CUT, SETTINGS_FILE } from "./settings.js";
 import type { CutMode } from "./types.js";
@@ -29,7 +29,7 @@ Usage:
 Options:
   --agent <name>       hook mode only: which agent's protocol to speak (default ${DEFAULT_AGENT})
   --agents <a,b,c>     init mode only: which agents to wire up (default: the ones detected)
-  --dir <path>         init mode only: the repository to install into (default: this one)
+  --dir <path>         the repository to work on (default: the one holding the current folder)
   --team <endpoint>    init mode only: use your team's stop-rules server, not your own key
   --rules <path>       rules file (default <repo root>/.stop-rules.md)
   --cut <mode>         functions (tree-sitter), hunks or chunks (no parser) (default ${DEFAULT_CUT})
@@ -232,17 +232,30 @@ async function readStdin(): Promise<string> {
 }
 
 /**
- * The absolute path of the file running right now, which init vendors when that file is the
- * bundle. Node gives a file: URL for every module loaded from disk, so anything else means
- * this code is running somewhere init cannot copy from, and it says so.
+ * The absolute path of the file running right now. `init` vendors it when it is the bundle,
+ * and every command compares it with the repository it resolved, so a vendored copy never
+ * works on another repository. Node gives a file: URL for every module loaded from disk, so
+ * anything else means this code is running somewhere with no file to point at.
  */
 function runningFile(): string {
   if (!import.meta.url.startsWith("file:")) {
-    throw new Error(
-      `stop-rules is running from ${import.meta.url}, which is not a file on disk, so init has nothing to copy`,
-    );
+    throw new Error(`stop-rules is running from ${import.meta.url}, which is not a file on disk`);
   }
   return fileURLToPath(import.meta.url);
+}
+
+/** The one repository rule, for every command. Prints the reason and returns null on a stop. */
+async function repoFor(args: ParsedArgs, cwd: string): Promise<RepoResolution> {
+  return resolveRepo({
+    cwd,
+    selfPath: runningFile(),
+    ...(args.dir !== undefined ? { dir: args.dir } : {}),
+  });
+}
+
+function reportRepo(resolution: RepoResolution & { ok: false }): number {
+  process.stderr.write(`stop-rules: ${resolution.reason}\n`);
+  return 1;
 }
 
 function emit(delivery: HookOutput): number {
@@ -282,10 +295,14 @@ async function runHook(args: ParsedArgs): Promise<number> {
     process.stderr.write(`stop-rules: ${error instanceof Error ? error.message : String(error)}\n`);
     return 1;
   }
+  // The payload's directory, or this process's when the agent documents none. --dir beats
+  // both, and either way the repository is resolved by the one rule.
+  const cwd = input.cwd === undefined ? process.cwd() : input.cwd;
+  const resolved = await repoFor(args, cwd);
+  if (!resolved.ok) return emit(adapter.deliverError(`stop-rules: ${resolved.reason}`));
   const outcome = await run({
-    // An adapter leaves cwd undefined only when its agent documents no directory field at
-    // all, and those agents run the hook in the project root. See HookContext.
-    cwd: input.cwd === undefined ? process.cwd() : input.cwd,
+    repo: resolved.repo,
+    cwd,
     mode: "hook",
     sessionId: input.sessionId,
     stopHookActive: input.stopHookActive === true,
@@ -311,7 +328,10 @@ function knobArgs(args: ParsedArgs): {
 }
 
 async function runCheckCommand(args: ParsedArgs): Promise<number> {
+  const resolved = await repoFor(args, process.cwd());
+  if (!resolved.ok) return reportRepo(resolved);
   const outcome = await run({
+    repo: resolved.repo,
     cwd: process.cwd(),
     mode: "check",
     ...knobArgs(args),
@@ -332,7 +352,10 @@ async function runScoreCommand(args: ParsedArgs): Promise<number> {
     process.stderr.write("stop-rules: score takes --diff or --base, not both\n");
     return 1;
   }
+  const resolved = await repoFor(args, process.cwd());
+  if (!resolved.ok) return reportRepo(resolved);
   const outcome = await run({
+    repo: resolved.repo,
     cwd: process.cwd(),
     mode: "score",
     ...knobArgs(args),
@@ -383,7 +406,9 @@ async function runBaselineCommand(args: ParsedArgs): Promise<number> {
     process.stderr.write("stop-rules: baseline only takes --reset, as in stop-rules baseline --reset\n");
     return 1;
   }
-  return writeResult(await resetBaseline(process.cwd()));
+  const resolved = await repoFor(args, process.cwd());
+  if (!resolved.ok) return reportRepo(resolved);
+  return writeResult(await resetBaseline(resolved.repo));
 }
 
 /** Team mode: write the endpoint into the repo so every developer's hook finds it. */
@@ -392,19 +417,21 @@ async function runTeamCommand(args: ParsedArgs): Promise<number> {
     process.stderr.write("stop-rules: team needs an endpoint, as in stop-rules team https://example.com\n");
     return 1;
   }
-  const repo = await findRepo(process.cwd());
-  if (repo === null) {
-    process.stderr.write(`stop-rules: ${process.cwd()} is not inside a git repository.\n`);
-    return 1;
-  }
-  return writeResult(await writeTeamConfig(repo.root, args.operand));
+  const resolved = await repoFor(args, process.cwd());
+  if (!resolved.ok) return reportRepo(resolved);
+  return writeResult(await writeTeamConfig(resolved.repo.root, args.operand));
 }
 
 /** Secrets arrive on stdin only, so they never reach shell history or a process list. */
 async function runLoginCommand(args: ParsedArgs): Promise<number> {
   if (args.check) {
-    const repo = await findRepo(process.cwd());
-    const root = repo === null ? process.cwd() : repo.root;
+    // A credential can be checked outside a repository, where there are no settings to read,
+    // so only a --dir that is not a repository and a vendored copy pointed elsewhere stop it.
+    const resolved = await repoFor(args, process.cwd());
+    if (!resolved.ok && (resolved.kind === "other-repo" || args.dir !== undefined)) {
+      return reportRepo(resolved);
+    }
+    const root = resolved.ok ? resolved.repo.root : process.cwd();
     return writeResult(await loginCheck(root, process.env));
   }
   if (args.tokenStdin === args.jevKeyStdin) {

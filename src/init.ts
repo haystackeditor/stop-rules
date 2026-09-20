@@ -4,7 +4,7 @@ import { ADAPTERS, agentNames, getAdapter } from "./adapters/index.js";
 import type { AgentAdapter, InstallResult } from "./adapters/index.js";
 import { readTeamEndpoint, writeTeamConfig } from "./credentials.js";
 import { isSkippedPath } from "./diff.js";
-import { findRepo, runGit } from "./git.js";
+import { runGit } from "./git.js";
 import {
   EXTENSIONS,
   GRAMMAR_TITLE,
@@ -12,6 +12,7 @@ import {
   grammarWasmName,
   type GrammarKey,
 } from "./languages.js";
+import { resolveRepo } from "./repo.js";
 import { parseRules, STARTER_RULES } from "./rules.js";
 import { DEFAULT_CUT, loadSettings, SETTINGS_FILE, writeSettings } from "./settings.js";
 import { grammarWasmPath, runtimeWasmPath, vendorDir } from "./treesitter.js";
@@ -124,11 +125,11 @@ function bundleSource(selfPath: string): string {
 }
 
 export async function init(options: InitOptions): Promise<InitReport> {
-  const repo = await findRepo(options.dir);
-  if (repo === null) {
-    return failure(options.dir, `${options.dir} is not inside a git repository.`);
-  }
-  const root = repo.root;
+  // The same repository rule every other command follows, guard included: a copy vendored in
+  // one repository installs into that one, and the clone's bin/stop-rules.mjs installs anywhere.
+  const resolved = await resolveRepo({ cwd: options.dir, selfPath: options.selfPath });
+  if (!resolved.ok) return failure(options.dir, resolved.reason);
+  const root = resolved.repo.root;
 
   let chosen: AgentAdapter[];
   if (options.agents !== undefined) {

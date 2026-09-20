@@ -12,12 +12,12 @@ import { DEFAULT_MAX_CALLS, DEFAULT_THRESHOLD, runEngine, type CacheLike } from 
 import {
   diffTrees,
   emptyTree,
-  findRepo,
   hasHead,
   objectExists,
   readBlob,
   resolveTree,
   snapshotWorkingTree,
+  type RepoPaths,
 } from "./git.js";
 import { AUTH_REJECTED, BILLING_EXHAUSTED, type FetchLike } from "./jev.js";
 import { coverage, cutWords, noneCheckedReason, renderReport, renderScores } from "./report.js";
@@ -51,6 +51,9 @@ const LOOP_GUARD_ROUNDS = 3;
 const MAX_SESSIONS_KEPT = 100;
 
 export interface RunOptions {
+  /** The repository to work on, already resolved by the one rule in repo.ts. */
+  repo: RepoPaths;
+  /** Where the command was run. Only relative paths the user typed resolve against it. */
   cwd: string;
   mode: "hook" | "check" | "score";
   /** A flag value. It beats the settings file, which beats the default. */
@@ -97,11 +100,7 @@ export interface CommandResult {
 }
 
 /** `stop-rules baseline --reset`: forget the baseline so the next run starts from HEAD. */
-export async function resetBaseline(cwd: string): Promise<CommandResult> {
-  const repo = await findRepo(cwd);
-  if (repo === null) {
-    return { ok: false, lines: [`stop-rules: ${cwd} is not inside a git repository.`] };
-  }
+export async function resetBaseline(repo: RepoPaths): Promise<CommandResult> {
   const stateDir = stateDirFor(repo.gitDir);
   await resetState(stateDir);
   return {
@@ -128,8 +127,7 @@ export async function run(options: RunOptions): Promise<RunOutcome> {
     notes.push(message);
   };
 
-  const repo = await findRepo(options.cwd);
-  if (repo === null) return cannotRun(`${options.cwd} is not inside a git repository.`);
+  const repo = options.repo;
 
   const rulesPath = options.rulesPath
     ? path.resolve(options.cwd, options.rulesPath)
