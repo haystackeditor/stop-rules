@@ -533,6 +533,92 @@ with the most honest numbers we have. Two sources, and they are kept apart on pu
 
 Both samples are small. Sample sizes are beside every number.
 
+#### Six projects, 96 sessions
+
+The larger measurement, run on 20 and 21 September 2026. Six small projects were written for
+it, one each in Ruby, Python, Go, Rust, React and a near-empty TypeScript seed. Each had 8
+team rules the agent never saw and 8 tasks, 4 that extend existing code and 4 that add a new
+subsystem. Each task was run once with Sonnet and once with Haiku in a real Claude Code
+session with this hook live, at its defaults: bar 0.5, one hunk per piece, four pieces per
+call. A blind reader who saw only the change and the rules wrote the answer key before any
+score was looked at. A flag in a file the reader did not name went to a second reviewer, who
+ruled it real, arguable or not a break, so nothing below is a false alarm by default. One
+bare-seed Sonnet session stopped at a permission question with no change and was run again.
+
+The tool's own output, at its own bar:
+
+| | all six projects |
+|---|---|
+| real breaks the agents made unprompted | 59 |
+| caught, in the right file | 43 |
+| caught, right rule, wrong file | 5 |
+| missed | 11 |
+| false alarms (a reviewer ruled not a break) | 18 |
+| arguable (the rule's wording decides) | 10 |
+| Jev calls, all 96 sessions | 374 |
+| cost, all 96 sessions | $0.07 |
+
+Haiku broke a rule in 30 of its 48 sessions (39 breaks). Sonnet broke one in 11 of 48 (13
+breaks).
+
+Per project:
+
+| project | the base code | real breaks | caught | wrong file | missed | false alarms | arguable |
+|---|---|---|---|---|---|---|---|
+| Go service | old half breaks 4 of the 8 rules | 17 | 13 | 3 | 1 | 5 | 2 |
+| TypeScript seed | nearly empty, nothing to copy | 15 | 11 | 0 | 4 | 3 | 2 |
+| Ruby, Rails-shaped | follows all 8 | 11 | 7 | 1 | 3 | 2 | 1 |
+| React front end | follows all 8 | 8 | 6 | 0 | 2 | 3 | 1 |
+| Python service | follows 6, silent on 2 | 6 | 5 | 0 | 1 | 4 | 2 |
+| Rust CLI | follows 7, silent on 1 | 2 | 1 | 1 | 0 | 1 | 2 |
+
+Per kind of rule:
+
+| kind of rule | rules | real breaks | caught | wrong file | missed | false alarms | arguable |
+|---|---|---|---|---|---|---|---|
+| never call X, use Y | 24 | 35 | 27 | 3 | 5 | 5 | 3 |
+| layer or folder | 8 | 7 | 7 | 0 | 0 | 9 | 2 |
+| something must be present | 6 | 7 | 6 | 0 | 1 | 2 | 1 |
+| needs another file | 6 | 5 | 3 | 2 | 0 | 0 | 3 |
+| a value's format | 3 | 3 | 0 | 0 | 3 | 0 | 0 |
+| judgment | 4 | 2 | 0 | 0 | 2 | 2 | 1 |
+
+Per kind of task, all projects: the 48 extend tasks had 20 real breaks, 15 caught, 5 false
+alarms; the 48 new-subsystem tasks had 39 real breaks, 28 caught in the right file, 5 in the
+wrong one, 13 false alarms and 8 arguable.
+
+By what the base code does about the rule: where the old code already breaks a rule (the Go
+project, 4 rules), 10 breaks, 9 caught, 0 false alarms. Where the code says nothing about the
+rule, 16 breaks, 12 caught, 3 false alarms. Where the code already follows the rule, 33
+breaks, 22 caught, 5 in the wrong file, 15 false alarms and 8 arguable.
+
+Where the 28 wrong or arguable flags came from: 12 were on test files where the rule said
+nothing about tests (a test that starts its own HTTP server, a test that builds a path
+directly, a Go test that cannot take a context as its first argument). 7 were layer rules
+flagged on a file outside the layer the rule restricts (a model, the composition root, a
+README). The rest are one-offs. The two lines in the rule-writing guide, say what the rule
+means for tests and name the folder a layer rule applies to, come from this.
+
+What the agent did with a flag, over 96 sessions: the hook reported something in 46; the agent
+fixed the code in 28, argued and changed nothing in 13, and did something else in 5. A
+re-check of the final tree was clean in 52 of 96 sessions.
+
+The same first-stop trees scored again one piece per call, to show the bar:
+
+| bar | caught | false alarms | flags nobody has ruled on |
+|---|---|---|---|
+| 0.4 | 56 of 59 | 14 | 89 |
+| 0.5 | 48 of 58 | 9 | 41 |
+| 0.6 | 43 of 57 | 6 | 13 |
+| 0.7 | 35 of 55 | 3 | 5 |
+
+Raising the bar from 0.5 to 0.7 gives up 13 catches to remove 6 false alarms. The last column
+is large at the low bars: those flags fell in files the blind reader did not name and nobody
+has judged them, so they count neither way.
+
+The one-project experiment of 19 September below is kept as it was written; the six-project
+numbers above supersede its headline.
+
 #### Works: "never call X, use Y instead", where X is a name the code shows
 
 The rule names something that is either in the added lines or is not, and the piece is
@@ -602,10 +688,13 @@ when code was judged piece by piece.
 
 #### The honest headline: imitation does most of the work
 
-In the same experiment, in a codebase that already shows its own conventions, Sonnet and
-Haiku followed all 8 house rules by imitation in 14 of the 16 sessions. There were 3 real
-breaks in 16 sessions: 1 caught, 2 missed, and 1 false alarm. The tool earned its keep in the
-sessions where the agent built something new with nothing nearby to copy.
+In the one-project experiment, in a codebase that already shows its own conventions, Sonnet
+and Haiku followed all 8 house rules by imitation in 14 of the 16 sessions: 3 real breaks, 1
+caught, 2 missed, 1 false alarm. The six projects say the same thing with more data: where the
+code already follows the rules and the task extends it, the agents mostly copy what they see
+(Rust: 2 breaks in 16 sessions). The tool earned its keep in two places: old code that
+already breaks the rules (Go: 17 breaks in 16 sessions, 16 pointed at), and new subsystems or
+a bare seed with nothing to copy from (39 breaks in the new-subsystem tasks, 33 pointed at).
 
 Set your expectations from that. Rules that repeat what your code already demonstrates buy
 little. Rules about the thing your codebase has no example of yet, and rules of the "never

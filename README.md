@@ -160,37 +160,61 @@ Then write each rule as one checkable sentence that says what to do instead:
 Rules that work less well are the vague ones ("write clean code") and the ones about things
 one piece of a change cannot show ("keep the service boundaries tidy").
 
+Two things the measurement below asks for:
+
+- Say what the rule means for tests. "Never call `fetch` outside `http.ts`; a test may call
+  it against a server the test starts." Most of the wrong flags we saw were on test files the
+  rule had not thought about.
+- If a rule is about a layer, name the folder. "Files under `lib/controllers/` must not
+  build SQL" gives Jev a fact it can see in the path. "Controllers must not build SQL" makes
+  it guess which files are controllers.
+
 ### Which kinds of rule Jev can judge, measured
 
-Two sources, kept apart. The **experiment** is 16 real coding agent sessions, Sonnet and
-Haiku, on one small service with 8 team rules the agent could not see, run on 19 September
-2026; its numbers are that experiment's, not a run of ours. The **example scores** are ours:
-the files in [`examples/tuning/`](examples/tuning), scored against the live service on 19
-September 2026, which reported its version as `jev-1.13.0`. Both samples are small.
+Six small projects were written for this, one each in Ruby, Python, Go, Rust, React and a
+near-empty TypeScript seed. Each had 8 team rules the agent never saw and 8 tasks, each task
+run once with Sonnet and once with Haiku in a real Claude Code session with the hook live: 96
+sessions on 20 and 21 September 2026. A blind reader wrote the answer key before any score
+was looked at, and a second reviewer ruled on every flag outside the reader's files, so
+nothing below is a false alarm by default. Full write-up and every n in
+[docs/TUNING.md](docs/TUNING.md).
 
-- **Works: "never call X, use Y instead", where X is a name the code shows.** In the
-  experiment a raw HTTP call in a codebase that has a helper for it scored 0.88 in a real
-  session and the agent fixed it, and planted `fetch(`, `console.log` and `toFixed` scored
-  0.92, 0.94 and 0.87, one of each. Our own example agrees:
-  [`helper.diff`](examples/tuning/helper.diff) scores 0.92 on the function that calls `fetch`
-  and 0.10 on the one that calls the helper, twice each.
-- **Does not work: a rule about something that is missing** ("every exported function has a
-  doc comment"). In the experiment the one real breach scored 0.21 while code the rule allows
-  scored up to 0.48. A linter does this properly.
-- **Does not work: a rule that needs the rest of the file or the codebase**, because a piece
-  is all Jev sees.
-- **Careful: a rule whose answer depends on which layer or folder the file is in** ("handlers
-  must not touch storage, services may"). In the experiment it inverted: the highest scores
-  landed on the services the rule allows (0.69) and a real breach scored 0.11. Our own
-  example [`layers.diff`](examples/tuning/layers.diff) did the opposite, scoring 0.93 and 0.89
-  on the two handlers that touch the database and 0.19 and 0.10 on the two services that do
-  the same thing. So this kind depends on whether the piece itself shows which layer the file
-  is in. Do not trust it without running `score` on your own code. Both sets of numbers are
-  in [docs/TUNING.md](docs/TUNING.md).
-- **And the honest headline.** In a codebase that already shows its own conventions, Sonnet
-  and Haiku followed all 8 house rules by imitation in 14 of the 16 sessions. There were 3
-  real breaks in total: 1 caught, 2 missed, and 1 false alarm. The tool earned its keep where
-  the agent built something new with nothing nearby to copy from.
+The tool's own output at its own bar, all 96 sessions: the agents broke a rule 59 times
+unprompted, the tool pointed at 43 of them in the right file and 5 more in the wrong file,
+missed 11, and raised 18 flags a reviewer ruled not a break plus 10 arguable ones. The whole
+thing cost $0.07 in Jev calls. Haiku broke a rule in 30 of its 48 sessions, Sonnet in 11.
+
+| kind of rule | rules | real breaks | caught | missed | false alarms | arguable |
+|---|---|---|---|---|---|---|
+| never call X, use Y | 24 | 35 | 30 | 5 | 5 | 3 |
+| layer or folder | 8 | 7 | 7 | 0 | 9 | 2 |
+| something must be present | 6 | 7 | 6 | 1 | 2 | 1 |
+| needs another file | 6 | 5 | 5 | 0 | 0 | 3 |
+| a value's format | 3 | 3 | 0 | 3 | 0 | 0 |
+| judgment | 4 | 2 | 0 | 2 | 2 | 1 |
+
+"Caught" here includes the 5 flagged under the right rule in the wrong file.
+
+- **Works: "never call X, use Y instead", where X is a name the code shows.** Most of the
+  rules, most of the breaks, most of the catches, about one false alarm in seven flags. Our
+  own example agrees: [`helper.diff`](examples/tuning/helper.diff) scores 0.92 on the function
+  that calls `fetch` and 0.10 on the one that calls the helper.
+- **Careful: a rule about which layer or folder a file is in.** Every break was caught, and
+  there were more false alarms than catches. Every false alarm was a flag on a file outside
+  the layer the rule restricts: a model, the composition root, a README. Name the folder the
+  rule applies to and Jev has the fact it needs.
+- **Careful: tests.** 12 of the 28 wrong or arguable flags were on test files where the rule
+  said nothing about tests. Say what the rule means for tests.
+- **No evidence it works: a rule about a value's format** ("timestamps are ISO 8601 in UTC").
+  0 of 3 caught. Three is a small number, but it is all we have.
+- **Does not work: a rule that needs the rest of the codebase**, because a piece and the code
+  around it is all Jev sees.
+- **The honest headline.** Where the code already follows the rules and the task extends
+  it, the agents mostly followed the rules by copying what they saw (Rust: 2 breaks in 16
+  sessions). The tool earned its keep in two places: old code that already breaks the rules
+  (Go: 17 breaks in 16 sessions, 16 pointed at), and new subsystems or a bare seed with
+  nothing to copy from (39 breaks across the six projects' new-subsystem tasks, 33 pointed
+  at).
 
 ## How it works
 
@@ -294,6 +318,7 @@ the agent decides the rule does not apply and changes nothing, the next turn is 
 the code still breaks the rule, so a quiet hook is not a clean codebase. In our own
 experiment on 19 September 2026, 3 of 16 sessions ended that way: the agent argued and
 changed nothing, the hook stayed quiet, and `check --base HEAD` still reported the finding.
+Across the six projects and 96 sessions of 20 and 21 September, 13 sessions ended that way.
 `check --base <rev>` is the honest gate, because it is read only, skips nothing it has
 already told an agent about, and reports the same finding every time you run it. It also has
 no way to mark a finding as accepted, so a false alarm keeps coming back there until you
