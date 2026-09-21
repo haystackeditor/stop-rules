@@ -109,6 +109,15 @@ npx wrangler secret put STOP_RULES_TOKEN
 npx wrangler deploy
 ```
 
+Measured on that deploy, 21 September 2026, with the worker's own log tailed: 8 teammates
+checking at the same moment each got their answer in 1 second, and the worker logged 8
+requests, all OK; 32 at the same moment each got theirs in 2 to 3 seconds, 32 requests
+logged, all OK, and no client saw a 429 or a "not checked". Each teammate was a separate
+repository with its own token login and its own distinct rule text, so no two asked Jev the
+same question. What that run did not exercise: the server's own line of 12 open calls, since
+Cloudflare spread 32 short requests without any instance reaching it, so the 429-and-retry
+path is still proven only by reading it.
+
 Two things seen on the real deploy: `/health` reported both secrets missing for a few seconds
 after `secret put` returned, and was right after that; and `npx wrangler delete` refuses to run
 from a script without a terminal unless `CLOUDFLARE_API_TOKEN` is set, so run it by hand.
