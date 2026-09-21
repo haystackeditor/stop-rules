@@ -119,7 +119,7 @@ export interface EngineResult {
 /**
  * The stage 1 claim. `key` names the piece inside the call's state.
  *
- * This wording is the one the code around each piece was measured with on the workbench on
+ * This wording is the one the code around each piece was measured with on our harness on
  * 20 September 2026. Against the older wording, which named only the diff, answers moved by
  * 0.011 on the same sample, so the measured one is what ships.
  */

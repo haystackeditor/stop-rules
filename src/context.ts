@@ -1,7 +1,7 @@
 /**
  * The code around a change, which is what Jev is sent beside the diff.
  *
- * Measured on the workbench on 20 September 2026, over 240 real agent written changes with
+ * Measured on our harness on 20 September 2026, over 240 real agent written changes with
  * blind labels and adjudications: the same piece with 25 unchanged lines above and below the
  * changed lines caught 21 of 31 real breaks with 7 plainly false flags, against 23 of 31 with
  * 10 plainly false for the piece on its own, and it newly flagged 7 of 1,358 clean pairs. It
@@ -142,7 +142,7 @@ export interface LineRange {
 
 /**
  * The piece's diff with `CONTEXT_LINES` unchanged lines above and below each change, taken
- * straight from the new file, with a recomputed `@@` header. Ported from the workbench's
+ * straight from the new file, with a recomputed `@@` header. Ported from the measurement harness's
  * `buildWideHunk`, which measured this, and widened there to a piece that carries more than
  * one hunk: a window never runs into the next change or back over the previous one, and two
  * windows that meet become one hunk, so no line is shown twice and no added line is ever

@@ -264,7 +264,7 @@ thing cost $0.07 in Jev calls. Haiku broke a rule in 30 of its 48 sessions, Sonn
 
 ### What Jev sees
 
-Measured on the workbench on 20 September 2026, at the default bar of 0.5, over the same 240
+Measured on our harness on 20 September 2026, at the default bar of 0.5, over the same 240
 real agent written changes, blind labelled and adjudicated, which hold 31 real breaks:
 
 | What Jev was shown | Real breaks caught, of 31 | Plainly false flags | Flags nobody has ruled on |
@@ -587,8 +587,8 @@ named in `src/languages.ts` is not in that grammar, or when the language table a
 the one in the code. Run `npm run build:aws` after changing the server, so the committed
 CloudFormation template keeps matching the code.
 
-There are no tests on purpose. Changes are verified by running the thing: see the specs in
-[docs/specs/](docs/specs/) for what was verified and how.
+There are no tests on purpose. Changes are verified by running the thing, and the
+measurements that decided every default are under [docs/measurements/](docs/measurements/).
 
 ## License
 

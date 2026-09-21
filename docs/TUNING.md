@@ -103,7 +103,7 @@ stop-rules score --show-context     # prints exactly what Jev saw, per piece
 
 ### The measurement behind it
 
-On the workbench, on 20 September 2026, over the same 240 real agent written changes, blind
+On our measurement harness, on 20 September 2026, over the same 240 real agent written changes, blind
 labelled with an adjudicator on every disagreement, which hold 31 real breaks, at the default
 bar of 0.5, cut one hunk per piece:
 
@@ -675,8 +675,9 @@ sessions the wording had never seen, read blind and ruled the same way.
 Value-format rules went from 0 of 3 to 4 of 4. Layer rules from 5 of 7 with 6 false alarms
 to 3 of 3 with 1. The agents fixed the flagged code in 21 of the 48 sessions and argued in
 5; a re-check of the final tree was clean in 32 of 48, against 25 of 48 with the original
-wording. The full write-up, per project and per rule, is in the workbench's
-`experiments/iterate/RESULTS.md`.
+wording. The full write-up, per project and per rule, is in
+[docs/measurements/iteration-1.md](measurements/iteration-1.md), and the six-project
+baseline in [docs/measurements/six-projects.md](measurements/six-projects.md).
 
 Two things that were measured at the same time and did not help:
 
@@ -916,7 +917,7 @@ sample rows were measured before that change, with the piece alone:
 Per change that works out at 2,520 input tokens on the default cut, which is $0.00011, and
 2,787 cut into whole functions, which is $0.00012. A thousand agent turns of that size cost
 about 11 or 12 cents with the piece alone. The lines around each piece roughly double that: the
-workbench measured $0.21 per 1,000 changes against $0.11 on the same sample. Going from 3 rules
+harness measured $0.21 per 1,000 changes against $0.11 on the same sample. Going from 3 rules
 to 12 raised the input tokens by about 80 percent on our one piece test, and a second run over
 the same code is free because the answers are cached.
 

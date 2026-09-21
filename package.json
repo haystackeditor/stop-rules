@@ -1,7 +1,7 @@
 {
   "name": "stop-rules",
   "version": "0.1.0",
-  "description": "Stop hook for coding agents that checks each turn's diff against your team's coding rules using Jev.",
+  "description": "Holds your coding agent to your team's written coding rules: a stop hook for 13 agents that asks Jev whether each changed piece breaks a rule, and hands the piece back to the agent.",
   "license": "MIT",
   "type": "module",
   "bin": {
@@ -33,5 +33,24 @@
     "tree-sitter-wasms": "0.1.13",
     "typescript": "^5.7.2",
     "web-tree-sitter": "0.25.10"
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/haystackeditor/stop-rules.git"
+  },
+  "homepage": "https://github.com/haystackeditor/stop-rules#readme",
+  "bugs": {
+    "url": "https://github.com/haystackeditor/stop-rules/issues"
+  },
+  "keywords": [
+    "coding-agent",
+    "claude-code",
+    "codex",
+    "cursor",
+    "stop-hook",
+    "code-review",
+    "coding-rules",
+    "jev",
+    "typesafe"
+  ]
 }
