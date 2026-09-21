@@ -80,7 +80,7 @@ the buttons can now be tried; until one is, its row's status word is the whole c
 
 | Target | How | Prompts for | Endpoint afterwards | Status |
 |---|---|---|---|---|
-| Cloudflare Workers | Deploy button, or `npx wrangler deploy` | both secrets, from `.dev.vars.example` | `https://stop-rules.<subdomain>.workers.dev` | ran locally in the platform's own runtime (workerd) |
+| Cloudflare Workers | Deploy button, or `npx wrangler deploy` | both secrets, from `.dev.vars.example` | `https://stop-rules.<subdomain>.workers.dev` | **deployed for real** on 21 September 2026 with `npx wrangler deploy`, both secrets set, a client repo pointed at it, one real check answered through it (0.91 on the `fetch` example), a wrong token refused, then deleted |
 | Vercel | Deploy button | both secrets, from the `env` query parameter | `https://<app>.vercel.app/api` | config validated only, wrapper executed under Node |
 | Netlify | Deploy to Netlify button | both secrets, from `netlify.toml` | the site URL | config validated only, wrapper executed under Node |
 | Render | Deploy to Render button | both secrets, from `render.yaml` `sync: false` | the Render service URL | image ran locally, `render.yaml` config validated only |
@@ -108,6 +108,10 @@ npx wrangler secret put TYPESAFE_API_KEY
 npx wrangler secret put STOP_RULES_TOKEN
 npx wrangler deploy
 ```
+
+Two things seen on the real deploy: `/health` reported both secrets missing for a few seconds
+after `secret put` returned, and was right after that; and `npx wrangler delete` refuses to run
+from a script without a terminal unless `CLOUDFLARE_API_TOKEN` is set, so run it by hand.
 
 The Worker entry module is `src/server/cloudflare.ts`, not `handler.ts`, because workerd
 refuses to start a Worker whose entry module has a named export that is not a handler. That
