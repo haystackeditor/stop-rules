@@ -160,14 +160,20 @@ Then write each rule as one checkable sentence that says what to do instead:
 Rules that work less well are the vague ones ("write clean code") and the ones about things
 one piece of a change cannot show ("keep the service boundaries tidy").
 
-Two things the measurement below asks for:
+Three edits that were measured to matter. On the 96 saved agent sessions described below,
+rewording 14 of 48 rules in only these three ways, with nothing else changed, took the real
+breaks caught from 48 of 59 to 56 of 62 and the false alarms from 35 to 26.
 
 - Say what the rule means for tests. "Never call `fetch` outside `http.ts`; a test may call
   it against a server the test starts." Most of the wrong flags we saw were on test files the
   rule had not thought about.
 - If a rule is about a layer, name the folder. "Files under `lib/controllers/` must not
   build SQL" gives Jev a fact it can see in the path. "Controllers must not build SQL" makes
-  it guess which files are controllers.
+  it guess which files are controllers. Layer rules went from 8 false alarms to 3.
+- Turn a soft clause into a concrete ban. "The `Money` helpers do the arithmetic" caught 0 of
+  3 real breaks. "Never add, sum, multiply or take a percentage of cents values with plain
+  arithmetic outside `lib/money.rb`; call `Money.sum_cents`, `Money.percent_of` instead"
+  caught 3 of 3, and found 2 more nobody had noticed. Jev sees the ban, not the intent.
 
 ### Which kinds of rule Jev can judge, measured
 

@@ -169,6 +169,11 @@ stop-rules check --threshold 0.6
 
 ### Where 0.5 comes from
 
+The corpus below is where the number was set. The larger and later measurement, 96 agent
+sessions on six projects with well-worded rules, is in section 3 ("The same 96 sessions,
+scored again with reworded rules"): there 0.5 catches 56 of 62 with 26 false alarms and 0.6
+catches 50 of 60 with 11. Both are true; they are different code.
+
 One run, on the default cut of one hunk per piece, over 240 real agent written changes with
 four of the starter rules, where an adjudicator ruled on every disagreement. It holds 29 real
 problems:
@@ -615,6 +620,46 @@ The same first-stop trees scored again one piece per call, to show the bar:
 Raising the bar from 0.5 to 0.7 gives up 13 catches to remove 6 false alarms. The last column
 is large at the low bars: those flags fell in files the blind reader did not name and nobody
 has judged them, so they count neither way.
+
+#### The same 96 sessions, scored again with reworded rules
+
+After the tables above were written, 14 of the 48 rules were reworded in three ways and
+nothing else changed: say what the rule means for tests, name the folder a layer rule is
+about, turn a soft clause into a concrete ban. The same saved changes were scored again, one
+piece per call, and a reader ruled on every new flag.
+
+| | original wording | reworded |
+|---|---|---|
+| real breaks caught | 48 of 59 | 56 of 62 |
+| missed | 9 | 5 |
+| false alarms | 35 | 26 |
+| arguable | 8 | 8 |
+
+(The total of real breaks grew because the reworded rules found 3 breaks nobody had recorded,
+and a reviewer ruled them real.) 27 flags went away, all but one on a test file, a file
+outside the named folder, or a README. 15 appeared, 8 of them real breaks. Value-format rules
+went from 0 of 3 caught to 3 of 3. Layer rules kept 7 of 7 with false alarms from 8 to 3.
+
+Two things that were measured at the same time and did not help:
+
+- **One piece per call instead of four.** Packing pulls every score down a little. Unpacked,
+  the same changes gave 48 of 59 caught with 35 false alarms against the packed hook's 43 of
+  59 with 18, at four times the calls. Unpacked at bar 0.6 lands where the packed hook at 0.5
+  already is. The default stays packed.
+- **A bar of 0.4.** The 93 flags between 0.4 and 0.5 that nobody had judged were ruled: 1 real,
+  13 arguable, 79 not a break.
+
+With the reworded rules, the bar trades like this, all six projects pooled:
+
+| bar | caught | false alarms | arguable |
+|---|---|---|---|
+| 0.5 | 56 of 62 | 26 | 8 |
+| 0.6 | 50 of 60 | 11 | 5 |
+| 0.7 | 42 of 57 | 3 | 0 |
+
+Layer and value-format rules lose no catches up to 0.7; "never call X" rules lose 2 at 0.6
+and 10 at 0.7. There is no per-kind bar in the tool: it would save about 7 false alarms in 96
+sessions and needs someone to sort the rules by hand.
 
 The one-project experiment of 19 September below is kept as it was written; the six-project
 numbers above supersede its headline.
