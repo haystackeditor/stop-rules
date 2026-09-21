@@ -640,6 +640,26 @@ and a reviewer ruled them real.) 27 flags went away, all but one on a test file,
 outside the named folder, or a README. 15 appeared, 8 of them real breaks. Value-format rules
 went from 0 of 3 caught to 3 of 3. Layer rules kept 7 of 7 with false alarms from 8 to 3.
 
+A second pass reworded 16 more rules the same way and, on the same 96 changes, reached 59 of
+62 with 13 false alarms. Both passes were written after reading the flags on those changes,
+so those numbers are the best case. The held-out test is the one to trust: six copies of the
+projects with the reworded rules live in the hook, one fresh Haiku session per task, 48
+sessions the wording had never seen, read blind and ruled the same way.
+
+| Haiku, 48 sessions each, the hook's own output at 0.5 | original wording | reworded, fresh sessions |
+|---|---|---|
+| real breaks the agents made unprompted | 58 | 34 |
+| caught in the right file | 34 (59%) | 27 (79%) |
+| missed | 21 | 7 |
+| false alarms | 10 | 10 |
+| arguable | 5 | 5 |
+
+Value-format rules went from 0 of 3 to 4 of 4. Layer rules from 5 of 7 with 6 false alarms
+to 3 of 3 with 1. The agents fixed the flagged code in 21 of the 48 sessions and argued in
+5; a re-check of the final tree was clean in 32 of 48, against 25 of 48 with the original
+wording. The full write-up, per project and per rule, is in the workbench's
+`experiments/iterate/RESULTS.md`.
+
 Two things that were measured at the same time and did not help:
 
 - **One piece per call instead of four.** Packing pulls every score down a little. Unpacked,

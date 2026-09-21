@@ -160,9 +160,12 @@ Then write each rule as one checkable sentence that says what to do instead:
 Rules that work less well are the vague ones ("write clean code") and the ones about things
 one piece of a change cannot show ("keep the service boundaries tidy").
 
-Three edits that were measured to matter. On the 96 saved agent sessions described below,
-rewording 14 of 48 rules in only these three ways, with nothing else changed, took the real
-breaks caught from 48 of 59 to 56 of 62 and the false alarms from 35 to 26.
+Three edits that were measured to matter, twice. First on the 96 saved agent sessions
+described below: rewording 14 of 48 rules in only these three ways, with nothing else
+changed, took the real breaks caught from 48 of 59 to 56 of 62 and the false alarms from 35
+to 26. Then on 48 fresh Haiku sessions the wording had never seen, with the reworded rules
+live in the hook: 27 of 34 real breaks caught (79%) with 10 false alarms, against 34 of 58
+(59%) with 10 false alarms for the original wording on the original Haiku sessions.
 
 - Say what the rule means for tests. "Never call `fetch` outside `http.ts`; a test may call
   it against a server the test starts." Most of the wrong flags we saw were on test files the
