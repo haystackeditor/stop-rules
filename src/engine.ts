@@ -30,20 +30,18 @@ import {
 
 /**
  * The one cutoff, and the one place this default is written. It is a default to look at, not
- * a recommendation: run `stop-rules score` on your own code and pick your own bar.
+ * a recommendation: run `stop-rules score` on your own code and pick your own bar. The
+ * `threshold` key in .stop-rules.json or the --threshold flag overrides it.
  *
- * Measured on 240 real agent written changes, cut one hunk per piece, which is the default
- * cut. At 0.5 it caught 22 of the 29 real problems in that sample, with 6 flags that are
- * plainly false and 5 that are arguable. At 0.6 it caught 11 of the 29, with 1 plainly false
- * flag. So 0.5 costs about five more flags to look at and finds twice as much. A team that
- * would rather be told less sets `threshold` to 0.6. docs/TUNING.md has both tables.
- *
- * Those counts were measured before Jev was given the code around each piece. With the wide
- * form, on 240 changes with 31 real breaks, 0.5 caught 21 with 7 plainly false flags and 0.55
- * caught 16 with fewer doubtful flags than the piece alone. The bar stays 0.5. docs/TUNING.md
- * has the whole table under "What Jev sees".
+ * 0.6 since 2026-09-21. Measured on 96 real agent sessions across six projects with
+ * well-worded rules, one piece per call, every flag ruled by a reviewer: 0.5 caught 59 of 62
+ * real breaks with 13 wrong flags, 0.6 caught 56 with 5, 0.7 caught 46 with 2. So 0.6 gives up
+ * 3 catches in 62 to remove 8 wrong flags in 13, and the owner chose that trade. The earlier
+ * 240-change corpus measurement, where 0.5 caught 22 of 29 and 0.6 caught 11, was on the
+ * original, less exact rule wordings; docs/TUNING.md has both tables and the rewording that
+ * moved the number.
  */
-export const DEFAULT_THRESHOLD = 0.5;
+export const DEFAULT_THRESHOLD = 0.6;
 
 /** The one ceiling on Jev requests in one run. Raise it with `maxCalls` or `--max-calls`. */
 export const DEFAULT_MAX_CALLS = 60;

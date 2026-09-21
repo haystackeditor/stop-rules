@@ -13,7 +13,7 @@ Every key is optional.
 {
   "endpoint": "https://stop-rules.your-team.example.com",
   "cut": "hunks",
-  "threshold": 0.5,
+  "threshold": 0.6,
   "maxCalls": 60
 }
 ```
@@ -22,13 +22,13 @@ Every key is optional.
 |---|---|---|---|
 | Where questions go | `endpoint` | `--team <url>` on `init` | your own Jev key |
 | How a change is cut into pieces | `cut` | `--cut hunks\|functions\|chunks` | `hunks` |
-| The bar a score must reach | `threshold` | `--threshold <0..1>` | `0.5` |
+| The bar a score must reach | `threshold` | `--threshold <0..1>` | `0.6` |
 | Requests to Jev in one run | `maxCalls` | `--max-calls <n>` | `60` |
 
 Every default in that table was measured, and none of them is a recommendation. The two this
 file spends the most words on are the cut, which is `hunks` because it parses nothing and
-caught the most on the sample below, and the bar, which is `0.5` because that is what was
-measured on `hunks`. Both are yours to change.
+caught the most on the sample below, and the bar, which is `0.6` because that is the trade the
+owner chose on the six-project measurement in section 1. Both are yours to change.
 
 A flag beats the file. The file beats the default. A key the tool does not know, a value of
 the wrong type and a value out of range each stop the run with one line that names the key.
@@ -161,11 +161,29 @@ file content to read them from. The output says so on its first line.
 ## 1. The bar: `threshold`
 
 At or above the bar, a rule counts as broken and the piece goes back to the agent. Below it,
-nothing happens. `0.5` is the default.
+nothing happens. `0.6` is the default, since 2026-09-21; it was `0.5` before, and every
+measurement in this file that says which bar it ran at is left as it was run.
 
 ```bash
-stop-rules check --threshold 0.6
+stop-rules check --threshold 0.5
 ```
+
+How to pick your own bar, and why there is no single right number: the bar trades catches
+for noise, and where you want to sit on that trade depends on how much your team minds a
+wrong flag against a missed break. Measured on 96 agent sessions across six projects with
+well-worded rules (one piece per call, every flag ruled by a reviewer):
+
+| Bar | Real breaks caught, of 62 | Wrong flags | Arguable flags |
+|---|---|---|---|
+| 0.5 | 59 | 13 | 4 |
+| 0.6 | 56 | 5 | 2 |
+| 0.7 | 46 | 2 | 1 |
+
+Going from 0.6 down to 0.5 buys 3 more catches for 8 more wrong flags. Going up to 0.7 loses
+10 catches to remove 3. Below 0.5 is not worth it: the 93 extra flags between 0.4 and 0.5
+held 1 real break. The numbers move with the model version and with your rules, so before
+you settle on a bar, run `stop-rules score` on a few of your own recent changes and look at
+where the real problems and the noise land.
 
 ### Where 0.5 comes from
 

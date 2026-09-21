@@ -256,7 +256,7 @@ thing cost $0.07 in Jev calls. Haiku broke a rule in 30 of its 48 sessions, Sonn
    hands the agent the piece.
 4. **One yes or no score per rule.** Every piece is asked about every rule: does the added
    code break this rule. Jev answers each claim with a probability. At or above the cutoff
-   (0.5 by default) it is a finding. Up to four pieces ride in one request, and a request is
+   (0.6 by default) it is a finding. Up to four pieces ride in one request, and a request is
    also bounded at 60,000 bytes, so a normal turn is one or two requests.
 5. **Tell the agent.** One entry per piece: the file, the line range, the name of the function
    when there is one, then every rule that piece broke with its score, and then the piece's
@@ -357,18 +357,32 @@ This does not say your code is clean. The reasons are below.
 Not checked (1): no grammar installed for .ts, run stop-rules init again to add it
 ```
 
-### Why the default bar is 0.5
+### Why the default bar is 0.6, and how to pick yours
 
-It is a default to look at, not a recommendation. Measured on 240 real agent written changes,
-blind labelled and adjudicated, cut one hunk per piece, which is the default cut:
+It is a default to look at, not a recommendation. `"threshold"` in `.stop-rules.json`, or
+`--threshold`, sets it to anything from 0 to 1.
 
-| Bar | Real problems caught, of 29 | Plainly false flags | Arguable flags |
+How to pick your own bar, and why there is no single right number: the bar trades catches
+for noise, and where you want to sit on that trade depends on how much your team minds a
+wrong flag against a missed break. Measured on 96 agent sessions across six projects with
+well-worded rules (one piece per call, every flag ruled by a reviewer):
+
+| Bar | Real breaks caught, of 62 | Wrong flags | Arguable flags |
 |---|---|---|---|
-| 0.5 | 22 | 6 | 5 |
-| 0.6 | 11 | 1 | 0 |
+| 0.5 | 59 | 13 | 4 |
+| 0.6 | 56 | 5 | 2 |
+| 0.7 | 46 | 2 | 1 |
 
-So 0.5 finds twice as much and costs about five more flags to look at. That is the whole
-reason for the number, and a team that would rather be told less puts `"threshold": 0.6` in
+Going from 0.6 down to 0.5 buys 3 more catches for 8 more wrong flags. Going up to 0.7 loses
+10 catches to remove 3. Below 0.5 is not worth it: the 93 extra flags between 0.4 and 0.5
+held 1 real break. The numbers move with the model version and with your rules, so before
+you settle on a bar, run `stop-rules score` on a few of your own recent changes and look at
+where the real problems and the noise land.
+
+The earlier measurement, on 240 real agent written changes with the original rule wordings,
+had a steeper trade: 0.5 caught 22 of 29 with 6 plainly false flags, and 0.6 caught 11 with 1.
+Well-worded rules (see "Writing good rules") are what flattened it, and a team whose rules are
+still rough may prefer 0.5. A team that would rather be told less puts `"threshold": 0.7` in
 `.stop-rules.json`. A later scoring run of the same sample, with all six starter rules and no
 adjudication, gives lower counts and the same shape; both runs, every bar from 0.3 to 0.7, and
 every cut mode are in [docs/TUNING.md](docs/TUNING.md). Run `stop-rules score` on your own code
@@ -471,7 +485,7 @@ stop-rules baseline --reset [--dir <repo>]
 
 Shared flags: `--dir <path>` (the repository to work on), `--rules <path>` (default
 `<repo root>/.stop-rules.md`), `--cut <mode>` (default hunks), `--threshold <0..1>`
-(default 0.5), `--max-calls <n>` (default 60), `--help`, `--version`.
+(default 0.6), `--max-calls <n>` (default 60), `--help`, `--version`.
 
 Which repository a command works on is one rule: `--dir` when you give it, and otherwise the
 repository that holds the folder you are in. The copy of stop-rules that `init` vendors into
@@ -488,7 +502,7 @@ committed and holds no secret. Every key is optional, and a flag beats the file.
 {
   "endpoint": "https://stop-rules.your-team.example.com",
   "cut": "hunks",
-  "threshold": 0.5,
+  "threshold": 0.6,
   "maxCalls": 60
 }
 ```

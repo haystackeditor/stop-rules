@@ -7339,7 +7339,7 @@ async function cutFiles(files, options) {
 }
 
 // src/engine.ts
-var DEFAULT_THRESHOLD = 0.5;
+var DEFAULT_THRESHOLD = 0.6;
 var DEFAULT_MAX_CALLS = 60;
 var PIECES_PER_CALL = 4;
 var PACK_MAX_BYTES = 6e4;
