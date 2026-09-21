@@ -75,9 +75,8 @@ Status words are used exactly as follows:
 - **unconfirmed**: the documentation did not settle it. Nothing is listed as unconfirmed
   without saying which part.
 
-No button below has been clicked. `https://github.com/haystackeditor/stop-rules` is private
-today, and every one of these buttons needs a public repository, so the buttons cannot be
-click-tested until the owner makes the repository public.
+No button below has been clicked yet. The repository went public on 21 September 2026, so
+the buttons can now be tried; until one is, its row's status word is the whole claim.
 
 | Target | How | Prompts for | Endpoint afterwards | Status |
 |---|---|---|---|---|
