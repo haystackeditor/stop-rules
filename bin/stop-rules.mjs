@@ -7990,14 +7990,16 @@ to a diff. Headings and paragraphs are ignored.
 
 If a linter can check it, use the linter. These rules are for things that need judgment.
 A rule must also be something a reviewer could judge from one piece of a change, without
-seeing the rest of the codebase.
+seeing the rest of the codebase. Say what a rule means for tests, name the folder a rule
+about a layer applies to, and name the helper a rule wants used. AGENT-SETUP.md section 6
+has the checklist and the measurements behind it.
 
-- Do not silently swallow errors. When code catches or receives an error it must rethrow it, return it to the caller, or log it with enough context to debug.
-- Do not add fallback values or default branches that hide a failure the caller needs to know about.
-- Do not write comments that only restate what the code does, or that narrate the change being made ("now we also handle X", "fixed the bug where"). A comment that explains why the code must be this way is fine.
-- Do not delete, skip or loosen an existing test to make it pass.
-- Do not hardcode a value or special-case a specific input just to make a test or check pass.
-- Do not leave stubs, placeholders, TODO implementations or fake data in code that is presented as finished.
+- Do not silently swallow errors. When code catches or receives an error it must rethrow it, return it to the caller, log it with enough context to debug, or store it on a result or record the caller can read. The break is a catch that drops the error and carries on as if nothing happened: an empty catch block, a catch that only says "ignore", or a top-level catch that exits without saying what failed. A test that catches an error it expects, to assert on it, is not covered.
+- Do not add fallback values or default branches that hide a failure the caller needs to know about. The break is code that turns a failed read, parse or call into a made-up value (an empty list, "unknown", a guessed port) and reports success. A documented default for an optional setting is fine, and so is a fallback the caller asked for by name.
+- Do not write comments that only restate what the code does, or that narrate the change being made ("now we also handle X", "fixed the bug where"). A comment that explains why the code must be this way, or what a caller must know, is fine, and so is a doc comment on a public function that says what it takes and returns. Comments inside a test file are not covered.
+- Do not delete, skip or loosen an existing test to make it pass. The break is a test that was removed, marked skip, or had its assertion weakened while the code it tested is still there. Setting up fixtures inside a test is not loosening it.
+- Do not hardcode a value or special-case a specific input just to make a test or check pass. The break is production code that checks for the exact value a test uses, or returns a canned answer for one input. A test's own fixture values, and a fake or stub inside a test file, are not covered.
+- Do not leave stubs, placeholders, TODO implementations or fake data in code that is presented as finished. The break is a function that returns a canned value or throws "not implemented", a TODO where the real code should be, or sample data wired in as if it were real. A test double inside a test file is not covered, and an interface or type with no body is not a stub.
 `;
 
 // src/slots.ts

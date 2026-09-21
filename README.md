@@ -152,14 +152,23 @@ Then write each rule as one checkable sentence that says what to do instead:
 
 ```markdown
 - Do not silently swallow errors. When code catches or receives an error it must rethrow
-  it, return it to the caller, or log it with enough context to debug.
+  it, return it to the caller, log it with enough context to debug, or store it on a
+  result or record the caller can read. The break is a catch that drops the error and
+  carries on as if nothing happened: an empty catch block, a catch that only says
+  "ignore", or a top-level catch that exits without saying what failed. A test that
+  catches an error it expects, to assert on it, is not covered.
 - Do not leave stubs, placeholders, TODO implementations or fake data in code that is
-  presented as finished.
+  presented as finished. The break is a function that returns a canned value or throws
+  "not implemented", a TODO where the real code should be, or sample data wired in as if
+  it were real. A test double inside a test file is not covered, and an interface or type
+  with no body is not a stub.
 ```
 
 Rules that work less well are the vague ones ("write clean code") and the ones about things
 one piece of a change cannot show ("keep the service boundaries tidy").
 
+The full checklist a coding agent follows when it writes or reviews rules is
+[AGENT-SETUP.md, section 6](AGENT-SETUP.md#6-write-the-rules-from-the-teams-own-documents).
 Three edits that were measured to matter, twice. First on the 96 saved agent sessions
 described below: rewording 14 of 48 rules in only these three ways, with nothing else
 changed, took the real breaks caught from 48 of 59 to 56 of 62 and the false alarms from 35

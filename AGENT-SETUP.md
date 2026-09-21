@@ -129,42 +129,90 @@ score surprises the human, run `score --show-context` and read what Jev actually
 
 ## 6. Write the rules from the team's own documents
 
-`init` wrote a starter `.stop-rules.md`. Replace its bullets with the team's real rules,
-which you take from what they have already written: `CLAUDE.md`, `AGENTS.md`,
+`init` wrote a starter `.stop-rules.md`. Keep the starter rules that fit this team and add
+the team's own, taken from what they have already written: `CLAUDE.md`, `AGENTS.md`,
 `.cursor/rules`, `CONTRIBUTING.md`, style guides, review checklists, linter configs.
 
-Rules for writing rules:
+Then review every rule against the checklist below. It comes from measurements on 144 real
+agent sessions across six projects (Ruby, Python, Go, Rust, React, and a bare TypeScript
+seed), and the wording is what decided whether a rule worked: the same rules, reworded the
+way this checklist says, went from catching 3 in 5 real breaks to 4 in 5 on 48 sessions the
+wording had never seen, with no more false alarms. The numbers are in
+[docs/TUNING.md](docs/TUNING.md).
 
-- One checkable sentence per bullet, and say what to do instead.
-- If a linter can check it, use the linter, not a rule in this file.
-- A rule must be something a reviewer could judge from one piece of a change, without
-  seeing the rest of the codebase.
-- Prefer "never call X, use Y instead", where X is a name the code shows. That kind was
-  measured working: in a 16 session experiment on 19 September 2026 a raw HTTP call in a
-  codebase with its own helper scored 0.88 and the agent fixed it, and planted `fetch(`,
-  `console.log` and `toFixed` scored 0.92, 0.94 and 0.87. Our own example pair scores 0.92 on
-  the call the rule forbids and 0.10 on the helper it asks for.
-- Do not write a rule about something that is missing, such as "every exported function has a
-  doc comment". In the same experiment the one real breach scored 0.21 and permitted code
-  scored up to 0.48, the wrong way round. A linter does this properly.
-- Do not write a rule that needs the rest of the file or the codebase. A piece is all Jev
-  sees.
-- Be careful with a rule whose answer depends on which layer or folder a file is in
-  ("handlers must not touch storage, services may"). In the experiment it inverted, scoring
-  0.69 on the services the rule allows and 0.11 on a real breach; on our own small example it
-  did not invert at all. If the team wants one, run `score` on their code first and show them
-  the numbers.
-- Tell them the honest headline: in a codebase that already shows its conventions, Sonnet and
-  Haiku followed all 8 house rules by imitation in 14 of those 16 sessions, with 3 real breaks
-  in total, 1 caught, 2 missed and 1 false alarm. The check earns its keep where the agent
-  builds something new with nothing nearby to copy. [docs/TUNING.md](docs/TUNING.md) has both
-  sets of numbers and the commands that produced ours.
+### What Jev sees, so you know what a rule can ask for
+
+For each changed piece of code, Jev is given the file path, the changed lines with 25
+unchanged lines above and below them from the same file, and the rule. Nothing else: not the
+rest of the file, not other files, not the tests, not what the code used to do. A rule that
+needs anything outside that is a guess, and Jev will guess.
+
+### The checklist. Every rule passes all seven or gets rewritten
+
+1. **It names the thing to look for.** "Never call `fetch` outside `src/api/`" works. "Keep
+   the API layer clean" does not. If the break is a helper that was not used, name the helper
+   and ban the alternative: "the `Money` helpers do the arithmetic" caught 0 of 3 real
+   breaks; "never add, sum or multiply cents values with plain arithmetic outside
+   `lib/money.rb`; call `Money.sum_cents`" caught 3 of 3 and found 2 more.
+2. **It says what it means for tests.** Most wrong flags we saw were on test files the rule
+   had not thought about: a test that starts its own HTTP server, a test that builds a path,
+   a test that catches the error it expects. Write the sentence: "A test under `test/` may
+   call `fetch` against a server the test starts."
+3. **It names the folder, when the rule is about a layer.** "Controllers must not build SQL"
+   makes Jev guess which files are controllers, and it guessed wrong on a model, a README and
+   the composition root. "Files under `lib/controllers/` must not build SQL; a model under
+   `lib/models/` may" gives it the fact it can see in the path. Layer rules went from 6 false
+   alarms to 1 this way.
+4. **It says what FOLLOWS the rule, when that is easy to confuse with breaking it.**
+   "`unwrap_or` supplies a value and never panics, so it is fine." "A `pub fn` with a `///`
+   line directly above it follows this rule." "A component that passes an `onX` prop straight
+   through follows this rule." Each of those sentences removed flags on code that was
+   already right.
+5. **It can be judged from one piece of one file.** "This option is used nowhere else" and
+   "this duplicates something in another module" cannot. Neither can "every error carries
+   context" when the context is added two calls down: that rule kept 8 false alarms after
+   every rewording, because the fact it needs is in another function.
+6. **A linter cannot do it.** Unused variables, missing doc comments, import order, naming
+   of exported symbols: a linter does these for nothing, every time, with a line number.
+   Jev gave "every exported function has a doc comment" scores in the wrong order.
+7. **It says what to do instead**, in the same sentence.
+
+### Before and after, from the measurements
+
+| Before | After | What changed |
+|---|---|---|
+| Every `rescue` logs or raises again. | Every `rescue` under `lib/` and `bin/` either logs through the `AppLog` writer or raises again. Never swallow an error quietly. | names the writer and the folders |
+| Time is UTC. Never use bare `Time.now`. | Time is UTC. Read the clock only as `Clock.now` and parse time text only with `Clock.parse`. Never use bare `Time.now`, `Time.new`, `Time.parse` or `Date.today`. This rule is about code under `lib/` and `bin/`; a test under `test/` may build a fixture with any time value. | names the helper, adds the test clause |
+| Every function that reaches the store takes a `context.Context` first. | ... Two exemptions: an HTTP handler with the `(w, r)` signature takes its context from `r.Context()`; a test function makes its own context and passes it in. | names what follows the rule |
+| Never call `unwrap` or `expect` outside a test. | Never call `unwrap` or `expect` outside a test. `unwrap_or`, `unwrap_or_default` and `unwrap_or_else` supply a value and never panic, so they are fine. | names what follows the rule |
+
+### Kinds of rule, and what to expect from each
+
+- **"Never call X, use Y", where X is a name the code shows.** The workhorse. 34 of 36 real
+  breaks caught at the default bar once worded well, with about one false alarm in five flags.
+- **"Files in this folder must not do X".** Works when the folder is named and the exemptions
+  are written: 7 of 7 caught, 0 false alarms after rewording, against 9 false alarms before.
+- **"A value must have this format or go through this helper".** Works only when the helper
+  is named and the plain alternative is banned: 0 of 3 before, 5 of 5 after.
+- **"Something must be present"** (a doc comment, a timeout). Mixed: 6 of 7 caught, but Jev
+  also flags code where the thing IS present unless the rule says what presence looks like.
+- **Judgment calls** ("comments that only restate the code", "a fallback that hides a
+  failure"). Real breaks get caught, and so do near misses; expect arguable flags. Keep them
+  if the team wants them, and expect to reword them once after the first week.
+- **Rules that need another file.** Do not write them. Jev cannot see the other file.
+
+### Also
+
 - Skip anything a linter or formatter in this repo already enforces.
 - 5 to 15 rules. More than that costs more per turn and adds noise.
-- Every top-level list item is one rule. Headings and paragraphs are ignored, so you can
-  keep the document's structure.
+- Every top-level list item is one rule. Headings and paragraphs are ignored, so you can keep
+  the document's structure.
+- Tell them the honest headline: in a codebase that already follows its own rules, agents
+  mostly copy what they see. The check earns its keep where the existing code already breaks
+  the rules, and where the agent builds something new with nothing nearby to copy.
 
-Show the list to the human and get their approval before you commit it.
+Show the list to the human, with each rule's kind from the list above and anything the
+checklist made you change, and get their approval before you commit it.
 
 ## 7. Store the secret without letting it leak
 
