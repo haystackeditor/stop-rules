@@ -244,22 +244,44 @@ The file it writes is `~/.config/stop-rules/token` or `~/.config/stop-rules/jev-
 
 ## 8. Only if the team server is not deployed yet
 
-Follow [DEPLOY.md](DEPLOY.md) for the cloud the human named. The targets are listed fastest
-first.
+You deploy it. The only thing you cannot do is log in to their cloud account; everything
+after the login is yours to run. Do not make the human click buttons or copy commands.
 
-- The human clicks the deploy button, or runs the one command themselves, because it needs
-  their cloud login. You do not log in to their cloud account.
-- Two secrets, always the same two: `TYPESAFE_API_KEY` (their Jev key, which stays on the
-  server) and `STOP_RULES_TOKEN` (the team token every developer's hook sends).
-- Generate the team token with a random generator, not from your head:
-  `openssl rand -hex 24`.
-- Hand the token to the human and tell them to share it with the team through their
-  password manager. Never commit it, never paste it into an issue or a chat.
-- When the deploy is done, open `<endpoint>/health` in a browser or with curl. It answers
-  `{"ok":true,...,"configured":true,"missing":[]}` when both secrets are set, and names any
-  that are missing.
-- Then run `init --team <endpoint>` from step 4, or `stop-rules team <endpoint>` if the repo
-  is already installed.
+1. Check whether their cloud's CLI is already logged in. On Cloudflare: `npx wrangler whoami`
+   from the stop-rules clone. If it is not, ask the human to run the login command once
+   (`npx wrangler login`) and wait. Do not ask for tokens or passwords.
+2. Make the team token with a random generator, never from your head:
+   `openssl rand -hex 24 > /tmp/stop-rules-token` (mode 600, delete it at the end).
+3. Get the Jev key into a file the same way (step 7) if it is not in one already.
+4. Deploy and set the two secrets from files on stdin, so no secret ever appears in a
+   command line, a log or this conversation. Cloudflare, exactly as proven on 21 September
+   2026, from the stop-rules clone:
+
+```bash
+npx wrangler deploy                                   # prints the endpoint URL
+npx wrangler secret put TYPESAFE_API_KEY < /path/to/jev-key-file
+npx wrangler secret put STOP_RULES_TOKEN < /tmp/stop-rules-token
+```
+
+5. Wait for `<endpoint>/health` to answer `"configured":true`. It says the secrets are
+   missing for a few seconds after they are set; poll every 3 seconds, and stop and tell the
+   human if it still names one after a minute.
+6. Run `init --team <endpoint>` from step 4 of this file, or `stop-rules team <endpoint>` if
+   the repo is already installed, then `login --token-stdin` with the token file and
+   `login --check`. Then step 9.
+7. Hand the token to the human once, by telling them where the file is, and tell them to put
+   it in the team's password manager. Never commit it, never paste it into an issue, a chat
+   or a log. Delete the file when they say they have it.
+
+For every other cloud, [DEPLOY.md](DEPLOY.md) has the same three steps (deploy, two secrets,
+health) in that platform's own commands, and a deploy button for a human who is setting it
+up without an agent. Two secrets, always the same two: `TYPESAFE_API_KEY` (their Jev key,
+which stays on the server) and `STOP_RULES_TOKEN` (the team token every developer's hook
+sends).
+
+If you ever need to take the server down, `npx wrangler delete` needs a real terminal; run
+it through `script -q /dev/null npx wrangler delete --force` from a script, and check that
+`<endpoint>/health` returns 404 afterwards, because a delete that did not happen is silent.
 
 ## 9. Prove it works before you say done
 
