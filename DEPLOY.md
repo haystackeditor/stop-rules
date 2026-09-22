@@ -96,7 +96,7 @@ the buttons can now be tried; until one is, its row's status word is the whole c
 
 | Target | How | Prompts for | Endpoint afterwards | Status |
 |---|---|---|---|---|
-| Cloudflare Workers | Deploy button, or `npx wrangler deploy` | both secrets, from `.dev.vars.example` | `https://stop-rules.<subdomain>.workers.dev` | **deployed for real** on 21 September 2026 with `npx wrangler deploy`, both secrets set, a client repo pointed at it, one real check answered through it (0.91 on the `fetch` example), a wrong token refused, then deleted |
+| Cloudflare Workers | Deploy button, or `npx wrangler deploy` | the secrets listed in `.dev.vars.example` | `https://stop-rules.<subdomain>.workers.dev` | **deployed for real** on 21 September 2026 with `npx wrangler deploy`, both secrets set, a client repo pointed at it, one real check answered through it (0.91 on the `fetch` example), a wrong token refused, then deleted; **deployed for real again** on 22 September 2026 with all three secrets, `OPENAI_API_KEY` included, and both judges answered through it (see below) |
 | Vercel | Deploy button | both secrets, from the `env` query parameter | `https://<app>.vercel.app/api` | config validated only, wrapper executed under Node |
 | Netlify | Deploy to Netlify button | both secrets, from `netlify.toml` | the site URL | config validated only, wrapper executed under Node |
 | Render | Deploy to Render button | both secrets, from `render.yaml` `sync: false` | the Render service URL | image ran locally, `render.yaml` config validated only |
@@ -126,6 +126,23 @@ npx wrangler secret put OPENAI_API_KEY      # only for the openai judge
 npx wrangler deploy
 ```
 
+Each `secret put` asks for the value. To keep a secret out of your terminal, give it on stdin
+from a file instead, for example `npx wrangler secret put OPENAI_API_KEY < openai-key-file`.
+On an account with no `stop-rules` Worker yet, the first `secret put` asks whether to create
+one; answer yes (run from a script, wrangler answers yes by itself). `/health` should then
+show `"judges":{"jev":true,"openai":true}`.
+
+Proven with the OpenAI judge on 22 September 2026, wrangler 4.136.3, using those four commands
+in that order with every value on stdin from a file: `/health` answered `"configured":true` and
+both judges ready right after `deploy`. A client repository built from `examples/demo/project`
+with `agent-change.diff` applied, set up with `init --team <endpoint> --judge openai` (plus
+`--agents claude-code`, since the demo project has no agent config for `init` to detect), then
+`login --token-stdin` and `login --check` (health pass, one real `gpt-6-luna` answer), ran
+`check` through the Worker in the review form: exit 2, the three findings, one call, no cache,
+3.3 seconds. `check --judge jev` through the same Worker: exit 2, the same three findings
+(0.95, 0.93, 0.88), 0.9 seconds. The client held no judge key, only the team token. Nothing in
+`wrangler.jsonc` or `.dev.vars.example` had to change for the OpenAI key.
+
 Measured on that deploy, 21 September 2026, with the worker's own log tailed: 8 teammates
 checking at the same moment each got their answer in 1 second, and the worker logged 8
 requests, all OK; 32 at the same moment each got theirs in 2 to 3 seconds, 32 requests
@@ -137,7 +154,10 @@ path is still proven only by reading it.
 
 Two things seen on the real deploy: `/health` reported both secrets missing for a few seconds
 after `secret put` returned, and was right after that; and `npx wrangler delete` refuses to run
-from a script without a terminal unless `CLOUDFLARE_API_TOKEN` is set, so run it by hand.
+from a script without a terminal unless `CLOUDFLARE_API_TOKEN` is set. From a script, give it
+one: `script -q /dev/null npx wrangler delete --force`. Either way, check afterwards that
+`<endpoint>/health` answers 404, because a delete run inside a pipeline once printed nothing
+and deleted nothing.
 
 The Worker entry module is `src/server/cloudflare.ts`, not `handler.ts`, because workerd
 refuses to start a Worker whose entry module has a named export that is not a handler. That
