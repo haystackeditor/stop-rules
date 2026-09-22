@@ -18,7 +18,7 @@ export function runGit(
   extraEnv?: Record<string, string>,
 ): Promise<GitResult> {
   return new Promise((resolve, reject) => {
-    execFile(
+    const child = execFile(
       "git",
       args as string[],
       {
@@ -41,6 +41,10 @@ export function runGit(
         reject(new Error(`could not run git ${args.join(" ")}: ${error.message}`));
       },
     );
+    // execFile leaves the child's stdin an open pipe. A git command that reads stdin, such as
+    // the hash-object --stdin that writes the empty tree for a repository with no commit,
+    // waits on it forever. No caller feeds git anything, so it is closed at once.
+    child.stdin?.end();
   });
 }
 

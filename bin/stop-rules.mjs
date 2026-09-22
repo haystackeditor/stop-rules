@@ -8790,7 +8790,7 @@ import { randomBytes } from "node:crypto";
 var MAX_BUFFER = 256 * 1024 * 1024;
 function runGit(cwd, args2, extraEnv) {
   return new Promise((resolve4, reject) => {
-    execFile(
+    const child = execFile(
       "git",
       args2,
       {
@@ -8812,6 +8812,7 @@ function runGit(cwd, args2, extraEnv) {
         reject(new Error(`could not run git ${args2.join(" ")}: ${error.message}`));
       }
     );
+    child.stdin?.end();
   });
 }
 async function gitOrThrow(cwd, args2, extraEnv) {
