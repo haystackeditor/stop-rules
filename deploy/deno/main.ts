@@ -3,7 +3,8 @@
  * handler has no node: imports, so this is the whole adapter.
  *
  * Set the app's entrypoint to deploy/deno/main.ts, then set TYPESAFE_API_KEY and
- * STOP_RULES_TOKEN as environment variables in the Deno Deploy dashboard.
+ * STOP_RULES_TOKEN as environment variables in the Deno Deploy dashboard, and OPENAI_API_KEY
+ * too if your repos use the openai judge.
  */
 import { handle } from "../../src/server/handler.ts";
 

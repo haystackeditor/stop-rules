@@ -1745,7 +1745,10 @@ var DEFAULT_MODEL = "jev-latest";
 var AUTH_REJECTED = "Jev rejected the API key";
 var BILLING_EXHAUSTED = "the Jev account is out of credits. Add credits at TypeSafe, then run again.";
 function holdsBaseline(failure2) {
-  return failure2 === "network" || failure2 === "server" || failure2 === "rate_limit" || failure2 === "auth" || failure2 === "billing" || failure2 === "budget" || failure2 === "busy";
+  return failure2 === "network" || failure2 === "server" || failure2 === "rate_limit" || failure2 === "auth" || failure2 === "billing" || failure2 === "budget" || failure2 === "busy" || failure2 === "model";
+}
+function stopsEverything(failure2) {
+  return failure2 === "busy" || failure2 === "billing" || failure2 === "auth" || failure2 === "model";
 }
 var MAX_ATTEMPTS = 3;
 var BACKOFF_START_MS = 1e3;
@@ -1976,7 +1979,6 @@ var JevClient = class {
     const results = [];
     let active = 0;
     let settled = false;
-    const stopsEverything = (failure2) => failure2 === "busy" || failure2 === "billing" || failure2 === "auth";
     return new Promise((resolve4) => {
       const pump = () => {
         if (settled) return;
@@ -2032,51 +2034,562 @@ var JevClient = class {
   }
 };
 
+// src/judge.ts
+var EFFORTS = ["none", "low", "medium", "high"];
+var DEFAULT_OPENAI_MODEL = "gpt-6-luna";
+var DEFAULT_EFFORT = "low";
+var DEFAULT_IN_FLIGHT = 4;
+var MAX_IN_FLIGHT = 8;
+function judgeName(judge) {
+  return judge.kind === "jev" ? "Jev" : judge.model;
+}
+function cacheModel(judge) {
+  return judge.kind === "jev" ? judge.model : `openai:${judge.model}:${judge.effort}`;
+}
+function judgeInfo(judge) {
+  return judge.kind === "jev" ? { kind: "jev", model: judge.model } : { kind: "openai", model: judge.model, effort: judge.effort };
+}
+function describeJudge(judge) {
+  return judge.effort === void 0 ? `${judge.kind}, model ${judge.model}` : `${judge.kind}, model ${judge.model} at effort ${judge.effort}`;
+}
+
 // src/key.ts
 import { promises as fs7 } from "node:fs";
-async function resolveApiKey(env) {
-  const direct = env["TYPESAFE_API_KEY"];
+var JEV_KEY_SOURCE = {
+  direct: "TYPESAFE_API_KEY",
+  file: "TYPESAFE_API_KEY_FILE",
+  label: "Jev API key"
+};
+var OPENAI_KEY_SOURCE = {
+  direct: "OPENAI_API_KEY",
+  file: "OPENAI_API_KEY_FILE",
+  label: "OpenAI API key"
+};
+function keySourceSet(env, source) {
+  return env[source.direct] !== void 0 || env[source.file] !== void 0;
+}
+async function resolveApiKey(env, source = JEV_KEY_SOURCE) {
+  const direct = env[source.direct];
   if (typeof direct === "string") {
     if (direct.trim().length === 0) {
-      return { ok: false, reason: "TYPESAFE_API_KEY is set but empty. Unset it or put your key in it." };
+      return { ok: false, reason: `${source.direct} is set but empty. Unset it or put your key in it.` };
     }
     return { ok: true, key: direct.trim() };
   }
-  const file = env["TYPESAFE_API_KEY_FILE"];
+  const file = env[source.file];
   if (typeof file === "string") {
     if (file.trim().length === 0) {
       return {
         ok: false,
-        reason: "TYPESAFE_API_KEY_FILE is set but empty. Unset it or point it at a file holding your key."
+        reason: `${source.file} is set but empty. Unset it or point it at a file holding your key.`
       };
     }
     const keyPath = file.trim();
     try {
       const key = (await fs7.readFile(keyPath, "utf8")).trim();
       if (key.length === 0) {
-        return { ok: false, reason: `${keyPath}, named by TYPESAFE_API_KEY_FILE, is empty` };
+        return { ok: false, reason: `${keyPath}, named by ${source.file}, is empty` };
       }
       return { ok: true, key };
     } catch (error) {
       const err2 = error;
       return {
         ok: false,
-        reason: `could not read ${keyPath}, named by TYPESAFE_API_KEY_FILE: ${err2.code ?? err2.message}`
+        reason: `could not read ${keyPath}, named by ${source.file}: ${err2.code ?? err2.message}`
       };
     }
   }
   return {
     ok: false,
-    reason: "no Jev API key. Set TYPESAFE_API_KEY, or TYPESAFE_API_KEY_FILE to a file holding it."
+    reason: `no ${source.label}. Set ${source.direct}, or ${source.file} to a file holding it.`
   };
 }
+
+// src/openai.ts
+var OPENAI_ENDPOINT = "https://api.openai.com/v1/responses";
+var OPENAI_AUTH_REJECTED = "OpenAI rejected the API key";
+var OPENAI_BILLING_EXHAUSTED = "the OpenAI account is out of credits or over its spending limit. Add credits at OpenAI, then run again.";
+var SYSTEM_INSTRUCTION = "You judge whether the added lines in a diff break a coding rule. For each rule below, give the probability from 0 to 1 that the added lines in this diff violate that rule. Use the whole range: 0.05 when the rule is clearly not broken, 0.95 when it clearly is, values between when it is unclear. Give exactly one probability per rule, in the order the rules are listed.";
+var VERDICT_SCHEMA = {
+  type: "object",
+  properties: { scores: { type: "array", items: { type: "number" } } },
+  required: ["scores"],
+  additionalProperties: false
+};
+var MAX_OUTPUT_TOKENS = 8e3;
+function rulesBlock(rules) {
+  return `Rules:
+${rules.map((rule) => `${rule.id}: ${rule.text}`).join("\n")}
+`;
+}
+function pieceBlock(view) {
+  let text = `File: ${view.file}
+
+Diff:
+${view.diff}
+`;
+  for (const unit of view.function ?? []) {
+    text += `
+The whole function ${unit.name} after the change, lines ${unit.fromLine}-${unit.toLine}:
+${unit.text}
+`;
+  }
+  return text;
+}
+function userInput(view, rules) {
+  return `${rulesBlock(rules)}
+${pieceBlock(view)}`;
+}
+var encoder2 = new TextEncoder();
+async function sha256Hex(text) {
+  const digest2 = await globalThis.crypto.subtle.digest("SHA-256", encoder2.encode(text));
+  return [...new Uint8Array(digest2)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+async function promptCacheKey(rules) {
+  return `stop-rules-${(await sha256Hex(`${SYSTEM_INSTRUCTION}\0${rulesBlock(rules)}`)).slice(0, 24)}`;
+}
+function requestBody(model, effort, question) {
+  return JSON.stringify({
+    model,
+    reasoning: { effort },
+    instructions: SYSTEM_INSTRUCTION,
+    input: question.input,
+    text: {
+      format: { type: "json_schema", name: "verdict", strict: true, schema: VERDICT_SCHEMA }
+    },
+    max_output_tokens: MAX_OUTPUT_TOKENS,
+    prompt_cache_key: question.promptCacheKey,
+    store: false
+  });
+}
+function count(value2) {
+  return typeof value2 === "number" && Number.isFinite(value2) ? value2 : 0;
+}
+function readUsage2(body2) {
+  return {
+    inputTokens: count(body2.usage?.input_tokens),
+    cachedInputTokens: count(body2.usage?.input_tokens_details?.cached_tokens),
+    outputTokens: count(body2.usage?.output_tokens),
+    reasoningTokens: count(body2.usage?.output_tokens_details?.reasoning_tokens)
+  };
+}
+function errorText(text) {
+  try {
+    const parsed = JSON.parse(text);
+    const message = parsed.error?.message;
+    if (typeof message === "string" && message.trim().length > 0) {
+      return message.replace(/\s+/g, " ").trim().slice(0, 300);
+    }
+  } catch {
+  }
+  return text.slice(0, 200).replace(/\s+/g, " ").trim();
+}
+function errorFields(text) {
+  try {
+    const parsed = JSON.parse(text);
+    const code = parsed.error?.code;
+    const param = parsed.error?.param;
+    return {
+      code: typeof code === "string" ? code : "",
+      param: typeof param === "string" ? param : ""
+    };
+  } catch {
+    return { code: "", param: "" };
+  }
+}
+function notConfigured(text) {
+  try {
+    const parsed = JSON.parse(text);
+    if (parsed.error !== "not_configured") return null;
+    const missing = Array.isArray(parsed.missing) ? parsed.missing.filter((name2) => typeof name2 === "string") : [];
+    return missing.length === 0 ? "an environment variable" : missing.join(" and ");
+  } catch {
+    return null;
+  }
+}
+function readVerdict(body2, ids) {
+  if (body2.status !== "completed") {
+    return `the answer has status ${JSON.stringify(body2.status ?? null)}, not completed (${JSON.stringify(body2.incomplete_details ?? null)})`;
+  }
+  if (!Array.isArray(body2.output)) return "the answer has no output list";
+  const parts2 = [];
+  for (const item of body2.output) {
+    if (item === null || typeof item !== "object" || item.type !== "message") continue;
+    if (!Array.isArray(item.content)) continue;
+    parts2.push(...item.content);
+  }
+  const refusal = parts2.find((part) => part.type === "refusal");
+  if (refusal !== void 0) return `the model refused: ${String(refusal.refusal ?? "")}`;
+  const texts = parts2.filter((part) => part.type === "output_text");
+  if (texts.length !== 1) return `the answer has ${texts.length} text parts, not 1`;
+  const text = texts[0]?.text;
+  if (typeof text !== "string") return "the answer's text is not a string";
+  let verdict;
+  try {
+    verdict = JSON.parse(text);
+  } catch {
+    return `the answer is not JSON: ${text.slice(0, 120)}`;
+  }
+  if (typeof verdict !== "object" || verdict === null || Array.isArray(verdict)) {
+    return "the answer is not a JSON object";
+  }
+  const keys = Object.keys(verdict);
+  if (keys.length !== 1 || keys[0] !== "scores") {
+    return `the answer has the keys ${keys.join(", ")}, not just scores`;
+  }
+  const scores = verdict.scores;
+  if (!Array.isArray(scores)) return "the answer's scores are not a list";
+  if (scores.length !== ids.length) {
+    return `the answer gives ${scores.length} scores for ${ids.length} rules`;
+  }
+  const answers = {};
+  for (let index = 0; index < ids.length; index += 1) {
+    const value2 = scores[index];
+    if (typeof value2 !== "number" || !Number.isFinite(value2) || value2 < 0 || value2 > 1) {
+      return `the answer's score number ${index + 1} is ${JSON.stringify(value2)}, not a number from 0 to 1`;
+    }
+    answers[ids[index]] = value2;
+  }
+  return answers;
+}
+var OpenAiClient = class {
+  constructor(options) {
+    this.options = options;
+    this.ceiling = options.concurrency;
+    this.limit = this.ceiling;
+    this.sleep = options.sleep ?? defaultSleep;
+  }
+  callsUsed = 0;
+  /** The in-flight ceiling for this run. Halved on a 429, one step back up after four wins. */
+  limit;
+  ceiling;
+  successStreak = 0;
+  sleep;
+  usage = {
+    inputTokens: 0,
+    cachedInputTokens: 0,
+    outputTokens: 0,
+    reasoningTokens: 0
+  };
+  get calls() {
+    return this.callsUsed;
+  }
+  slowDown() {
+    this.limit = Math.max(1, Math.floor(this.limit / 2));
+    this.successStreak = 0;
+  }
+  speedUp() {
+    if (this.limit >= this.ceiling) return;
+    this.successStreak += 1;
+    if (this.successStreak < STEP_UP_AFTER) return;
+    this.limit += 1;
+    this.successStreak = 0;
+  }
+  redact(text) {
+    if (this.options.apiKey.length === 0) return text;
+    return text.split(this.options.apiKey).join("[redacted]");
+  }
+  /** One HTTP attempt, with a machine wide slot held for its whole length. */
+  async fetchOnce(body2) {
+    let free = null;
+    if (this.options.slot !== void 0) {
+      const gate = await this.options.slot();
+      if (!gate.ok) return { kind: "busy", reason: gate.reason };
+      free = gate.release;
+    }
+    try {
+      let response;
+      try {
+        response = await this.options.fetchImpl(this.options.endpoint, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${this.options.apiKey}`,
+            "Content-Type": "application/json"
+          },
+          body: body2,
+          signal: AbortSignal.timeout(this.options.requestTimeoutMs ?? 9e4)
+        });
+      } catch (error) {
+        const message = this.redact(error instanceof Error ? error.message : String(error));
+        return { kind: "error", message: `network error: ${message}` };
+      }
+      let text;
+      try {
+        text = await response.text();
+      } catch (error) {
+        const message = this.redact(error instanceof Error ? error.message : String(error));
+        return { kind: "error", message: `unreadable response: ${message}` };
+      }
+      return {
+        kind: "response",
+        status: response.status,
+        text,
+        retryAfter: response.headers.get("retry-after")
+      };
+    } finally {
+      if (free !== null) await free();
+    }
+  }
+  /** One logical request, including retries. Every attempt costs one unit of budget. */
+  async send(question) {
+    const { model, effort } = this.options;
+    const body2 = requestBody(model, effort, question);
+    let attempt = 0;
+    let backoff = BACKOFF_START_MS;
+    for (; ; ) {
+      if (this.callsUsed >= this.options.maxCalls) {
+        return { ok: false, failure: "budget", message: "call budget exhausted" };
+      }
+      attempt += 1;
+      this.callsUsed += 1;
+      const sent = await this.fetchOnce(body2);
+      if (sent.kind === "busy") {
+        this.callsUsed -= 1;
+        return { ok: false, failure: "busy", message: sent.reason };
+      }
+      if (sent.kind === "error") {
+        if (attempt < MAX_ATTEMPTS) {
+          this.options.note(`${sent.message}, retrying`);
+          await this.sleep(backoff);
+          backoff = Math.min(backoff * 2, BACKOFF_CAP_MS);
+          continue;
+        }
+        this.options.note(`${sent.message}, giving up`);
+        return { ok: false, failure: "network", message: sent.message };
+      }
+      const { status, text } = sent;
+      if (status === 200) {
+        let parsed;
+        try {
+          parsed = JSON.parse(text);
+        } catch (error) {
+          const message = this.redact(error instanceof Error ? error.message : String(error));
+          if (attempt < MAX_ATTEMPTS) {
+            this.options.note(`unparseable 200 body from ${model}, retrying: ${message}`);
+            await this.sleep(backoff);
+            backoff = Math.min(backoff * 2, BACKOFF_CAP_MS);
+            continue;
+          }
+          return { ok: false, failure: "server", message: `unparseable response from ${model}: ${message}` };
+        }
+        const usage = readUsage2(parsed);
+        this.usage.inputTokens += usage.inputTokens;
+        this.usage.cachedInputTokens += usage.cachedInputTokens;
+        this.usage.outputTokens += usage.outputTokens;
+        this.usage.reasoningTokens += usage.reasoningTokens;
+        const answers = readVerdict(parsed, question.ids);
+        if (typeof answers === "string") {
+          const message = this.redact(`${model}: ${answers}`);
+          if (attempt < MAX_ATTEMPTS) {
+            this.options.note(`${message}, retrying`);
+            await this.sleep(backoff);
+            backoff = Math.min(backoff * 2, BACKOFF_CAP_MS);
+            continue;
+          }
+          return { ok: false, failure: "server", message };
+        }
+        this.speedUp();
+        return { ok: true, answers, usage };
+      }
+      const fields = errorFields(text);
+      const said = this.redact(errorText(text));
+      if (status === 402 || fields.code === "insufficient_quota" || text.includes('"insufficient_quota"')) {
+        return { ok: false, failure: "billing", message: OPENAI_BILLING_EXHAUSTED };
+      }
+      if (status === 429) {
+        this.slowDown();
+        const wait = parseRetryAfter(sent.retryAfter) ?? backoff;
+        if (attempt < MAX_ATTEMPTS) {
+          const room = this.limit === 1 ? "1 call" : `${this.limit} calls`;
+          this.options.note(`rate limited, waiting ${wait} ms, ${room} in flight from now on`);
+          await this.sleep(wait);
+          backoff = Math.min(backoff * 2, BACKOFF_CAP_MS);
+          continue;
+        }
+        return { ok: false, failure: "rate_limit", message: "rate limited by OpenAI" };
+      }
+      if (status === 400 && (fields.code === "context_length_exceeded" || text.includes("context_length_exceeded"))) {
+        return { ok: false, failure: "too_large", message: "context_length_exceeded" };
+      }
+      if (status === 401) {
+        return { ok: false, failure: "auth", message: OPENAI_AUTH_REJECTED };
+      }
+      if (status === 404 || status === 403 || fields.code === "model_not_found" || status === 400 && (fields.param === "model" || fields.param.startsWith("reasoning"))) {
+        return {
+          ok: false,
+          failure: "model",
+          message: `OpenAI will not run ${model} at effort ${effort} for this key (${status}): ${said}`
+        };
+      }
+      const unset = notConfigured(text);
+      if (status === 503 && unset !== null) {
+        return {
+          ok: false,
+          failure: "server",
+          message: `the team server is not set up for the openai judge: it is missing ${unset}`
+        };
+      }
+      if (status >= 500) {
+        if (attempt < MAX_ATTEMPTS) {
+          this.options.note(`OpenAI returned ${status}, retrying`);
+          await this.sleep(backoff);
+          backoff = Math.min(backoff * 2, BACKOFF_CAP_MS);
+          continue;
+        }
+        return { ok: false, failure: "server", message: `OpenAI returned ${status}` };
+      }
+      return { ok: false, failure: "client", message: `OpenAI returned ${status}: ${said}` };
+    }
+  }
+  /**
+   * Runs nodes with bounded concurrency, the same way JevClient.askAll does. A node the model
+   * calls too long is halved and both halves are queued.
+   */
+  async askAll(nodes) {
+    const queue = [...nodes];
+    const results = [];
+    let active = 0;
+    let settled = false;
+    return new Promise((resolve4) => {
+      const pump = () => {
+        if (settled) return;
+        if (queue.length === 0 && active === 0) {
+          settled = true;
+          resolve4(results);
+          return;
+        }
+        while (active < this.limit && queue.length > 0) {
+          const node = queue.shift();
+          if (node === void 0) break;
+          active += 1;
+          this.send(node.question).then((outcome) => {
+            if (!outcome.ok && outcome.failure === "too_large") {
+              const halves = node.halve();
+              if (halves !== null) {
+                this.options.note(`request too long for ${this.options.model}, resending as two halves`);
+                queue.push(halves[0], halves[1]);
+                return;
+              }
+              results.push({
+                node,
+                outcome: {
+                  ok: false,
+                  failure: "client",
+                  message: `too long for ${this.options.model} and cannot be split further`
+                }
+              });
+              return;
+            }
+            results.push({ node, outcome });
+            if (!outcome.ok && stopsEverything(outcome.failure)) {
+              while (queue.length > 0) {
+                const waiting = queue.shift();
+                if (waiting !== void 0) results.push({ node: waiting, outcome });
+              }
+            }
+          }).catch((error) => {
+            const message = this.redact(error instanceof Error ? error.message : String(error));
+            this.options.note(`unexpected error while asking ${this.options.model}: ${message}`);
+            results.push({ node, outcome: { ok: false, failure: "network", message } });
+          }).finally(() => {
+            active -= 1;
+            pump();
+          });
+        }
+      };
+      pump();
+    });
+  }
+};
 
 // src/settings.ts
 import { promises as fs8 } from "node:fs";
 import * as path14 from "node:path";
 var SETTINGS_FILE = ".stop-rules.json";
 var DEFAULT_CUT = "hunks";
-var KNOWN_KEYS = ["endpoint", "cut", "threshold", "maxCalls"];
+var KNOWN_KEYS = ["endpoint", "cut", "threshold", "maxCalls", "judge"];
+var JEV_JUDGE_KEYS = ["kind"];
+var OPENAI_JUDGE_KEYS = ["kind", "model", "effort", "inFlight"];
+function chooseJudge(file, flags2) {
+  const kind = flags2.judge ?? file?.kind ?? "jev";
+  if (kind === "jev") {
+    const stray = [];
+    if (flags2.model !== void 0) stray.push("--model");
+    if (flags2.effort !== void 0) stray.push("--effort");
+    if (stray.length > 0) {
+      return {
+        ok: false,
+        reason: `${stray.join(" and ")} ${stray.length === 1 ? "is" : "are"} for the openai judge, and this run uses jev. Add --judge openai, or set "judge" in ${SETTINGS_FILE}.`
+      };
+    }
+    return { ok: true, choice: { kind: "jev" } };
+  }
+  const base = file?.kind === "openai" ? file : void 0;
+  return {
+    ok: true,
+    choice: {
+      kind: "openai",
+      model: flags2.model ?? base?.model ?? DEFAULT_OPENAI_MODEL,
+      effort: flags2.effort ?? base?.effort ?? DEFAULT_EFFORT,
+      inFlight: base?.inFlight ?? DEFAULT_IN_FLIGHT
+    }
+  };
+}
+function parseJudge(file, raw) {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    return { ok: false, reason: `"judge" in ${file} must be an object, such as {"kind": "jev"}.` };
+  }
+  const record = raw;
+  const kind = record["kind"];
+  if (kind !== "jev" && kind !== "openai") {
+    return {
+      ok: false,
+      reason: `"judge.kind" in ${file} must be "jev" or "openai", not ${JSON.stringify(kind)}.`
+    };
+  }
+  const allowed = kind === "jev" ? JEV_JUDGE_KEYS : OPENAI_JUDGE_KEYS;
+  for (const key of Object.keys(record)) {
+    if (!allowed.includes(key)) {
+      return {
+        ok: false,
+        reason: `"judge" in ${file} sets "${key}", which the ${kind} judge does not take. It takes ${allowed.join(", ")}.`
+      };
+    }
+  }
+  if (kind === "jev") return { ok: true, judge: { kind: "jev" } };
+  const judge = { kind: "openai" };
+  const model = record["model"];
+  if (model !== void 0) {
+    if (typeof model !== "string" || model.trim().length === 0) {
+      return { ok: false, reason: `"judge.model" in ${file} must be a model name, such as "${DEFAULT_OPENAI_MODEL}".` };
+    }
+    judge.model = model.trim();
+  }
+  const effort = record["effort"];
+  if (effort !== void 0) {
+    if (!EFFORTS.includes(effort)) {
+      return {
+        ok: false,
+        reason: `"judge.effort" in ${file} must be one of ${EFFORTS.join(", ")}, not ${JSON.stringify(effort)}.`
+      };
+    }
+    judge.effort = effort;
+  }
+  const inFlight2 = record["inFlight"];
+  if (inFlight2 !== void 0) {
+    if (typeof inFlight2 !== "number" || !Number.isInteger(inFlight2)) {
+      return { ok: false, reason: `"judge.inFlight" in ${file} must be a whole number.` };
+    }
+    if (inFlight2 < 1 || inFlight2 > MAX_IN_FLIGHT) {
+      return {
+        ok: false,
+        reason: `"judge.inFlight" in ${file} must be from 1 to ${MAX_IN_FLIGHT}, not ${inFlight2}.`
+      };
+    }
+    judge.inFlight = inFlight2;
+  }
+  return { ok: true, judge };
+}
 function parseSettings(file, raw) {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
     return { ok: false, reason: `${file} does not hold a JSON object.` };
@@ -2131,6 +2644,12 @@ function parseSettings(file, raw) {
     }
     settings.maxCalls = maxCalls;
   }
+  const judge = record["judge"];
+  if (judge !== void 0) {
+    const parsed = parseJudge(file, judge);
+    if (!parsed.ok) return parsed;
+    settings.judge = parsed.judge;
+  }
   return { ok: true, loaded: { settings, file, exists: true } };
 }
 async function loadSettings(repoRoot) {
@@ -2168,8 +2687,10 @@ async function writeSettings(repoRoot, patch) {
 
 // src/credentials.ts
 var SYSTEMONE_PATH = "/v1/systemone";
+var RESPONSES_PATH = "/v1/responses";
 var TOKEN_FILE = "token";
 var JEV_KEY_FILE = "jev-key";
+var OPENAI_KEY_FILE = "openai-key";
 var TOKEN_REJECTED = "the team token is missing or wrong; run stop-rules login";
 function envValue(env, name2) {
   const raw = env[name2];
@@ -2191,6 +2712,9 @@ function tokenPath(env) {
 }
 function jevKeyPath(env) {
   return path15.join(configDir(env), JEV_KEY_FILE);
+}
+function openAiKeyPath(env) {
+  return path15.join(configDir(env), OPENAI_KEY_FILE);
 }
 async function readTrimmed(file) {
   let text;
@@ -2216,12 +2740,12 @@ function parseEndpoint(raw) {
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
     return { ok: false, reason: `the team endpoint must start with http:// or https://, not ${parsed.protocol}` };
   }
-  const isFull = trimmed.endsWith(SYSTEMONE_PATH);
-  return {
-    ok: true,
-    base: isFull ? trimmed.slice(0, -SYSTEMONE_PATH.length) : trimmed,
-    post: isFull ? trimmed : `${trimmed}${SYSTEMONE_PATH}`
-  };
+  const full = [SYSTEMONE_PATH, RESPONSES_PATH].find((route2) => trimmed.endsWith(route2));
+  const base = full === void 0 ? trimmed : trimmed.slice(0, -full.length);
+  return { ok: true, base, post: `${base}${SYSTEMONE_PATH}` };
+}
+function teamRoute(base, judge) {
+  return `${base}${judge.kind === "jev" ? SYSTEMONE_PATH : RESPONSES_PATH}`;
 }
 function readTeamEndpoint(loaded, env) {
   const fromEnv = envValue(env, "STOP_RULES_ENDPOINT");
@@ -2233,12 +2757,18 @@ function readTeamEndpoint(loaded, env) {
   if (endpoint === void 0) return { ok: true, endpoint: null, source: "none" };
   return { ok: true, endpoint, source: loaded.file };
 }
-async function resolveCredentials(loaded, env) {
-  const configHome = envValue(env, "XDG_CONFIG_HOME");
-  if (!configHome.ok) return { ok: false, reason: configHome.reason };
+function resolveJudge(choice, env) {
+  if (choice.kind === "openai") return { ok: true, judge: choice };
   const model = envValue(env, "STOP_RULES_JEV_MODEL");
   if (!model.ok) return { ok: false, reason: model.reason };
-  const chosenModel = model.value === null ? DEFAULT_MODEL : model.value;
+  return { ok: true, judge: { kind: "jev", model: model.value === null ? DEFAULT_MODEL : model.value } };
+}
+async function resolveCredentials(loaded, env, choice) {
+  const configHome = envValue(env, "XDG_CONFIG_HOME");
+  if (!configHome.ok) return { ok: false, reason: configHome.reason };
+  const resolved = resolveJudge(choice, env);
+  if (!resolved.ok) return { ok: false, reason: resolved.reason };
+  const judge = resolved.judge;
   const team = readTeamEndpoint(loaded, env);
   if (!team.ok) return { ok: false, reason: team.reason };
   if (team.endpoint !== null) {
@@ -2262,22 +2792,38 @@ async function resolveCredentials(loaded, env) {
       ok: true,
       credentials: {
         mode: "team",
-        endpoint: parsed.post,
+        endpoint: teamRoute(parsed.base, judge),
         bearer: token,
-        model: chosenModel,
+        judge,
         teamBase: parsed.base
       }
+    };
+  }
+  if (judge.kind === "openai") {
+    if (keySourceSet(env, OPENAI_KEY_SOURCE)) {
+      const key = await resolveApiKey(env, OPENAI_KEY_SOURCE);
+      if (!key.ok) return { ok: false, reason: key.reason };
+      return { ok: true, credentials: { mode: "local", endpoint: OPENAI_ENDPOINT, bearer: key.key, judge } };
+    }
+    const stored2 = await readTrimmed(openAiKeyPath(env));
+    if (stored2.error !== void 0) return { ok: false, reason: stored2.error };
+    if (stored2.value !== null) {
+      return { ok: true, credentials: { mode: "local", endpoint: OPENAI_ENDPOINT, bearer: stored2.value, judge } };
+    }
+    return {
+      ok: false,
+      reason: "no OpenAI API key and no team endpoint, and this repo's judge is openai. Set OPENAI_API_KEY, or store a key with stop-rules login --openai-key-stdin, or point this repo at your team server with stop-rules team <url>."
     };
   }
   const override = envValue(env, "STOP_RULES_JEV_ENDPOINT");
   if (!override.ok) return { ok: false, reason: override.reason };
   const endpoint = override.value === null ? DEFAULT_ENDPOINT : override.value;
-  if (env["TYPESAFE_API_KEY"] !== void 0 || env["TYPESAFE_API_KEY_FILE"] !== void 0) {
-    const key = await resolveApiKey(env);
+  if (keySourceSet(env, JEV_KEY_SOURCE)) {
+    const key = await resolveApiKey(env, JEV_KEY_SOURCE);
     if (!key.ok) return { ok: false, reason: key.reason };
     return {
       ok: true,
-      credentials: { mode: "local", endpoint, bearer: key.key, model: chosenModel }
+      credentials: { mode: "local", endpoint, bearer: key.key, judge }
     };
   }
   const stored = await readTrimmed(jevKeyPath(env));
@@ -2285,7 +2831,7 @@ async function resolveCredentials(loaded, env) {
   if (stored.value !== null) {
     return {
       ok: true,
-      credentials: { mode: "local", endpoint, bearer: stored.value, model: chosenModel }
+      credentials: { mode: "local", endpoint, bearer: stored.value, judge }
     };
   }
   return {
@@ -2328,27 +2874,31 @@ async function login(env, target, secret) {
     };
   }
   const dir = configDir(env);
-  const file = target === "token" ? tokenPath(env) : jevKeyPath(env);
+  const file = target === "token" ? tokenPath(env) : target === "jev-key" ? jevKeyPath(env) : openAiKeyPath(env);
   await fs9.mkdir(dir, { recursive: true, mode: 448 });
   await fs9.writeFile(file, `${value2}
 `, { encoding: "utf8", mode: 384 });
   await fs9.chmod(file, 384);
+  const what = target === "token" ? "That is the team token. The judge's key stays on your team's server." : target === "jev-key" ? "That is your own Jev key, used when this repo has no team endpoint." : "That is your own OpenAI key, used when this repo's judge is openai and it has no team endpoint.";
   return {
     ok: true,
-    lines: [
-      `wrote ${file} with mode 0600`,
-      target === "token" ? "That is the team token. The Jev key stays on your team's server." : "That is your own Jev key, used when this repo has no team endpoint.",
-      "Check it with: stop-rules login --check"
-    ]
+    lines: [`wrote ${file} with mode 0600`, what, "Check it with: stop-rules login --check"]
   };
 }
-async function loginCheck(repoRoot, env, fetchImpl = (url, init3) => fetch(url, init3)) {
+var PROBE_RULE = { id: "probe", text: "Do not leave a TODO comment in the code." };
+var PROBE_VIEW = {
+  file: "probe.ts",
+  diff: "@@ -0,0 +1 @@\n+export const answer = 42;"
+};
+async function loginCheck(repoRoot, env, flags2 = {}, fetchImpl = (url, init3) => fetch(url, init3)) {
   const load = await loadSettings(repoRoot);
   if (!load.ok) return { ok: false, lines: [`stop-rules: ${load.reason}`] };
-  const resolved = await resolveCredentials(load.loaded, env);
+  const chosen = chooseJudge(load.loaded.settings.judge, flags2);
+  if (!chosen.ok) return { ok: false, lines: [`stop-rules: ${chosen.reason}`] };
+  const resolved = await resolveCredentials(load.loaded, env, chosen.choice);
   if (!resolved.ok) return { ok: false, lines: [`stop-rules: ${resolved.reason}`] };
-  const { mode, endpoint, bearer: bearer2, model, teamBase } = resolved.credentials;
-  const lines = [`mode: ${mode}`, `endpoint: ${endpoint}`];
+  const { mode, endpoint, bearer: bearer2, judge, teamBase } = resolved.credentials;
+  const lines = [`mode: ${mode}`, `judge: ${describeJudge(judgeInfo(judge))}`, `endpoint: ${endpoint}`];
   let ok = true;
   if (teamBase !== void 0) {
     try {
@@ -2361,17 +2911,46 @@ async function loginCheck(repoRoot, env, fetchImpl = (url, init3) => fetch(url, 
       ok = false;
     }
   }
+  const note = (message) => {
+    lines.push(`  note: ${message}`);
+  };
+  const maxCalls = 4;
+  if (judge.kind === "openai") {
+    const client2 = new OpenAiClient({
+      endpoint,
+      model: judge.model,
+      effort: judge.effort,
+      apiKey: bearer2,
+      maxCalls,
+      fetchImpl,
+      concurrency: 1,
+      note
+    });
+    const outcome2 = await client2.send({
+      input: userInput(PROBE_VIEW, [PROBE_RULE]),
+      promptCacheKey: await promptCacheKey([PROBE_RULE]),
+      ids: ["q0"]
+    });
+    if (outcome2.ok) {
+      const answer = outcome2.answers["q0"];
+      lines.push(
+        answer === void 0 ? "openai: fail (the answer for q0 was missing)" : `openai: pass (${judge.model} at effort ${judge.effort} answered ${answer.toFixed(2)}, ${outcome2.usage.inputTokens} input and ${outcome2.usage.outputTokens} output tokens)`
+      );
+      if (answer === void 0) ok = false;
+    } else {
+      const message = outcome2.failure === "auth" && mode === "team" ? TOKEN_REJECTED : outcome2.message;
+      lines.push(`openai: fail (${message})`);
+      ok = false;
+    }
+    return { ok, lines };
+  }
   const client = new JevClient({
     endpoint,
-    model,
+    model: judge.model,
     apiKey: bearer2,
-    // Room for the transport's own three attempts, so a network failure reports itself as
-    // one rather than as an exhausted budget.
-    maxCalls: 4,
+    maxCalls,
     fetchImpl,
-    note: (message) => {
-      lines.push(`  note: ${message}`);
-    }
+    note
   });
   const outcome = await client.send(
     { probe: "stop-rules connectivity check" },
@@ -3104,7 +3683,7 @@ function assertEveryAddedLineOnce(file, addedNumbers, pieces) {
     for (const number of addedOf(piece)) seen.set(number, (seen.get(number) ?? 0) + 1);
   }
   const missing = addedNumbers.filter((number) => !seen.has(number));
-  const twice = [...seen.entries()].filter(([, count]) => count > 1).map(([number]) => number);
+  const twice = [...seen.entries()].filter(([, count2]) => count2 > 1).map(([number]) => number);
   const extra = [...seen.keys()].filter((number) => !addedNumbers.includes(number));
   if (missing.length === 0 && twice.length === 0 && extra.length === 0) return;
   const parts2 = [];
@@ -3416,12 +3995,12 @@ var Tree = class _Tree {
       throw new TypeError("Argument must be a Tree");
     }
     C._ts_tree_get_changed_ranges_wasm(this[0], other[0]);
-    const count = C.getValue(TRANSFER_BUFFER, "i32");
+    const count2 = C.getValue(TRANSFER_BUFFER, "i32");
     const buffer = C.getValue(TRANSFER_BUFFER + SIZE_OF_INT, "i32");
-    const result = new Array(count);
-    if (count > 0) {
+    const result = new Array(count2);
+    if (count2 > 0) {
       let address = buffer;
-      for (let i2 = 0; i2 < count; i2++) {
+      for (let i2 = 0; i2 < count2; i2++) {
         result[i2] = unmarshalRange(address);
         address += SIZE_OF_RANGE;
       }
@@ -3432,12 +4011,12 @@ var Tree = class _Tree {
   /** Get the included ranges that were used to parse the syntax tree. */
   getIncludedRanges() {
     C._ts_tree_included_ranges_wasm(this[0]);
-    const count = C.getValue(TRANSFER_BUFFER, "i32");
+    const count2 = C.getValue(TRANSFER_BUFFER, "i32");
     const buffer = C.getValue(TRANSFER_BUFFER + SIZE_OF_INT, "i32");
-    const result = new Array(count);
-    if (count > 0) {
+    const result = new Array(count2);
+    if (count2 > 0) {
       let address = buffer;
-      for (let i2 = 0; i2 < count; i2++) {
+      for (let i2 = 0; i2 < count2; i2++) {
         result[i2] = unmarshalRange(address);
         address += SIZE_OF_RANGE;
       }
@@ -3962,12 +4541,12 @@ var Node = class {
   childrenForFieldId(fieldId) {
     marshalNode(this);
     C._ts_node_children_by_field_id_wasm(this.tree[0], fieldId);
-    const count = C.getValue(TRANSFER_BUFFER, "i32");
+    const count2 = C.getValue(TRANSFER_BUFFER, "i32");
     const buffer = C.getValue(TRANSFER_BUFFER + SIZE_OF_INT, "i32");
-    const result = new Array(count);
-    if (count > 0) {
+    const result = new Array(count2);
+    if (count2 > 0) {
       let address = buffer;
-      for (let i2 = 0; i2 < count; i2++) {
+      for (let i2 = 0; i2 < count2; i2++) {
         result[i2] = unmarshalNode(this.tree, address);
         address += SIZE_OF_NODE;
       }
@@ -4039,12 +4618,12 @@ var Node = class {
     if (!this._children) {
       marshalNode(this);
       C._ts_node_children_wasm(this.tree[0]);
-      const count = C.getValue(TRANSFER_BUFFER, "i32");
+      const count2 = C.getValue(TRANSFER_BUFFER, "i32");
       const buffer = C.getValue(TRANSFER_BUFFER + SIZE_OF_INT, "i32");
-      this._children = new Array(count);
-      if (count > 0) {
+      this._children = new Array(count2);
+      if (count2 > 0) {
         let address = buffer;
-        for (let i2 = 0; i2 < count; i2++) {
+        for (let i2 = 0; i2 < count2; i2++) {
           this._children[i2] = unmarshalNode(this.tree, address);
           address += SIZE_OF_NODE;
         }
@@ -4062,12 +4641,12 @@ var Node = class {
     if (!this._namedChildren) {
       marshalNode(this);
       C._ts_node_named_children_wasm(this.tree[0]);
-      const count = C.getValue(TRANSFER_BUFFER, "i32");
+      const count2 = C.getValue(TRANSFER_BUFFER, "i32");
       const buffer = C.getValue(TRANSFER_BUFFER + SIZE_OF_INT, "i32");
-      this._namedChildren = new Array(count);
-      if (count > 0) {
+      this._namedChildren = new Array(count2);
+      if (count2 > 0) {
         let address = buffer;
-        for (let i2 = 0; i2 < count; i2++) {
+        for (let i2 = 0; i2 < count2; i2++) {
           this._namedChildren[i2] = unmarshalNode(this.tree, address);
           address += SIZE_OF_NODE;
         }
@@ -4911,14 +5490,14 @@ var Query = class {
       maxStartDepth,
       timeoutMicros
     );
-    const count = C.getValue(TRANSFER_BUFFER, "i32");
+    const count2 = C.getValue(TRANSFER_BUFFER, "i32");
     const startAddress = C.getValue(TRANSFER_BUFFER + SIZE_OF_INT, "i32");
     const didExceedMatchLimit = C.getValue(TRANSFER_BUFFER + 2 * SIZE_OF_INT, "i32");
     const result = new Array();
     this.exceededMatchLimit = Boolean(didExceedMatchLimit);
     const captures = new Array();
     let address = startAddress;
-    for (let i2 = 0; i2 < count; i2++) {
+    for (let i2 = 0; i2 < count2; i2++) {
       const patternIndex = C.getValue(address, "i32");
       address += SIZE_OF_INT;
       const captureCount = C.getValue(address, "i32");
@@ -5166,12 +5745,12 @@ var Language = class _Language {
    */
   get supertypes() {
     C._ts_language_supertypes_wasm(this[0]);
-    const count = C.getValue(TRANSFER_BUFFER, "i32");
+    const count2 = C.getValue(TRANSFER_BUFFER, "i32");
     const buffer = C.getValue(TRANSFER_BUFFER + SIZE_OF_INT, "i32");
-    const result = new Array(count);
-    if (count > 0) {
+    const result = new Array(count2);
+    if (count2 > 0) {
       let address = buffer;
-      for (let i2 = 0; i2 < count; i2++) {
+      for (let i2 = 0; i2 < count2; i2++) {
         result[i2] = C.getValue(address, "i16");
         address += SIZE_OF_SHORT;
       }
@@ -5183,12 +5762,12 @@ var Language = class _Language {
    */
   subtypes(supertype) {
     C._ts_language_subtypes_wasm(this[0], supertype);
-    const count = C.getValue(TRANSFER_BUFFER, "i32");
+    const count2 = C.getValue(TRANSFER_BUFFER, "i32");
     const buffer = C.getValue(TRANSFER_BUFFER + SIZE_OF_INT, "i32");
-    const result = new Array(count);
-    if (count > 0) {
+    const result = new Array(count2);
+    if (count2 > 0) {
       let address = buffer;
-      for (let i2 = 0; i2 < count; i2++) {
+      for (let i2 = 0; i2 < count2; i2++) {
         result[i2] = C.getValue(address, "i16");
         address += SIZE_OF_SHORT;
       }
@@ -5784,8 +6363,8 @@ var Module2 = (() => {
               customSection.neededDynlibs.push(libname);
             }
           } else if (subsectionType === WASM_DYLINK_EXPORT_INFO) {
-            var count = getLEB();
-            while (count--) {
+            var count2 = getLEB();
+            while (count2--) {
               var symname = getString();
               var flags2 = getLEB();
               if (flags2 & WASM_SYMBOL_TLS) {
@@ -5793,8 +6372,8 @@ var Module2 = (() => {
               }
             }
           } else if (subsectionType === WASM_DYLINK_IMPORT_INFO) {
-            var count = getLEB();
-            while (count--) {
+            var count2 = getLEB();
+            while (count2--) {
               var modname = getString();
               var symname = getString();
               var flags2 = getLEB();
@@ -5983,9 +6562,9 @@ var Module2 = (() => {
       }
       return func2;
     }, "getWasmTableEntry");
-    var updateTableMap = /* @__PURE__ */ __name((offset, count) => {
+    var updateTableMap = /* @__PURE__ */ __name((offset, count2) => {
       if (functionsInTableMap) {
-        for (var i2 = offset; i2 < offset + count; i2++) {
+        for (var i2 = offset; i2 < offset + count2; i2++) {
           var item = getWasmTableEntry(i2);
           if (item) {
             functionsInTableMap.set(item, i2);
@@ -7124,12 +7703,12 @@ var Parser = class {
   /** Get the ranges of text that the parser will include when parsing. */
   getIncludedRanges() {
     C._ts_parser_included_ranges_wasm(this[0]);
-    const count = C.getValue(TRANSFER_BUFFER, "i32");
+    const count2 = C.getValue(TRANSFER_BUFFER, "i32");
     const buffer = C.getValue(TRANSFER_BUFFER + SIZE_OF_INT, "i32");
-    const result = new Array(count);
-    if (count > 0) {
+    const result = new Array(count2);
+    if (count2 > 0) {
       let address = buffer;
-      for (let i2 = 0; i2 < count; i2++) {
+      for (let i2 = 0; i2 < count2; i2++) {
         result[i2] = unmarshalRange(address);
         address += SIZE_OF_RANGE;
       }
@@ -7341,6 +7920,10 @@ async function cutFiles(files, options) {
 // src/engine.ts
 var DEFAULT_THRESHOLD = 0.6;
 var DEFAULT_MAX_CALLS = 60;
+var DEFAULT_MAX_CALLS_OPENAI = 240;
+function defaultMaxCalls(judge) {
+  return judge.kind === "jev" ? DEFAULT_MAX_CALLS : DEFAULT_MAX_CALLS_OPENAI;
+}
 var PIECES_PER_CALL = 4;
 var PACK_MAX_BYTES = 6e4;
 var MAX_RULES_PER_CALL = 200;
@@ -7349,16 +7932,16 @@ var CACHE_PIECE_KEY = "p0";
 function stage1Claim(rule, key) {
   return `Using everything in state (the diff and the code around it), the added lines in the diff state.pieces.${key} violate this coding rule: ${rule.text}`;
 }
-var encoder2 = new TextEncoder();
-async function sha256Hex(parts2) {
+var encoder3 = new TextEncoder();
+async function sha256Hex2(parts2) {
   const digest2 = await globalThis.crypto.subtle.digest(
     "SHA-256",
-    encoder2.encode(parts2.join("\0"))
+    encoder3.encode(parts2.join("\0"))
   );
   return [...new Uint8Array(digest2)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 function cacheKey(model, claim, state) {
-  return sha256Hex([CACHE_KEY_VERSION, model, claim, JSON.stringify(state)]);
+  return sha256Hex2([CACHE_KEY_VERSION, model, claim, JSON.stringify(state)]);
 }
 function pieceState(piece, context) {
   switch (context.kind) {
@@ -7439,30 +8022,110 @@ function packWork(model, work) {
   if (current.length > 0) packs.push(current);
   return packs;
 }
-function contextThatFits(model, piece, rules, refused, note) {
+var CACHE_KEY_STAND_IN = `stop-rules-${"0".repeat(24)}`;
+function openAiRules(rules) {
+  return rules.map((rule) => ({ id: rule.id, text: rule.text }));
+}
+function openAiBytes(judge, work) {
+  const question = {
+    input: userInput(pieceState(work.piece, work.context), openAiRules(work.rules)),
+    promptCacheKey: CACHE_KEY_STAND_IN,
+    ids: []
+  };
+  return utf8Bytes(requestBody(judge.model, judge.effort, question));
+}
+function makeOpenAiNode(work, cacheKeyText) {
+  const byQuestion = {};
+  const ids = work.rules.map((rule, index) => {
+    const id = `q0_${index}`;
+    byQuestion[id] = { piece: work.piece, rule };
+    return id;
+  });
+  return {
+    payload: { work: [work], byQuestion },
+    question: {
+      input: userInput(pieceState(work.piece, work.context), openAiRules(work.rules)),
+      promptCacheKey: cacheKeyText,
+      ids
+    },
+    halve: () => {
+      const halves = halvePiece(work.piece);
+      if (halves === null) return null;
+      return [
+        makeOpenAiNode({ piece: halves[0], context: halves[0].context, rules: work.rules }, cacheKeyText),
+        makeOpenAiNode({ piece: halves[1], context: halves[1].context, rules: work.rules }, cacheKeyText)
+      ];
+    }
+  };
+}
+function soloBytes(judge, work) {
+  return judge.kind === "jev" ? packBytes(judge.model, [work]) : openAiBytes(judge, work);
+}
+async function askJudge(input, work) {
+  const { judge, note } = input;
+  if (judge.kind === "jev") {
+    const client2 = new JevClient({
+      endpoint: input.endpoint,
+      model: judge.model,
+      apiKey: input.apiKey,
+      maxCalls: input.maxCalls,
+      fetchImpl: input.fetchImpl,
+      note,
+      ...input.sleep ? { sleep: input.sleep } : {},
+      ...input.concurrency !== void 0 ? { concurrency: input.concurrency } : {},
+      ...input.slot ? { slot: input.slot } : {}
+    });
+    const nodes2 = packWork(judge.model, work).map((pack) => makePackNode(judge.model, pack));
+    const results2 = (await client2.askAll(nodes2)).map((result) => ({
+      payload: result.node.payload,
+      outcome: result.outcome
+    }));
+    return { results: results2, calls: client2.calls, usage: { ...client2.usage } };
+  }
+  const client = new OpenAiClient({
+    endpoint: input.endpoint,
+    model: judge.model,
+    effort: judge.effort,
+    apiKey: input.apiKey,
+    maxCalls: input.maxCalls,
+    fetchImpl: input.fetchImpl,
+    concurrency: input.concurrency ?? judge.inFlight,
+    note,
+    ...input.sleep ? { sleep: input.sleep } : {},
+    ...input.slot ? { slot: input.slot } : {}
+  });
+  const keys = /* @__PURE__ */ new Map();
+  const nodes = [];
+  for (const item of work) {
+    const rulesKey = item.rules.map((rule) => rule.id).join(",");
+    let key = keys.get(rulesKey);
+    if (key === void 0) {
+      key = await promptCacheKey(openAiRules(item.rules));
+      keys.set(rulesKey, key);
+    }
+    nodes.push(makeOpenAiNode(item, key));
+  }
+  const results = (await client.askAll(nodes)).map((result) => ({
+    payload: result.node.payload,
+    outcome: result.outcome
+  }));
+  return { results, calls: client.calls, usage: { ...client.usage } };
+}
+function contextThatFits(judge, piece, rules, refused, note) {
   const context = piece.context;
   if (context.kind === "none") return context;
-  const bytes = packBytes(model, [{ piece, context, rules: [...rules] }]);
+  const bytes = soloBytes(judge, { piece, context, rules: [...rules] });
   if (bytes <= PACK_MAX_BYTES) return context;
   refused.push({ file: piece.file, fromLine: piece.fromLine, toLine: piece.toLine, bytes });
   note(
-    `${piece.file} lines ${piece.fromLine}-${piece.toLine}: too big to widen, a call with the ${CONTEXT_LINES} lines around it would be ${bytes} bytes, over the ${PACK_MAX_BYTES} byte cap, so Jev saw the diff alone`
+    `${piece.file} lines ${piece.fromLine}-${piece.toLine}: too big to widen, a call with the ${CONTEXT_LINES} lines around it would be ${bytes} bytes, over the ${PACK_MAX_BYTES} byte cap, so ${judgeName(judge)} saw the diff alone`
   );
   return NO_CONTEXT;
 }
 async function runEngine(input) {
-  const { cache, note, threshold, model } = input;
-  const client = new JevClient({
-    endpoint: input.endpoint,
-    model,
-    apiKey: input.apiKey,
-    maxCalls: input.maxCalls,
-    fetchImpl: input.fetchImpl,
-    note,
-    ...input.sleep ? { sleep: input.sleep } : {},
-    ...input.concurrency !== void 0 ? { concurrency: input.concurrency } : {},
-    ...input.slot ? { slot: input.slot } : {}
-  });
+  const { cache, note, threshold, judge } = input;
+  const model = cacheModel(judge);
+  const name2 = judgeName(judge);
   const notChecked = [];
   const scored = [];
   const piecesPerCall = [];
@@ -7474,15 +8137,18 @@ async function runEngine(input) {
   let holdBaseline = false;
   let transportFailed = false;
   let blocked = null;
-  const noteFailure = (failure2) => {
+  let blockedMessage = null;
+  const noteFailure = (failure2, message) => {
     if (blocked !== null) return;
     if (failure2 === "auth") blocked = "auth";
     else if (failure2 === "billing") blocked = "billing";
     else if (failure2 === "busy") blocked = "busy";
+    else if (failure2 === "model") blocked = "model";
+    if (blocked !== null) blockedMessage = message;
   };
   const work = [];
   for (const piece of input.pieces) {
-    const context = contextThatFits(model, piece, input.rules, tooBigToWiden, note);
+    const context = contextThatFits(judge, piece, input.rules, tooBigToWiden, note);
     if (context.kind === "wide") widened2 += 1;
     if (context.kind === "function") withFunction += 1;
     const state = soloState(piece, context);
@@ -7501,14 +8167,14 @@ async function runEngine(input) {
       work.push({ piece, context, rules: uncached.slice(i2, i2 + MAX_RULES_PER_CALL) });
     }
   }
-  const stage1Nodes = packWork(model, work).map((pack) => makePackNode(model, pack));
-  for (const result of await client.askAll(stage1Nodes)) {
-    const { work: sent, byQuestion } = result.node.payload;
+  const asked = await askJudge(input, work);
+  for (const result of asked.results) {
+    const { work: sent, byQuestion } = result.payload;
     piecesPerCall.push(sent.length);
     if (!result.outcome.ok) {
       const failure2 = result.outcome.failure;
       if (holdsBaseline(failure2)) holdBaseline = true;
-      noteFailure(failure2);
+      noteFailure(failure2, result.outcome.message);
       if (failure2 !== "budget") transportFailed = true;
       for (const item of sent) {
         notChecked.push(notCheckedFor(item.piece, reasonFor(failure2, result.outcome.message)));
@@ -7518,9 +8184,9 @@ async function runEngine(input) {
     for (const [id, target] of Object.entries(byQuestion)) {
       const noul = result.outcome.answers[id];
       if (noul === void 0) {
-        note(`Jev returned no answer for rule ${target.rule.id} on ${target.piece.file}`);
+        note(`${name2} returned no answer for rule ${target.rule.id} on ${target.piece.file}`);
         notChecked.push(
-          notCheckedFor(target.piece, `Jev returned no answer for rule ${target.rule.id}`)
+          notCheckedFor(target.piece, `${name2} returned no answer for rule ${target.rule.id}`)
         );
         continue;
       }
@@ -7554,7 +8220,7 @@ async function runEngine(input) {
     pieces,
     scores: groupScores(scored, input.showContext === true),
     notChecked,
-    calls: client.calls,
+    calls: asked.calls,
     cacheHits,
     answered,
     piecesPerCall,
@@ -7564,7 +8230,8 @@ async function runEngine(input) {
     transportFailed,
     holdBaseline,
     blocked,
-    usage: client.usage,
+    blockedMessage,
+    usage: asked.usage,
     findings
   };
 }
@@ -7757,7 +8424,7 @@ function pieceDiff(piece) {
 function ruleLines(rule) {
   return [`   Rule: ${rule.rule}`, `   Confidence: ${confidence(rule.confidence)}`];
 }
-function pieceBlock(piece, index) {
+function pieceBlock2(piece, index) {
   const unit = piece.unit === null ? "" : ` in ${piece.unit}`;
   const heading = piece.rules.length === 1 ? `${index}. ${piece.file} ${where(piece.fromLine, piece.toLine)}${unit} breaks 1 rule` : `${index}. ${piece.file} ${where(piece.fromLine, piece.toLine)}${unit} breaks ${piece.rules.length} rules`;
   return [
@@ -7786,8 +8453,8 @@ function coverage(report) {
   if (stats.files > 0 || notChecked.length > 0) return "none-checked";
   return "nothing-changed";
 }
-function plural(count, word) {
-  return count === 1 ? `1 ${word}` : `${count} ${word}s`;
+function plural(count2, word) {
+  return count2 === 1 ? `1 ${word}` : `${count2} ${word}s`;
 }
 function noneCheckedReason(report) {
   const head = `${plural(report.stats.files, "file")} changed and none of it could be checked`;
@@ -7808,22 +8475,22 @@ function headline(report) {
 This does not say your code is clean. The reasons are below.`;
   }
 }
-function whatJevSaw(stats) {
+function whatJevSaw(stats, judge = "Jev") {
   const parts2 = [];
   const lines = stats.contextLines;
   if (stats.withFunction > 0 && stats.widened > 0) {
     parts2.push(
-      `Jev saw the whole function for ${plural(stats.withFunction, "piece")} and ${lines} lines around the other ${stats.widened}.`
+      `${judge} saw the whole function for ${plural(stats.withFunction, "piece")} and ${lines} lines around the other ${stats.widened}.`
     );
   } else if (stats.withFunction > 0) {
-    parts2.push("Jev saw the whole function each piece is.");
+    parts2.push(`${judge} saw the whole function each piece is.`);
   } else if (stats.widened > 0) {
-    parts2.push(`Jev saw ${lines} lines around it.`);
+    parts2.push(`${judge} saw ${lines} lines around it.`);
   }
   const refused = stats.tooBigToWiden.length;
   if (refused > 0) {
     parts2.push(
-      `${plural(refused, "piece")} ${refused === 1 ? "was" : "were"} too big to widen, so Jev saw ${refused === 1 ? "it" : "them"} without the code around ${refused === 1 ? "it" : "them"}.`
+      `${plural(refused, "piece")} ${refused === 1 ? "was" : "were"} too big to widen, so ${judge} saw ${refused === 1 ? "it" : "them"} without the code around ${refused === 1 ? "it" : "them"}.`
     );
   }
   return parts2.length === 0 ? null : parts2.join(" ");
@@ -7831,18 +8498,18 @@ function whatJevSaw(stats) {
 function renderReport(report) {
   const { pieces, notChecked } = report;
   const sections = [];
-  const saw = whatJevSaw(report.stats);
+  const saw = whatJevSaw(report.stats, judgeName(report.judge));
   if (pieces.length === 0) {
     sections.push(saw === null ? headline(report) : `${headline(report)} ${saw}`);
   } else {
     const broken = pieces.reduce((total, piece) => total + piece.rules.length, 0);
-    const count = broken === 1 ? "1 rule violation" : `${broken} rule violations`;
+    const count2 = broken === 1 ? "1 rule violation" : `${broken} rule violations`;
     const places = pieces.length === 1 ? "1 place" : `${pieces.length} places`;
     sections.push(
-      `stop-rules: ${count} in ${places} in your latest changes.${saw === null ? "" : ` ${saw}`}
+      `stop-rules: ${count2} in ${places} in your latest changes.${saw === null ? "" : ` ${saw}`}
 Fix each one. If a rule truly should not apply here, leave the code and tell the user why.`
     );
-    sections.push(pieces.map((piece, i2) => pieceBlock(piece, i2 + 1)).join("\n\n"));
+    sections.push(pieces.map((piece, i2) => pieceBlock2(piece, i2 + 1)).join("\n\n"));
   }
   sections.push(...notCheckedSections(notChecked));
   return sections.join("\n\n");
@@ -7852,8 +8519,8 @@ function cutWords(cut) {
   if (cut === "hunks") return "one diff hunk each, with no parser";
   return "diff hunks grouped into 12,000 byte chunks, with no parser";
 }
-function jevSawLines(saw) {
-  const lines = ["   What Jev saw:", `     file: ${saw.file}`, "     diff:"];
+function jevSawLines(saw, judge) {
+  const lines = [`   What ${judge} saw:`, `     file: ${saw.file}`, "     diff:"];
   for (const line of saw.diff.split("\n")) {
     if (line.length > 0) lines.push(`       ${line}`);
   }
@@ -7863,26 +8530,31 @@ function jevSawLines(saw) {
   }
   return lines;
 }
-function scoreBlock(piece, index) {
+function scoreBlock(piece, index, judge) {
   const unit = piece.unit === null ? "" : ` in ${piece.unit}`;
   const lines = [`${index}. ${piece.file} ${where(piece.fromLine, piece.toLine)}${unit}`];
   for (const rule of piece.rules) lines.push(`   ${confidence(rule.score)}  ${rule.rule}`);
-  if (piece.jevSaw !== void 0) lines.push(...jevSawLines(piece.jevSaw));
+  if (piece.jevSaw !== void 0) lines.push(...jevSawLines(piece.jevSaw, judge));
   return lines.join("\n");
 }
 function renderScores(report) {
   const { pieces, notChecked, stats, source } = report;
   const sections = [];
   const scores = pieces.reduce((total, piece) => total + piece.rules.length, 0);
+  const judge = judgeName(report.judge);
   if (pieces.length === 0) {
-    sections.push(`stop-rules score: nothing to score in ${source}.`);
-  } else {
-    const count = pieces.length === 1 ? "1 piece" : `${pieces.length} pieces`;
     sections.push(
-      `stop-rules score: ${count}, ${scores} scores, ${stats.calls} Jev calls, ${stats.cacheHits} answers from the cache.
+      `stop-rules score: nothing to score in ${source}.
+Judge: ${describeJudge(report.judge)}.`
+    );
+  } else {
+    const count2 = pieces.length === 1 ? "1 piece" : `${pieces.length} pieces`;
+    sections.push(
+      `stop-rules score: ${count2}, ${scores} scores, ${stats.calls} ${judge} calls, ${stats.cacheHits} answers from the cache.
+Judge: ${describeJudge(report.judge)}.
 Scored ${source}. No cutoff applied, nothing was marked as checked, and the baseline did not move.`
     );
-    sections.push(pieces.map((piece, i2) => scoreBlock(piece, i2 + 1)).join("\n\n"));
+    sections.push(pieces.map((piece, i2) => scoreBlock(piece, i2 + 1, judge)).join("\n\n"));
   }
   sections.push(...notCheckedSections(notChecked));
   return sections.join("\n\n");
@@ -8013,17 +8685,21 @@ var SLOT_WAIT_MS = 6e4;
 var SLOT_STALE_MS = 12e4;
 var POLL_MS = 100;
 var MACHINE_BUSY = "Jev is busy on this machine, this change will be checked on the next run";
-function slotsDir(env) {
+function machineBusy(judgeName2) {
+  return `${judgeName2} is busy on this machine, this change will be checked on the next run`;
+}
+function slotsDir(env, judge = "jev") {
+  const folder = judge === "jev" ? "slots" : "openai-slots";
   const configured = env["XDG_CACHE_HOME"];
   if (configured !== void 0) {
     if (configured.trim().length === 0) {
       throw new Error("XDG_CACHE_HOME is set but empty. Unset it or point it at a folder.");
     }
-    return path18.join(configured, "stop-rules", "slots");
+    return path18.join(configured, "stop-rules", folder);
   }
   const home = os.homedir();
-  if (process.platform === "darwin") return path18.join(home, "Library", "Caches", "stop-rules", "slots");
-  return path18.join(home, ".cache", "stop-rules", "slots");
+  if (process.platform === "darwin") return path18.join(home, "Library", "Caches", "stop-rules", folder);
+  return path18.join(home, ".cache", "stop-rules", folder);
 }
 function pidAlive(pid) {
   if (!Number.isInteger(pid) || pid <= 0) return false;
@@ -8307,16 +8983,22 @@ async function run2(options) {
   const settingsLoad = await loadSettings(repo.root);
   if (!settingsLoad.ok) return cannotRun(settingsLoad.reason);
   const settings = settingsLoad.loaded.settings;
+  const chosen = chooseJudge(settings.judge, {
+    ...options.judge !== void 0 ? { judge: options.judge } : {},
+    ...options.model !== void 0 ? { model: options.model } : {},
+    ...options.effort !== void 0 ? { effort: options.effort } : {}
+  });
+  if (!chosen.ok) return cannotRun(chosen.reason);
   const knobs = {
     threshold: options.threshold ?? settings.threshold ?? DEFAULT_THRESHOLD,
-    maxCalls: options.maxCalls ?? settings.maxCalls ?? DEFAULT_MAX_CALLS,
+    maxCalls: options.maxCalls ?? settings.maxCalls ?? defaultMaxCalls(chosen.choice),
     cut: options.cut ?? settings.cut ?? DEFAULT_CUT
   };
-  const credentials = await resolveCredentials(settingsLoad.loaded, env);
+  const credentials = await resolveCredentials(settingsLoad.loaded, env, chosen.choice);
   if (!credentials.ok) return cannotRun(credentials.reason);
   let slotDir;
   try {
-    slotDir = slotsDir(env);
+    slotDir = slotsDir(env, chosen.choice.kind);
   } catch (error) {
     return cannotRun(error instanceof Error ? error.message : String(error));
   }
@@ -8369,7 +9051,7 @@ async function diffFileWork(args2, diffFile) {
       snapshot: null,
       cut,
       // A diff file has no file content, so there is no code around a piece to send either.
-      source: `${diffFile}, cut into ${cutWords(cut)}${why}, with Jev shown the diff alone (a diff file has no file content, so the code around a change cannot be read)`,
+      source: `${diffFile}, cut into ${cutWords(cut)}${why}, with ${judgeName(args2.credentials.judge)} shown the diff alone (a diff file has no file content, so the code around a change cannot be read)`,
       against: diffFile
     }
   };
@@ -8418,7 +9100,8 @@ async function workingTreeWork(args2, state) {
 }
 async function runLocked(args2) {
   const { options, rules, credentials, knobs, stateDir, notes, note, started: started2 } = args2;
-  const model = credentials.model;
+  const judge = credentials.judge;
+  const name2 = judgeName(judge);
   let state;
   let cache;
   try {
@@ -8444,7 +9127,7 @@ async function runLocked(args2) {
     slot: () => acquireSlot(args2.slotDir),
     threshold: knobs.threshold,
     maxCalls: knobs.maxCalls,
-    model,
+    judge,
     endpoint: credentials.endpoint,
     apiKey: credentials.bearer,
     fetchImpl: options.fetchImpl ?? ((url, init3) => fetch(url, init3)),
@@ -8458,13 +9141,23 @@ async function runLocked(args2) {
   });
   if (engineResult.blocked !== null) {
     await saveCache(stateDir, cache);
-    if (engineResult.blocked === "billing") return cannotRun(BILLING_EXHAUSTED);
-    if (engineResult.blocked === "busy") return cannotRun(MACHINE_BUSY);
-    return cannotRun(credentials.mode === "team" ? TOKEN_REJECTED : `${AUTH_REJECTED}.`);
+    if (engineResult.blocked === "billing") {
+      return cannotRun(judge.kind === "jev" ? BILLING_EXHAUSTED : OPENAI_BILLING_EXHAUSTED);
+    }
+    if (engineResult.blocked === "busy") return cannotRun(machineBusy(name2));
+    if (engineResult.blocked === "model") {
+      const said = engineResult.blockedMessage ?? `${name2} cannot be used with this key`;
+      return cannotRun(`${said.replace(/\.+$/, "")}.`);
+    }
+    if (credentials.mode === "team") return cannotRun(TOKEN_REJECTED);
+    return cannotRun(`${judge.kind === "jev" ? AUTH_REJECTED : OPENAI_AUTH_REJECTED}.`);
   }
   if (pieces.length > 0 && engineResult.answered === 0 && engineResult.transportFailed) {
     await saveCache(stateDir, cache);
-    return cannotRun("could not reach Jev for any piece of this diff.");
+    const reasons = [...new Set(engineResult.notChecked.map((entry) => entry.reason))];
+    return cannotRun(
+      `could not reach ${name2} for any piece of this diff${reasons.length === 0 ? "" : ` (${reasons.join("; ")})`}.`
+    );
   }
   const notChecked = [...work.failures, ...cut.notChecked, ...engineResult.notChecked];
   const stats = {
@@ -8486,11 +9179,14 @@ async function runLocked(args2) {
     tooBigToWiden: engineResult.tooBigToWiden,
     inputTokens: engineResult.usage.inputTokens,
     outputTokens: engineResult.usage.outputTokens,
+    ...engineResult.usage.cachedInputTokens !== void 0 ? { cachedInputTokens: engineResult.usage.cachedInputTokens } : {},
+    ...engineResult.usage.reasoningTokens !== void 0 ? { reasoningTokens: engineResult.usage.reasoningTokens } : {},
     durationMs: Date.now() - started2
   };
   let outcome;
   if (options.mode === "score") {
     const report = {
+      judge: judgeInfo(judge),
       pieces: engineResult.scores,
       notChecked,
       skipped: work.skipped,
@@ -8500,6 +9196,7 @@ async function runLocked(args2) {
     outcome = { kind: "scored", report, text: renderScores(report) };
   } else {
     const report = {
+      judge: judgeInfo(judge),
       pieces: engineResult.pieces,
       against: work.against,
       notChecked,
@@ -8522,6 +9219,7 @@ async function runLocked(args2) {
   await appendRunLog(stateDir, {
     at: (/* @__PURE__ */ new Date()).toISOString(),
     mode: options.mode + (options.stopHookActive === true ? " (stop_hook_active)" : ""),
+    judge: judgeInfo(judge),
     cut: stats.cut,
     files: stats.files,
     pieces: stats.pieces,
@@ -8538,6 +9236,8 @@ async function runLocked(args2) {
     notChecked: stats.notChecked,
     inputTokens: stats.inputTokens,
     outputTokens: stats.outputTokens,
+    ...stats.cachedInputTokens !== void 0 ? { cachedInputTokens: stats.cachedInputTokens } : {},
+    ...stats.reasoningTokens !== void 0 ? { reasoningTokens: stats.reasoningTokens } : {},
     durationMs: stats.durationMs,
     exitCode: outcome.kind === "violations" ? 2 : outcome.kind === "cannot-run" ? 1 : 0,
     notes
@@ -8641,6 +9341,7 @@ function failure(repo, reason) {
     repo,
     cut: DEFAULT_CUT,
     mode: "local",
+    judge: { kind: "jev", model: "jev-latest" },
     bundle: { path: BUNDLE_PATH, written: false },
     grammars: noGrammars(),
     rules: { path: ".stop-rules.md", created: false },
@@ -8682,11 +9383,21 @@ async function init2(options) {
   const existingSettings = await loadSettings(root);
   if (!existingSettings.ok) return failure(root, existingSettings.reason);
   const cut = options.cut ?? existingSettings.loaded.settings.cut ?? DEFAULT_CUT;
+  const judgeFlagsGiven = options.judge !== void 0 || options.model !== void 0 || options.effort !== void 0;
+  const pickedJudge = chooseJudge(existingSettings.loaded.settings.judge, {
+    ...options.judge !== void 0 ? { judge: options.judge } : {},
+    ...options.model !== void 0 ? { model: options.model } : {},
+    ...options.effort !== void 0 ? { effort: options.effort } : {}
+  });
+  if (!pickedJudge.ok) return failure(root, pickedJudge.reason);
+  const choice = pickedJudge.choice;
+  const judge = choice.kind === "jev" ? { kind: "jev", model: "jev-latest" } : { kind: "openai", model: choice.model, effort: choice.effort };
   const report = {
     ok: true,
     repo: root,
     cut,
     mode: "local",
+    judge,
     bundle: { path: BUNDLE_PATH, written: false },
     grammars: noGrammars(),
     rules: { path: ".stop-rules.md", created: false },
@@ -8717,6 +9428,18 @@ async function init2(options) {
     const written = await writeSettings(root, { cut: options.cut });
     if (!written.ok) return failure(root, written.reason ?? `could not write ${written.file}`);
     wroteKeys.push("cut");
+  }
+  if (judgeFlagsGiven) {
+    const existingJudge = existingSettings.loaded.settings.judge;
+    const setting = choice.kind === "jev" ? { kind: "jev" } : {
+      kind: "openai",
+      model: choice.model,
+      effort: choice.effort,
+      ...existingJudge?.kind === "openai" && existingJudge.inFlight !== void 0 ? { inFlight: existingJudge.inFlight } : {}
+    };
+    const written = await writeSettings(root, { judge: setting });
+    if (!written.ok) return failure(root, written.reason ?? `could not write ${written.file}`);
+    wroteKeys.push("judge");
   }
   if (wroteKeys.length > 0) report.settings = { path: SETTINGS_FILE, wrote: wroteKeys };
   const source = bundleSource(options.selfPath);
@@ -8776,7 +9499,7 @@ async function init2(options) {
     });
   }
   report.todo.push(
-    report.mode === "team" ? 'Store the team token: printf %s "$TOKEN" | stop-rules login --token-stdin' : 'Give it your own Jev key from TypeSafe: set TYPESAFE_API_KEY, or run printf %s "$KEY" | stop-rules login --jev-key-stdin'
+    report.mode === "team" ? 'Store the team token: printf %s "$TOKEN" | stop-rules login --token-stdin' : judge.kind === "openai" ? 'Give it your own OpenAI key: set OPENAI_API_KEY, or run printf %s "$KEY" | stop-rules login --openai-key-stdin' : 'Give it your own Jev key from TypeSafe: set TYPESAFE_API_KEY, or run printf %s "$KEY" | stop-rules login --jev-key-stdin'
   );
   report.todo.push(`Edit ${report.rules.path} so it says what your team actually cares about.`);
   if (cut === "functions" && report.grammars.languages.length === 0) {
@@ -8889,8 +9612,10 @@ function renderInit(report) {
       report.team.written ? `  wrote ${report.team.path} pointing at ${report.team.endpoint}` : `  team server already set to ${report.team.endpoint} (from ${report.team.path})`
     );
   }
+  const keyName = report.judge.kind === "openai" ? "OpenAI key" : "Jev key";
+  lines.push(`  judge: ${describeJudge(report.judge)}`);
   lines.push(
-    report.mode === "team" ? "  mode: team (the Jev key stays on your team's server)" : "  mode: local (this machine needs your own Jev key)"
+    report.mode === "team" ? `  mode: team (the ${keyName} stays on your team's server)` : `  mode: local (this machine needs your own ${keyName})`
   );
   lines.push("");
   for (const agent of report.agents) {
@@ -8913,24 +9638,34 @@ import { createServer } from "node:http";
 var SERVER_VERSION = "0.1.0";
 var DEFAULT_UPSTREAM = "https://api.typesafe.ai/v1/systemone";
 var DEFAULT_MODEL2 = "jev-latest";
+var OPENAI_UPSTREAM = "https://api.openai.com/v1/responses";
 var MAX_BODY_BYTES = 1e6;
 var UPSTREAM_TIMEOUT_MS = 3e4;
+var OPENAI_UPSTREAM_TIMEOUT_MS = 6e4;
 var MAX_UPSTREAM_IN_FLIGHT = 12;
-var inFlight = 0;
+var inFlight = { jev: 0, openai: 0 };
 var REQUIRED_ENV = ["TYPESAFE_API_KEY", "STOP_RULES_TOKEN"];
+var OPENAI_REQUIRED_ENV = ["OPENAI_API_KEY", "STOP_RULES_TOKEN"];
+var SECRET_ENV = ["TYPESAFE_API_KEY", "OPENAI_API_KEY", "STOP_RULES_TOKEN"];
 function value(env, name2) {
   const raw = env[name2];
   return typeof raw === "string" ? raw.trim() : "";
 }
+function missingFor(env, judge) {
+  return (judge === "jev" ? REQUIRED_ENV : OPENAI_REQUIRED_ENV).filter(
+    (name2) => value(env, name2).length === 0
+  );
+}
 function missingEnv(env) {
-  return REQUIRED_ENV.filter((name2) => value(env, name2).length === 0);
+  if (missingFor(env, "openai").length === 0) return [];
+  return missingFor(env, "jev");
 }
 function describe(error) {
   return error instanceof Error ? error.message : String(error);
 }
 function redact(env, text) {
   let out3 = text;
-  for (const name2 of REQUIRED_ENV) {
+  for (const name2 of SECRET_ENV) {
     const secret = value(env, name2);
     if (secret.length > 0) out3 = out3.split(secret).join("[redacted]");
   }
@@ -8974,6 +9709,34 @@ function rejectPayload(body2) {
   }
   return null;
 }
+function rejectResponsesPayload(body2) {
+  if (!isObject(body2)) return "the body must be a JSON object";
+  if (typeof body2["model"] !== "string" || body2["model"].trim().length === 0) {
+    return "model must be a model name";
+  }
+  if (typeof body2["input"] !== "string") return "input must be a string";
+  if (body2["instructions"] !== void 0 && typeof body2["instructions"] !== "string") {
+    return "instructions must be a string";
+  }
+  if (body2["reasoning"] !== void 0 && !isObject(body2["reasoning"])) {
+    return "reasoning must be a JSON object";
+  }
+  const text = body2["text"];
+  const format = isObject(text) ? text["format"] : void 0;
+  if (!isObject(format) || format["type"] !== "json_schema" || format["strict"] !== true) {
+    return "text.format must be a strict json_schema";
+  }
+  return null;
+}
+var RESPONSES_FIELDS = [
+  "model",
+  "reasoning",
+  "instructions",
+  "input",
+  "text",
+  "max_output_tokens",
+  "prompt_cache_key"
+];
 function health(env) {
   const missing = missingEnv(env);
   return json(200, {
@@ -8981,21 +9744,29 @@ function health(env) {
     service: "stop-rules",
     version: SERVER_VERSION,
     configured: missing.length === 0,
-    missing
+    missing,
+    judges: {
+      jev: missingFor(env, "jev").length === 0,
+      openai: missingFor(env, "openai").length === 0
+    }
   });
 }
-async function forward(env, payload) {
-  const upstream = value(env, "STOP_RULES_JEV_UPSTREAM") || DEFAULT_UPSTREAM;
+async function forward(env, judge, payload) {
+  const upstream = judge === "jev" ? value(env, "STOP_RULES_JEV_UPSTREAM") || DEFAULT_UPSTREAM : OPENAI_UPSTREAM;
+  const key = value(env, judge === "jev" ? "TYPESAFE_API_KEY" : "OPENAI_API_KEY");
   const controller = new AbortController();
-  const timer = setTimeout(() => {
-    controller.abort();
-  }, UPSTREAM_TIMEOUT_MS);
-  inFlight += 1;
+  const timer = setTimeout(
+    () => {
+      controller.abort();
+    },
+    judge === "jev" ? UPSTREAM_TIMEOUT_MS : OPENAI_UPSTREAM_TIMEOUT_MS
+  );
+  inFlight[judge] += 1;
   try {
     const response = await fetch(upstream, {
       method: "POST",
       headers: {
-        authorization: `Bearer ${value(env, "TYPESAFE_API_KEY")}`,
+        authorization: `Bearer ${key}`,
         "content-type": "application/json"
       },
       body: payload,
@@ -9016,57 +9787,88 @@ async function forward(env, payload) {
     });
   } finally {
     clearTimeout(timer);
-    inFlight -= 1;
+    inFlight[judge] -= 1;
   }
 }
-async function systemone(request, env) {
-  const missing = missingEnv(env);
+async function admit(request, env, judge) {
+  const missing = missingFor(env, judge);
   if (missing.length > 0) {
-    return json(503, {
-      error: "not_configured",
-      message: "this stop-rules server is missing environment variables",
-      missing
-    });
+    return {
+      ok: false,
+      response: json(503, {
+        error: "not_configured",
+        message: judge === "jev" ? "this stop-rules server is missing environment variables" : "this stop-rules server is missing environment variables for the openai judge",
+        missing
+      })
+    };
   }
   if (!await secretsMatch(bearer(request), value(env, "STOP_RULES_TOKEN"))) {
-    return json(401, {
-      error: "unauthorized",
-      message: "send Authorization: Bearer with your team token. Run stop-rules login."
-    });
+    return {
+      ok: false,
+      response: json(401, {
+        error: "unauthorized",
+        message: "send Authorization: Bearer with your team token. Run stop-rules login."
+      })
+    };
   }
   const tooLarge = json(413, {
     error: "payload_too_large",
     message: `the body must be at most ${MAX_BODY_BYTES} bytes`
   });
   const declared = Number(request.headers.get("content-length") ?? "0");
-  if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) return tooLarge;
+  if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) return { ok: false, response: tooLarge };
   let raw;
   try {
     raw = await request.arrayBuffer();
   } catch (error) {
-    return json(400, { error: "unreadable_body", message: redact(env, describe(error)) });
+    return { ok: false, response: json(400, { error: "unreadable_body", message: redact(env, describe(error)) }) };
   }
-  if (raw.byteLength > MAX_BODY_BYTES) return tooLarge;
-  let body2;
+  if (raw.byteLength > MAX_BODY_BYTES) return { ok: false, response: tooLarge };
   try {
-    body2 = JSON.parse(new TextDecoder().decode(raw));
+    return { ok: true, body: JSON.parse(new TextDecoder().decode(raw)) };
   } catch (error) {
-    return json(400, { error: "invalid_json", message: redact(env, describe(error)) });
+    return { ok: false, response: json(400, { error: "invalid_json", message: redact(env, describe(error)) }) };
   }
+}
+function busy(judge) {
+  if (inFlight[judge] < MAX_UPSTREAM_IN_FLIGHT) return null;
+  const name2 = judge === "jev" ? "Jev" : "OpenAI";
+  return new Response(
+    JSON.stringify({
+      error: "too_many_requests",
+      message: `this server already has ${MAX_UPSTREAM_IN_FLIGHT} questions open with ${name2}. Try again in a second.`
+    }),
+    { status: 429, headers: { "content-type": "application/json", "retry-after": "1" } }
+  );
+}
+async function responses(request, env) {
+  const admitted = await admit(request, env, "openai");
+  if (!admitted.ok) return admitted.response;
+  const body2 = admitted.body;
+  const reason = rejectResponsesPayload(body2);
+  if (reason !== null) return json(400, { error: "invalid_request", message: reason });
+  const full = busy("openai");
+  if (full !== null) return full;
+  const asked = body2;
+  const forwarded = {};
+  for (const field of RESPONSES_FIELDS) {
+    if (asked[field] !== void 0) forwarded[field] = asked[field];
+  }
+  forwarded["store"] = false;
+  return forward(env, "openai", JSON.stringify(forwarded));
+}
+async function systemone(request, env) {
+  const admitted = await admit(request, env, "jev");
+  if (!admitted.ok) return admitted.response;
+  const body2 = admitted.body;
   const reason = rejectPayload(body2);
   if (reason !== null) return json(400, { error: "invalid_request", message: reason });
-  if (inFlight >= MAX_UPSTREAM_IN_FLIGHT) {
-    return new Response(
-      JSON.stringify({
-        error: "too_many_requests",
-        message: `this server already has ${MAX_UPSTREAM_IN_FLIGHT} questions open with Jev. Try again in a second.`
-      }),
-      { status: 429, headers: { "content-type": "application/json", "retry-after": "1" } }
-    );
-  }
+  const full = busy("jev");
+  if (full !== null) return full;
   const asked = body2;
   return forward(
     env,
+    "jev",
     JSON.stringify({
       state: asked.state,
       model: value(env, "STOP_RULES_JEV_MODEL") || DEFAULT_MODEL2,
@@ -9078,9 +9880,10 @@ async function route(request, env) {
   const path23 = new URL(request.url).pathname.replace(/\/+$/, "");
   if (request.method === "GET" && (path23 === "" || path23.endsWith("/health"))) return health(env);
   if (request.method === "POST" && path23.endsWith("/v1/systemone")) return systemone(request, env);
+  if (request.method === "POST" && path23.endsWith("/v1/responses")) return responses(request, env);
   return json(404, {
     error: "not_found",
-    message: "stop-rules serves GET /health and POST /v1/systemone"
+    message: "stop-rules serves GET /health, POST /v1/systemone and POST /v1/responses"
   });
 }
 async function handle2(request, env) {
@@ -9195,10 +9998,16 @@ function startServer(port, env = process.env) {
 }
 function startupLines(port, env) {
   const lines = [`stop-rules ${SERVER_VERSION} listening on http://${HOST}:${port}`];
-  const missing = missingEnv(env);
+  const serverEnv = env;
+  const missing = missingEnv(serverEnv);
   if (missing.length > 0) {
     lines.push(`not configured yet: set ${missing.join(" and ")} and restart`);
   }
+  const judge = (name2, route2) => {
+    const needs = missingFor(serverEnv, route2);
+    return needs.length === 0 ? `${name2} ready` : `${name2} needs ${needs.join(" and ")}`;
+  };
+  lines.push(`judges: ${judge("jev", "jev")}, ${judge("openai", "openai")}`);
   return lines;
 }
 async function serveMain(port) {
@@ -9225,8 +10034,9 @@ Usage:
   stop-rules team <endpoint>           point this repo at your team's stop-rules server
   stop-rules login --token-stdin       store the team token, read from stdin
   stop-rules login --jev-key-stdin     store your own Jev key, read from stdin
-  stop-rules login --check             check the endpoint and one real Jev call
-  stop-rules serve [--port n]          run the team server (it holds the Jev key)
+  stop-rules login --openai-key-stdin  store your own OpenAI key, read from stdin
+  stop-rules login --check             check the endpoint and one real call to the judge
+  stop-rules serve [--port n]          run the team server (it holds the judges' keys)
   stop-rules baseline --reset          forget what was checked; start again from HEAD
 
 Options:
@@ -9237,10 +10047,14 @@ Options:
   --rules <path>       rules file (default <repo root>/.stop-rules.md)
   --cut <mode>         hunks or chunks (no parser), functions (tree-sitter) (default ${DEFAULT_CUT})
   --threshold <0..1>   score at or above which a rule counts as violated (default ${DEFAULT_THRESHOLD})
-  --max-calls <n>      hard ceiling on requests to Jev in one run (default ${DEFAULT_MAX_CALLS})
+  --max-calls <n>      hard ceiling on requests to the judge in one run
+                       (default ${DEFAULT_MAX_CALLS} for jev, ${DEFAULT_MAX_CALLS_OPENAI} for openai: 240 pieces either way)
+  --judge <kind>       jev or openai: which service scores the pieces (default jev)
+  --model <name>       openai judge only: the model to ask (default ${DEFAULT_OPENAI_MODEL})
+  --effort <level>     openai judge only: ${EFFORTS.join(", ")} (default ${DEFAULT_EFFORT})
   --base <rev>         check and score modes: diff this revision against the working tree
   --diff <path>        score mode only: score a unified diff file instead of the working tree
-  --show-context       score mode only: print exactly what Jev saw for each piece
+  --show-context       score mode only: print exactly what the judge saw for each piece
   --json               print the findings, or the init result, as JSON
   --port <n>           serve mode only: port to listen on (default PORT or 8080)
   --reset              baseline mode only: clear the saved baseline
@@ -9250,20 +10064,27 @@ Options:
 
 Agents: ${agentNames().join(", ")}
 
-Settings: ${SETTINGS_FILE} in the repository root holds endpoint, cut, threshold and
-maxCalls. It is committed and holds no secret. A flag above beats the file. What each knob
-costs is in docs/TUNING.md.
+Settings: ${SETTINGS_FILE} in the repository root holds endpoint, cut, threshold, maxCalls
+and judge. It is committed and holds no secret. A flag above beats the file. The judge is
+{"kind": "jev"}, the default, or
+  {"kind": "openai", "model": "${DEFAULT_OPENAI_MODEL}", "effort": "${DEFAULT_EFFORT}", "inFlight": ${DEFAULT_IN_FLIGHT}}
+where inFlight, 1 to ${MAX_IN_FLIGHT}, is how many OpenAI calls one run keeps open. init --judge
+openai writes it. What each knob costs is in docs/TUNING.md.
 
 Environment, client:
   STOP_RULES_ENDPOINT      your team's stop-rules server, beats .stop-rules.json
   STOP_RULES_TOKEN         the team token, beats the stored token file
   TYPESAFE_API_KEY         your own Jev API key, used when there is no team endpoint
   TYPESAFE_API_KEY_FILE    a file holding that key, used when the variable above is unset
+  OPENAI_API_KEY           your own OpenAI API key, used when the judge is openai and there
+                           is no team endpoint
+  OPENAI_API_KEY_FILE      a file holding that key, used when the variable above is unset
   STOP_RULES_JEV_ENDPOINT  override the Jev endpoint in local mode
   STOP_RULES_JEV_MODEL     override the Jev model
 
 Environment, server (stop-rules serve and every cloud deploy):
   TYPESAFE_API_KEY         the Jev key the server holds on the team's behalf
+  OPENAI_API_KEY           the OpenAI key the server holds, needed only for the openai judge
   STOP_RULES_TOKEN         the token every developer's hook sends
   STOP_RULES_JEV_UPSTREAM  override where the server forwards questions
   PORT                     port to listen on
@@ -9281,6 +10102,7 @@ function parseArgs(argv) {
     agent: DEFAULT_AGENT,
     tokenStdin: false,
     jevKeyStdin: false,
+    openAiKeyStdin: false,
     check: false,
     reset: false,
     help: false,
@@ -9316,6 +10138,32 @@ function parseArgs(argv) {
       case "--jev-key-stdin":
         parsed.jevKeyStdin = true;
         break;
+      case "--openai-key-stdin":
+        parsed.openAiKeyStdin = true;
+        break;
+      case "--judge": {
+        i2 += 1;
+        const value2 = take(i2, "--judge");
+        if (value2 !== "jev" && value2 !== "openai") throw new UsageError("--judge must be jev or openai");
+        parsed.judge = value2;
+        break;
+      }
+      case "--model": {
+        i2 += 1;
+        const value2 = take(i2, "--model").trim();
+        if (value2.length === 0) throw new UsageError("--model needs a model name");
+        parsed.model = value2;
+        break;
+      }
+      case "--effort": {
+        i2 += 1;
+        const value2 = take(i2, "--effort");
+        if (!EFFORTS.includes(value2)) {
+          throw new UsageError(`--effort must be one of ${EFFORTS.join(", ")}, not ${value2}`);
+        }
+        parsed.effort = value2;
+        break;
+      }
       case "--check":
         parsed.check = true;
         break;
@@ -9472,12 +10320,20 @@ async function runHook(args2) {
   });
   return emit(deliverOutcome(adapter, outcome));
 }
+function judgeArgs(args2) {
+  return {
+    ...args2.judge !== void 0 ? { judge: args2.judge } : {},
+    ...args2.model !== void 0 ? { model: args2.model } : {},
+    ...args2.effort !== void 0 ? { effort: args2.effort } : {}
+  };
+}
 function knobArgs(args2) {
   return {
     ...args2.threshold !== void 0 ? { threshold: args2.threshold } : {},
     ...args2.maxCalls !== void 0 ? { maxCalls: args2.maxCalls } : {},
     ...args2.cut !== void 0 ? { cut: args2.cut } : {},
-    ...args2.rules !== void 0 ? { rulesPath: args2.rules } : {}
+    ...args2.rules !== void 0 ? { rulesPath: args2.rules } : {},
+    ...judgeArgs(args2)
   };
 }
 async function runCheckCommand(args2) {
@@ -9538,7 +10394,8 @@ async function runInitCommand(args2) {
     env: process.env,
     ...args2.agents !== void 0 ? { agents: args2.agents } : {},
     ...args2.team !== void 0 ? { team: args2.team } : {},
-    ...args2.cut !== void 0 ? { cut: args2.cut } : {}
+    ...args2.cut !== void 0 ? { cut: args2.cut } : {},
+    ...judgeArgs(args2)
   });
   if (args2.json) {
     const stream2 = report.ok ? process.stdout : process.stderr;
@@ -9583,21 +10440,24 @@ async function runLoginCommand(args2) {
       return reportRepo(resolved);
     }
     const root = resolved.ok ? resolved.repo.root : process.cwd();
-    return writeResult(await loginCheck(root, process.env));
+    return writeResult(await loginCheck(root, process.env, judgeArgs(args2)));
   }
-  if (args2.tokenStdin === args2.jevKeyStdin) {
+  const asked = [args2.tokenStdin, args2.jevKeyStdin, args2.openAiKeyStdin].filter(Boolean).length;
+  if (asked !== 1) {
     process.stderr.write(
       [
-        "stop-rules: login needs one of --token-stdin, --jev-key-stdin or --check.",
+        "stop-rules: login needs one of --token-stdin, --jev-key-stdin, --openai-key-stdin or --check.",
         '  printf %s "$TOKEN" | stop-rules login --token-stdin',
         '  printf %s "$JEV_KEY" | stop-rules login --jev-key-stdin',
+        '  printf %s "$OPENAI_KEY" | stop-rules login --openai-key-stdin',
         "  stop-rules login --check"
       ].join("\n") + "\n"
     );
     return 1;
   }
   const secret = await readStdin();
-  return writeResult(await login(process.env, args2.tokenStdin ? "token" : "jev-key", secret));
+  const target = args2.tokenStdin ? "token" : args2.jevKeyStdin ? "jev-key" : "openai-key";
+  return writeResult(await login(process.env, target, secret));
 }
 async function main() {
   let args2;

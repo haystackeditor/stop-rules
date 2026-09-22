@@ -2,7 +2,7 @@
  * Vercel Function, Node runtime. The build script compiles src/server into dist, so this
  * wrapper only forwards the request. Vercel routes api/<path> by file name, so the team
  * endpoint is https://<your-app>.vercel.app/api and the questions land on
- * api/v1/systemone.ts.
+ * api/v1/systemone.ts for Jev and api/v1/responses.ts for the OpenAI judge.
  */
 import { handle } from "../dist/server/handler.js";
 

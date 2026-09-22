@@ -27,6 +27,11 @@
     "stopRulesToken": {
       "type": "secureString",
       "metadata": { "description": "The token every developer's hook sends. openssl rand -hex 24" }
+    },
+    "openaiApiKey": {
+      "type": "secureString",
+      "defaultValue": "",
+      "metadata": { "description": "Your OpenAI API key. Leave it empty unless your repos use the openai judge." }
     }
   },
   "variables": {
@@ -58,7 +63,8 @@
           },
           "secrets": [
             { "name": "typesafe-api-key", "value": "[parameters('typesafeApiKey')]" },
-            { "name": "stop-rules-token", "value": "[parameters('stopRulesToken')]" }
+            { "name": "stop-rules-token", "value": "[parameters('stopRulesToken')]" },
+            { "name": "openai-api-key", "value": "[parameters('openaiApiKey')]" }
           ]
         },
         "template": {
@@ -70,6 +76,7 @@
               "env": [
                 { "name": "TYPESAFE_API_KEY", "secretRef": "typesafe-api-key" },
                 { "name": "STOP_RULES_TOKEN", "secretRef": "stop-rules-token" },
+                { "name": "OPENAI_API_KEY", "secretRef": "openai-api-key" },
                 { "name": "PORT", "value": "8080" }
               ]
             }

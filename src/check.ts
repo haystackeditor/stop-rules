@@ -9,7 +9,7 @@ import { CONTEXT_LINES } from "./context.js";
 import { resolveCredentials, TOKEN_REJECTED, type Credentials } from "./credentials.js";
 import { cutFiles } from "./cut.js";
 import { parseDiff, type FileDiff } from "./diff.js";
-import { DEFAULT_MAX_CALLS, DEFAULT_THRESHOLD, runEngine, type CacheLike } from "./engine.js";
+import { defaultMaxCalls, DEFAULT_THRESHOLD, runEngine, type CacheLike } from "./engine.js";
 import {
   diffTrees,
   emptyTree,
@@ -21,10 +21,12 @@ import {
   type RepoPaths,
 } from "./git.js";
 import { AUTH_REJECTED, BILLING_EXHAUSTED, type FetchLike } from "./jev.js";
+import { judgeInfo, judgeName, type Effort, type JudgeKind } from "./judge.js";
+import { OPENAI_AUTH_REJECTED, OPENAI_BILLING_EXHAUSTED } from "./openai.js";
 import { coverage, cutWords, noneCheckedReason, renderReport, renderScores } from "./report.js";
 import { loadRules } from "./rules.js";
-import { DEFAULT_CUT, loadSettings } from "./settings.js";
-import { acquireSlot, MACHINE_BUSY, slotsDir } from "./slots.js";
+import { chooseJudge, DEFAULT_CUT, loadSettings } from "./settings.js";
+import { acquireSlot, machineBusy, slotsDir } from "./slots.js";
 import {
   acquireLock,
   appendRunLog,
@@ -61,6 +63,10 @@ export interface RunOptions {
   threshold?: number;
   maxCalls?: number;
   cut?: CutMode;
+  /** Which judge to ask, and the OpenAI judge's model and effort. Flags beat the file. */
+  judge?: JudgeKind;
+  model?: string;
+  effort?: Effort;
   rulesPath?: string;
   base?: string;
   /** score mode only: score this unified diff file instead of the working tree. */
@@ -142,20 +148,26 @@ export async function run(options: RunOptions): Promise<RunOutcome> {
   const settingsLoad = await loadSettings(repo.root);
   if (!settingsLoad.ok) return cannotRun(settingsLoad.reason);
   const settings = settingsLoad.loaded.settings;
+  const chosen = chooseJudge(settings.judge, {
+    ...(options.judge !== undefined ? { judge: options.judge } : {}),
+    ...(options.model !== undefined ? { model: options.model } : {}),
+    ...(options.effort !== undefined ? { effort: options.effort } : {}),
+  });
+  if (!chosen.ok) return cannotRun(chosen.reason);
   const knobs: Knobs = {
     threshold: options.threshold ?? settings.threshold ?? DEFAULT_THRESHOLD,
-    maxCalls: options.maxCalls ?? settings.maxCalls ?? DEFAULT_MAX_CALLS,
+    maxCalls: options.maxCalls ?? settings.maxCalls ?? defaultMaxCalls(chosen.choice),
     cut: options.cut ?? settings.cut ?? DEFAULT_CUT,
   };
 
   // Team mode when this repo knows a stop-rules endpoint, the developer's own key if not.
-  const credentials = await resolveCredentials(settingsLoad.loaded, env);
+  const credentials = await resolveCredentials(settingsLoad.loaded, env, chosen.choice);
   if (!credentials.ok) return cannotRun(credentials.reason);
 
   // Reads the environment, so a bad value is reported before any work.
   let slotDir: string;
   try {
-    slotDir = slotsDir(env);
+    slotDir = slotsDir(env, chosen.choice.kind);
   } catch (error) {
     return cannotRun(error instanceof Error ? error.message : String(error));
   }
@@ -192,7 +204,7 @@ interface LockedArgs {
   credentials: Credentials;
   knobs: Knobs;
   stateDir: string;
-  /** Where the machine wide Jev slots live. */
+  /** Where the machine wide slots of this run's judge live. */
   slotDir: string;
   notes: string[];
   note: (message: string) => void;
@@ -253,7 +265,7 @@ async function diffFileWork(args: LockedArgs, diffFile: string): Promise<WorkRes
       snapshot: null,
       cut,
       // A diff file has no file content, so there is no code around a piece to send either.
-      source: `${diffFile}, cut into ${cutWords(cut)}${why}, with Jev shown the diff alone (a diff file has no file content, so the code around a change cannot be read)`,
+      source: `${diffFile}, cut into ${cutWords(cut)}${why}, with ${judgeName(args.credentials.judge)} shown the diff alone (a diff file has no file content, so the code around a change cannot be read)`,
       against: diffFile,
     },
   };
@@ -316,7 +328,8 @@ async function workingTreeWork(args: LockedArgs, state: StopRulesState): Promise
 
 async function runLocked(args: LockedArgs): Promise<RunOutcome> {
   const { options, rules, credentials, knobs, stateDir, notes, note, started } = args;
-  const model = credentials.model;
+  const judge = credentials.judge;
+  const name = judgeName(judge);
 
   let state: StopRulesState;
   let cache: Cache;
@@ -352,7 +365,7 @@ async function runLocked(args: LockedArgs): Promise<RunOutcome> {
     slot: () => acquireSlot(args.slotDir),
     threshold: knobs.threshold,
     maxCalls: knobs.maxCalls,
-    model,
+    judge,
     endpoint: credentials.endpoint,
     apiKey: credentials.bearer,
     fetchImpl: options.fetchImpl ?? ((url, init) => fetch(url, init)),
@@ -373,14 +386,24 @@ async function runLocked(args: LockedArgs): Promise<RunOutcome> {
   // so the same change is checked again once the human has fixed it.
   if (engineResult.blocked !== null) {
     await saveCache(stateDir, cache);
-    if (engineResult.blocked === "billing") return cannotRun(BILLING_EXHAUSTED);
-    if (engineResult.blocked === "busy") return cannotRun(MACHINE_BUSY);
-    return cannotRun(credentials.mode === "team" ? TOKEN_REJECTED : `${AUTH_REJECTED}.`);
+    if (engineResult.blocked === "billing") {
+      return cannotRun(judge.kind === "jev" ? BILLING_EXHAUSTED : OPENAI_BILLING_EXHAUSTED);
+    }
+    if (engineResult.blocked === "busy") return cannotRun(machineBusy(name));
+    if (engineResult.blocked === "model") {
+      const said = engineResult.blockedMessage ?? `${name} cannot be used with this key`;
+      return cannotRun(`${said.replace(/\.+$/, "")}.`);
+    }
+    if (credentials.mode === "team") return cannotRun(TOKEN_REJECTED);
+    return cannotRun(`${judge.kind === "jev" ? AUTH_REJECTED : OPENAI_AUTH_REJECTED}.`);
   }
 
   if (pieces.length > 0 && engineResult.answered === 0 && engineResult.transportFailed) {
     await saveCache(stateDir, cache);
-    return cannotRun("could not reach Jev for any piece of this diff.");
+    const reasons = [...new Set(engineResult.notChecked.map((entry) => entry.reason))];
+    return cannotRun(
+      `could not reach ${name} for any piece of this diff${reasons.length === 0 ? "" : ` (${reasons.join("; ")})`}.`,
+    );
   }
 
   const notChecked = [...work.failures, ...cut.notChecked, ...engineResult.notChecked];
@@ -403,12 +426,19 @@ async function runLocked(args: LockedArgs): Promise<RunOutcome> {
     tooBigToWiden: engineResult.tooBigToWiden,
     inputTokens: engineResult.usage.inputTokens,
     outputTokens: engineResult.usage.outputTokens,
+    ...(engineResult.usage.cachedInputTokens !== undefined
+      ? { cachedInputTokens: engineResult.usage.cachedInputTokens }
+      : {}),
+    ...(engineResult.usage.reasoningTokens !== undefined
+      ? { reasoningTokens: engineResult.usage.reasoningTokens }
+      : {}),
     durationMs: Date.now() - started,
   };
 
   let outcome: RunOutcome;
   if (options.mode === "score") {
     const report: ScoreReport = {
+      judge: judgeInfo(judge),
       pieces: engineResult.scores,
       notChecked,
       skipped: work.skipped,
@@ -418,6 +448,7 @@ async function runLocked(args: LockedArgs): Promise<RunOutcome> {
     outcome = { kind: "scored", report, text: renderScores(report) };
   } else {
     const report: CheckReport = {
+      judge: judgeInfo(judge),
       pieces: engineResult.pieces,
       against: work.against,
       notChecked,
@@ -443,6 +474,7 @@ async function runLocked(args: LockedArgs): Promise<RunOutcome> {
   await appendRunLog(stateDir, {
     at: new Date().toISOString(),
     mode: options.mode + (options.stopHookActive === true ? " (stop_hook_active)" : ""),
+    judge: judgeInfo(judge),
     cut: stats.cut,
     files: stats.files,
     pieces: stats.pieces,
@@ -459,6 +491,8 @@ async function runLocked(args: LockedArgs): Promise<RunOutcome> {
     notChecked: stats.notChecked,
     inputTokens: stats.inputTokens,
     outputTokens: stats.outputTokens,
+    ...(stats.cachedInputTokens !== undefined ? { cachedInputTokens: stats.cachedInputTokens } : {}),
+    ...(stats.reasoningTokens !== undefined ? { reasoningTokens: stats.reasoningTokens } : {}),
     durationMs: stats.durationMs,
     exitCode: outcome.kind === "violations" ? 2 : outcome.kind === "cannot-run" ? 1 : 0,
     notes,

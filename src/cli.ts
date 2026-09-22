@@ -4,7 +4,16 @@ import { DEFAULT_AGENT, agentNames, getAdapter } from "./adapters/index.js";
 import type { AgentAdapter, HookContext, HookOutput } from "./adapters/index.js";
 import { resetBaseline, run, type RunOutcome } from "./check.js";
 import { login, loginCheck, writeTeamConfig } from "./credentials.js";
-import { DEFAULT_MAX_CALLS, DEFAULT_THRESHOLD } from "./engine.js";
+import { DEFAULT_MAX_CALLS, DEFAULT_MAX_CALLS_OPENAI, DEFAULT_THRESHOLD } from "./engine.js";
+import {
+  DEFAULT_EFFORT,
+  DEFAULT_IN_FLIGHT,
+  DEFAULT_OPENAI_MODEL,
+  MAX_IN_FLIGHT,
+  EFFORTS,
+  type Effort,
+  type JudgeKind,
+} from "./judge.js";
 import { resolveRepo, type RepoResolution } from "./repo.js";
 import { init, renderInit } from "./init.js";
 import { DEFAULT_CUT, SETTINGS_FILE } from "./settings.js";
@@ -22,8 +31,9 @@ Usage:
   stop-rules team <endpoint>           point this repo at your team's stop-rules server
   stop-rules login --token-stdin       store the team token, read from stdin
   stop-rules login --jev-key-stdin     store your own Jev key, read from stdin
-  stop-rules login --check             check the endpoint and one real Jev call
-  stop-rules serve [--port n]          run the team server (it holds the Jev key)
+  stop-rules login --openai-key-stdin  store your own OpenAI key, read from stdin
+  stop-rules login --check             check the endpoint and one real call to the judge
+  stop-rules serve [--port n]          run the team server (it holds the judges' keys)
   stop-rules baseline --reset          forget what was checked; start again from HEAD
 
 Options:
@@ -34,10 +44,14 @@ Options:
   --rules <path>       rules file (default <repo root>/.stop-rules.md)
   --cut <mode>         hunks or chunks (no parser), functions (tree-sitter) (default ${DEFAULT_CUT})
   --threshold <0..1>   score at or above which a rule counts as violated (default ${DEFAULT_THRESHOLD})
-  --max-calls <n>      hard ceiling on requests to Jev in one run (default ${DEFAULT_MAX_CALLS})
+  --max-calls <n>      hard ceiling on requests to the judge in one run
+                       (default ${DEFAULT_MAX_CALLS} for jev, ${DEFAULT_MAX_CALLS_OPENAI} for openai: 240 pieces either way)
+  --judge <kind>       jev or openai: which service scores the pieces (default jev)
+  --model <name>       openai judge only: the model to ask (default ${DEFAULT_OPENAI_MODEL})
+  --effort <level>     openai judge only: ${EFFORTS.join(", ")} (default ${DEFAULT_EFFORT})
   --base <rev>         check and score modes: diff this revision against the working tree
   --diff <path>        score mode only: score a unified diff file instead of the working tree
-  --show-context       score mode only: print exactly what Jev saw for each piece
+  --show-context       score mode only: print exactly what the judge saw for each piece
   --json               print the findings, or the init result, as JSON
   --port <n>           serve mode only: port to listen on (default PORT or 8080)
   --reset              baseline mode only: clear the saved baseline
@@ -47,20 +61,27 @@ Options:
 
 Agents: ${agentNames().join(", ")}
 
-Settings: ${SETTINGS_FILE} in the repository root holds endpoint, cut, threshold and
-maxCalls. It is committed and holds no secret. A flag above beats the file. What each knob
-costs is in docs/TUNING.md.
+Settings: ${SETTINGS_FILE} in the repository root holds endpoint, cut, threshold, maxCalls
+and judge. It is committed and holds no secret. A flag above beats the file. The judge is
+{"kind": "jev"}, the default, or
+  {"kind": "openai", "model": "${DEFAULT_OPENAI_MODEL}", "effort": "${DEFAULT_EFFORT}", "inFlight": ${DEFAULT_IN_FLIGHT}}
+where inFlight, 1 to ${MAX_IN_FLIGHT}, is how many OpenAI calls one run keeps open. init --judge
+openai writes it. What each knob costs is in docs/TUNING.md.
 
 Environment, client:
   STOP_RULES_ENDPOINT      your team's stop-rules server, beats .stop-rules.json
   STOP_RULES_TOKEN         the team token, beats the stored token file
   TYPESAFE_API_KEY         your own Jev API key, used when there is no team endpoint
   TYPESAFE_API_KEY_FILE    a file holding that key, used when the variable above is unset
+  OPENAI_API_KEY           your own OpenAI API key, used when the judge is openai and there
+                           is no team endpoint
+  OPENAI_API_KEY_FILE      a file holding that key, used when the variable above is unset
   STOP_RULES_JEV_ENDPOINT  override the Jev endpoint in local mode
   STOP_RULES_JEV_MODEL     override the Jev model
 
 Environment, server (stop-rules serve and every cloud deploy):
   TYPESAFE_API_KEY         the Jev key the server holds on the team's behalf
+  OPENAI_API_KEY           the OpenAI key the server holds, needed only for the openai judge
   STOP_RULES_TOKEN         the token every developer's hook sends
   STOP_RULES_JEV_UPSTREAM  override where the server forwards questions
   PORT                     port to listen on
@@ -78,6 +99,9 @@ interface ParsedArgs {
   threshold?: number;
   maxCalls?: number;
   cut?: CutMode;
+  judge?: JudgeKind;
+  model?: string;
+  effort?: Effort;
   base?: string;
   diff?: string;
   json: boolean;
@@ -89,6 +113,7 @@ interface ParsedArgs {
   port?: number;
   tokenStdin: boolean;
   jevKeyStdin: boolean;
+  openAiKeyStdin: boolean;
   check: boolean;
   reset: boolean;
   help: boolean;
@@ -105,6 +130,7 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
     agent: DEFAULT_AGENT,
     tokenStdin: false,
     jevKeyStdin: false,
+    openAiKeyStdin: false,
     check: false,
     reset: false,
     help: false,
@@ -144,6 +170,32 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
       case "--jev-key-stdin":
         parsed.jevKeyStdin = true;
         break;
+      case "--openai-key-stdin":
+        parsed.openAiKeyStdin = true;
+        break;
+      case "--judge": {
+        i += 1;
+        const value = take(i, "--judge");
+        if (value !== "jev" && value !== "openai") throw new UsageError("--judge must be jev or openai");
+        parsed.judge = value;
+        break;
+      }
+      case "--model": {
+        i += 1;
+        const value = take(i, "--model").trim();
+        if (value.length === 0) throw new UsageError("--model needs a model name");
+        parsed.model = value;
+        break;
+      }
+      case "--effort": {
+        i += 1;
+        const value = take(i, "--effort");
+        if (!(EFFORTS as readonly string[]).includes(value)) {
+          throw new UsageError(`--effort must be one of ${EFFORTS.join(", ")}, not ${value}`);
+        }
+        parsed.effort = value as Effort;
+        break;
+      }
       case "--check":
         parsed.check = true;
         break;
@@ -318,18 +370,31 @@ async function runHook(args: ParsedArgs): Promise<number> {
   return emit(deliverOutcome(adapter, outcome));
 }
 
+/** The judge flags, left out when not given. */
+function judgeArgs(args: ParsedArgs): { judge?: JudgeKind; model?: string; effort?: Effort } {
+  return {
+    ...(args.judge !== undefined ? { judge: args.judge } : {}),
+    ...(args.model !== undefined ? { model: args.model } : {}),
+    ...(args.effort !== undefined ? { effort: args.effort } : {}),
+  };
+}
+
 /** The knobs a flag can set. Left out when the flag was not given. */
 function knobArgs(args: ParsedArgs): {
   threshold?: number;
   maxCalls?: number;
   cut?: CutMode;
   rulesPath?: string;
+  judge?: JudgeKind;
+  model?: string;
+  effort?: Effort;
 } {
   return {
     ...(args.threshold !== undefined ? { threshold: args.threshold } : {}),
     ...(args.maxCalls !== undefined ? { maxCalls: args.maxCalls } : {}),
     ...(args.cut !== undefined ? { cut: args.cut } : {}),
     ...(args.rules !== undefined ? { rulesPath: args.rules } : {}),
+    ...judgeArgs(args),
   };
 }
 
@@ -389,6 +454,7 @@ async function runInitCommand(args: ParsedArgs): Promise<number> {
     ...(args.agents !== undefined ? { agents: args.agents } : {}),
     ...(args.team !== undefined ? { team: args.team } : {}),
     ...(args.cut !== undefined ? { cut: args.cut } : {}),
+    ...judgeArgs(args),
   });
   if (args.json) {
     const stream = report.ok ? process.stdout : process.stderr;
@@ -439,21 +505,24 @@ async function runLoginCommand(args: ParsedArgs): Promise<number> {
       return reportRepo(resolved);
     }
     const root = resolved.ok ? resolved.repo.root : process.cwd();
-    return writeResult(await loginCheck(root, process.env));
+    return writeResult(await loginCheck(root, process.env, judgeArgs(args)));
   }
-  if (args.tokenStdin === args.jevKeyStdin) {
+  const asked = [args.tokenStdin, args.jevKeyStdin, args.openAiKeyStdin].filter(Boolean).length;
+  if (asked !== 1) {
     process.stderr.write(
       [
-        "stop-rules: login needs one of --token-stdin, --jev-key-stdin or --check.",
+        "stop-rules: login needs one of --token-stdin, --jev-key-stdin, --openai-key-stdin or --check.",
         '  printf %s "$TOKEN" | stop-rules login --token-stdin',
         '  printf %s "$JEV_KEY" | stop-rules login --jev-key-stdin',
+        '  printf %s "$OPENAI_KEY" | stop-rules login --openai-key-stdin',
         "  stop-rules login --check",
       ].join("\n") + "\n",
     );
     return 1;
   }
   const secret = await readStdin();
-  return writeResult(await login(process.env, args.tokenStdin ? "token" : "jev-key", secret));
+  const target = args.tokenStdin ? "token" : args.jevKeyStdin ? "jev-key" : "openai-key";
+  return writeResult(await login(process.env, target, secret));
 }
 
 async function main(): Promise<number> {

@@ -13,6 +13,10 @@
     "STOP_RULES_TOKEN": {
       "description": "The token every developer's hook will send. Generate one with: openssl rand -hex 24",
       "required": true
+    },
+    "OPENAI_API_KEY": {
+      "description": "Your OpenAI API key. Needed only if your repos use the openai judge.",
+      "required": false
     }
   }
 }

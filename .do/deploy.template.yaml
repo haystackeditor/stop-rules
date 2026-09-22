@@ -1,5 +1,6 @@
 # DigitalOcean App Platform template. The spec: key is required by the deploy button.
-# The two env vars have no value on purpose: App Platform then prompts for them.
+# The env vars have no value on purpose: App Platform then prompts for them. OPENAI_API_KEY
+# is needed only if your repos use the openai judge.
 spec:
   name: stop-rules
   services:
@@ -16,5 +17,8 @@ spec:
           scope: RUN_TIME
           type: SECRET
         - key: STOP_RULES_TOKEN
+          scope: RUN_TIME
+          type: SECRET
+        - key: OPENAI_API_KEY
           scope: RUN_TIME
           type: SECRET

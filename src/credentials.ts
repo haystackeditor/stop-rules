@@ -1,21 +1,35 @@
 /**
- * Where the client sends its Jev questions, and what it authenticates with.
+ * Where the client sends its questions, and what it authenticates with.
  *
- * Team mode: one person deploys a stop-rules server that holds the Jev key, and every
+ * Team mode: one person deploys a stop-rules server that holds the judge's key, and every
  * developer's hook sends questions to that server with a team token. Local mode: the
- * developer's own Jev key goes straight to Jev. Team mode wins when an endpoint is known.
+ * developer's own key goes straight to the judge. Team mode wins when an endpoint is known.
+ * Which judge is asked, Jev or OpenAI, is a separate setting, and either one works in either
+ * mode.
  */
 
 import { promises as fs } from "node:fs";
 import { homedir } from "node:os";
 import * as path from "node:path";
 import { DEFAULT_ENDPOINT, DEFAULT_MODEL, JevClient, type FetchLike } from "./jev.js";
-import { resolveApiKey } from "./key.js";
-import { loadSettings, writeSettings, type LoadedSettings } from "./settings.js";
+import { describeJudge, judgeInfo, type Judge } from "./judge.js";
+import { JEV_KEY_SOURCE, keySourceSet, OPENAI_KEY_SOURCE, resolveApiKey } from "./key.js";
+import { OPENAI_ENDPOINT, OpenAiClient, promptCacheKey, userInput } from "./openai.js";
+import {
+  chooseJudge,
+  loadSettings,
+  writeSettings,
+  type JudgeChoice,
+  type JudgeFlags,
+  type LoadedSettings,
+} from "./settings.js";
 
 export const SYSTEMONE_PATH = "/v1/systemone";
+/** The team server's route for the OpenAI judge, named after the API it forwards to. */
+export const RESPONSES_PATH = "/v1/responses";
 export const TOKEN_FILE = "token";
 export const JEV_KEY_FILE = "jev-key";
+export const OPENAI_KEY_FILE = "openai-key";
 /** What a 401 from a team endpoint means for the developer reading it. */
 export const TOKEN_REJECTED = "the team token is missing or wrong; run stop-rules login";
 
@@ -23,10 +37,10 @@ export interface Credentials {
   mode: "team" | "local";
   /** Where questions are posted. */
   endpoint: string;
-  /** Bearer value: the team token in team mode, the Jev key in local mode. */
+  /** Bearer value: the team token in team mode, the judge's key in local mode. */
   bearer: string;
-  /** The model to ask for. The one place it is resolved. */
-  model: string;
+  /** The judge to ask, with every value filled in. The one place it is resolved. */
+  judge: Judge;
   /** The team server root, so login --check can also call its health route. */
   teamBase?: string;
 }
@@ -67,6 +81,10 @@ export function jevKeyPath(env: NodeJS.ProcessEnv): string {
   return path.join(configDir(env), JEV_KEY_FILE);
 }
 
+export function openAiKeyPath(env: NodeJS.ProcessEnv): string {
+  return path.join(configDir(env), OPENAI_KEY_FILE);
+}
+
 interface FileRead {
   /** The trimmed contents, or null when the file is absent or empty. */
   value: string | null;
@@ -105,12 +123,14 @@ export function parseEndpoint(raw: string): EndpointParse {
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
     return { ok: false, reason: `the team endpoint must start with http:// or https://, not ${parsed.protocol}` };
   }
-  const isFull = trimmed.endsWith(SYSTEMONE_PATH);
-  return {
-    ok: true,
-    base: isFull ? trimmed.slice(0, -SYSTEMONE_PATH.length) : trimmed,
-    post: isFull ? trimmed : `${trimmed}${SYSTEMONE_PATH}`,
-  };
+  const full = [SYSTEMONE_PATH, RESPONSES_PATH].find((route) => trimmed.endsWith(route));
+  const base = full === undefined ? trimmed : trimmed.slice(0, -full.length);
+  return { ok: true, base, post: `${base}${SYSTEMONE_PATH}` };
+}
+
+/** The team server route a judge's questions go to. */
+export function teamRoute(base: string, judge: { kind: "jev" | "openai" }): string {
+  return `${base}${judge.kind === "jev" ? SYSTEMONE_PATH : RESPONSES_PATH}`;
 }
 
 export type TeamEndpointLookup =
@@ -128,22 +148,31 @@ export function readTeamEndpoint(
     return { ok: true, endpoint: fromEnv.value, source: "STOP_RULES_ENDPOINT" };
   }
   const endpoint = loaded.settings.endpoint;
-  // No endpoint means local mode: this machine's own Jev key.
+  // No endpoint means local mode: this machine's own key.
   if (endpoint === undefined) return { ok: true, endpoint: null, source: "none" };
   return { ok: true, endpoint, source: loaded.file };
+}
+
+/** Fills in the Jev model, which comes from the environment rather than the settings file. */
+function resolveJudge(choice: JudgeChoice, env: NodeJS.ProcessEnv): { ok: true; judge: Judge } | { ok: false; reason: string } {
+  if (choice.kind === "openai") return { ok: true, judge: choice };
+  const model = envValue(env, "STOP_RULES_JEV_MODEL");
+  if (!model.ok) return { ok: false, reason: model.reason };
+  return { ok: true, judge: { kind: "jev", model: model.value === null ? DEFAULT_MODEL : model.value } };
 }
 
 export async function resolveCredentials(
   loaded: LoadedSettings,
   env: NodeJS.ProcessEnv,
+  choice: JudgeChoice,
 ): Promise<CredentialsResult> {
   // Checked here so a blank XDG_CONFIG_HOME is one plain message, not a thrown error from
   // deep inside a file read.
   const configHome = envValue(env, "XDG_CONFIG_HOME");
   if (!configHome.ok) return { ok: false, reason: configHome.reason };
-  const model = envValue(env, "STOP_RULES_JEV_MODEL");
-  if (!model.ok) return { ok: false, reason: model.reason };
-  const chosenModel = model.value === null ? DEFAULT_MODEL : model.value;
+  const resolved = resolveJudge(choice, env);
+  if (!resolved.ok) return { ok: false, reason: resolved.reason };
+  const judge = resolved.judge;
 
   const team = readTeamEndpoint(loaded, env);
   if (!team.ok) return { ok: false, reason: team.reason };
@@ -171,11 +200,31 @@ export async function resolveCredentials(
       ok: true,
       credentials: {
         mode: "team",
-        endpoint: parsed.post,
+        endpoint: teamRoute(parsed.base, judge),
         bearer: token,
-        model: chosenModel,
+        judge,
         teamBase: parsed.base,
       },
+    };
+  }
+
+  if (judge.kind === "openai") {
+    // The OpenAI key comes from the environment, then from the file login wrote. Nothing
+    // falls back to the Jev key or to the other judge.
+    if (keySourceSet(env, OPENAI_KEY_SOURCE)) {
+      const key = await resolveApiKey(env, OPENAI_KEY_SOURCE);
+      if (!key.ok) return { ok: false, reason: key.reason };
+      return { ok: true, credentials: { mode: "local", endpoint: OPENAI_ENDPOINT, bearer: key.key, judge } };
+    }
+    const stored = await readTrimmed(openAiKeyPath(env));
+    if (stored.error !== undefined) return { ok: false, reason: stored.error };
+    if (stored.value !== null) {
+      return { ok: true, credentials: { mode: "local", endpoint: OPENAI_ENDPOINT, bearer: stored.value, judge } };
+    }
+    return {
+      ok: false,
+      reason:
+        "no OpenAI API key and no team endpoint, and this repo's judge is openai. Set OPENAI_API_KEY, or store a key with stop-rules login --openai-key-stdin, or point this repo at your team server with stop-rules team <url>.",
     };
   }
 
@@ -183,12 +232,12 @@ export async function resolveCredentials(
   if (!override.ok) return { ok: false, reason: override.reason };
   const endpoint = override.value === null ? DEFAULT_ENDPOINT : override.value;
 
-  if (env["TYPESAFE_API_KEY"] !== undefined || env["TYPESAFE_API_KEY_FILE"] !== undefined) {
-    const key = await resolveApiKey(env);
+  if (keySourceSet(env, JEV_KEY_SOURCE)) {
+    const key = await resolveApiKey(env, JEV_KEY_SOURCE);
     if (!key.ok) return { ok: false, reason: key.reason };
     return {
       ok: true,
-      credentials: { mode: "local", endpoint, bearer: key.key, model: chosenModel },
+      credentials: { mode: "local", endpoint, bearer: key.key, judge },
     };
   }
   const stored = await readTrimmed(jevKeyPath(env));
@@ -196,7 +245,7 @@ export async function resolveCredentials(
   if (stored.value !== null) {
     return {
       ok: true,
-      credentials: { mode: "local", endpoint, bearer: stored.value, model: chosenModel },
+      credentials: { mode: "local", endpoint, bearer: stored.value, judge },
     };
   }
   return {
@@ -240,10 +289,12 @@ export async function writeTeamConfig(repoRoot: string, endpoint: string): Promi
   };
 }
 
+export type LoginTarget = "token" | "jev-key" | "openai-key";
+
 /** Writes one secret with mode 0600 in a directory only the user can read. */
 export async function login(
   env: NodeJS.ProcessEnv,
-  target: "token" | "jev-key",
+  target: LoginTarget,
   secret: string,
 ): Promise<WriteResult> {
   const value = secret.trim();
@@ -257,35 +308,49 @@ export async function login(
     };
   }
   const dir = configDir(env);
-  const file = target === "token" ? tokenPath(env) : jevKeyPath(env);
+  const file =
+    target === "token" ? tokenPath(env) : target === "jev-key" ? jevKeyPath(env) : openAiKeyPath(env);
   await fs.mkdir(dir, { recursive: true, mode: 0o700 });
   await fs.writeFile(file, `${value}\n`, { encoding: "utf8", mode: 0o600 });
   // writeFile only applies mode when it creates the file, so set it either way.
   await fs.chmod(file, 0o600);
+  const what =
+    target === "token"
+      ? "That is the team token. The judge's key stays on your team's server."
+      : target === "jev-key"
+        ? "That is your own Jev key, used when this repo has no team endpoint."
+        : "That is your own OpenAI key, used when this repo's judge is openai and it has no team endpoint.";
   return {
     ok: true,
-    lines: [
-      `wrote ${file} with mode 0600`,
-      target === "token"
-        ? "That is the team token. The Jev key stays on your team's server."
-        : "That is your own Jev key, used when this repo has no team endpoint.",
-      "Check it with: stop-rules login --check",
-    ],
+    lines: [`wrote ${file} with mode 0600`, what, "Check it with: stop-rules login --check"],
   };
 }
 
-/** One health call and one real question, so a developer can see team mode working. */
+/** The rule and piece login --check asks about. Small, and plainly not a break. */
+const PROBE_RULE = { id: "probe", text: "Do not leave a TODO comment in the code." };
+const PROBE_VIEW = {
+  file: "probe.ts",
+  diff: "@@ -0,0 +1 @@\n+export const answer = 42;",
+};
+
+/**
+ * One health call in team mode and one real question to the judge this repo is set to, so a
+ * developer can see the whole path working.
+ */
 export async function loginCheck(
   repoRoot: string,
   env: NodeJS.ProcessEnv,
+  flags: JudgeFlags = {},
   fetchImpl: FetchLike = (url, init) => fetch(url, init),
 ): Promise<WriteResult> {
   const load = await loadSettings(repoRoot);
   if (!load.ok) return { ok: false, lines: [`stop-rules: ${load.reason}`] };
-  const resolved = await resolveCredentials(load.loaded, env);
+  const chosen = chooseJudge(load.loaded.settings.judge, flags);
+  if (!chosen.ok) return { ok: false, lines: [`stop-rules: ${chosen.reason}`] };
+  const resolved = await resolveCredentials(load.loaded, env, chosen.choice);
   if (!resolved.ok) return { ok: false, lines: [`stop-rules: ${resolved.reason}`] };
-  const { mode, endpoint, bearer, model, teamBase } = resolved.credentials;
-  const lines = [`mode: ${mode}`, `endpoint: ${endpoint}`];
+  const { mode, endpoint, bearer, judge, teamBase } = resolved.credentials;
+  const lines = [`mode: ${mode}`, `judge: ${describeJudge(judgeInfo(judge))}`, `endpoint: ${endpoint}`];
   let ok = true;
 
   if (teamBase !== undefined) {
@@ -300,17 +365,53 @@ export async function loginCheck(
     }
   }
 
+  const note = (message: string): void => {
+    lines.push(`  note: ${message}`);
+  };
+  // Room for the transport's own three attempts, so a network failure reports itself as one
+  // rather than as an exhausted budget.
+  const maxCalls = 4;
+
+  if (judge.kind === "openai") {
+    const client = new OpenAiClient({
+      endpoint,
+      model: judge.model,
+      effort: judge.effort,
+      apiKey: bearer,
+      maxCalls,
+      fetchImpl,
+      concurrency: 1,
+      note,
+    });
+    const outcome = await client.send({
+      input: userInput(PROBE_VIEW, [PROBE_RULE]),
+      promptCacheKey: await promptCacheKey([PROBE_RULE]),
+      ids: ["q0"],
+    });
+    if (outcome.ok) {
+      const answer = outcome.answers["q0"];
+      lines.push(
+        answer === undefined
+          ? "openai: fail (the answer for q0 was missing)"
+          : `openai: pass (${judge.model} at effort ${judge.effort} answered ${answer.toFixed(2)}, ${outcome.usage.inputTokens} input and ${outcome.usage.outputTokens} output tokens)`,
+      );
+      if (answer === undefined) ok = false;
+    } else {
+      const message =
+        outcome.failure === "auth" && mode === "team" ? TOKEN_REJECTED : outcome.message;
+      lines.push(`openai: fail (${message})`);
+      ok = false;
+    }
+    return { ok, lines };
+  }
+
   const client = new JevClient({
     endpoint,
-    model,
+    model: judge.model,
     apiKey: bearer,
-    // Room for the transport's own three attempts, so a network failure reports itself as
-    // one rather than as an exhausted budget.
-    maxCalls: 4,
+    maxCalls,
     fetchImpl,
-    note: (message) => {
-      lines.push(`  note: ${message}`);
-    },
+    note,
   });
   const outcome = await client.send(
     { probe: "stop-rules connectivity check" },

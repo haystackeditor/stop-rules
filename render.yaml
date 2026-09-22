@@ -10,3 +10,5 @@ services:
         sync: false
       - key: STOP_RULES_TOKEN
         sync: false
+      - key: OPENAI_API_KEY
+        sync: false

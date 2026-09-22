@@ -2,6 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
+import type { JudgeInfo } from "./judge.js";
 
 export const MAX_CACHE_ENTRIES = 5000;
 export const MAX_REPORTED_ENTRIES = 5000;
@@ -219,6 +220,8 @@ export async function acquireLock(stateDir: string, timeoutMs = 60_000): Promise
 export interface RunLogLine {
   at: string;
   mode: string;
+  /** Which judge was asked, and its model. */
+  judge: JudgeInfo;
   /** How the change was cut into pieces: functions or hunks. */
   cut: string;
   files: number;
@@ -242,6 +245,8 @@ export interface RunLogLine {
   notChecked: number;
   inputTokens: number;
   outputTokens: number;
+  cachedInputTokens?: number;
+  reasoningTokens?: number;
   durationMs: number;
   exitCode: number;
   notes: string[];

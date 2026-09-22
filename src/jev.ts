@@ -34,7 +34,8 @@ export type FailureClass =
   | "client"
   | "too_large"
   | "budget"
-  | "busy";
+  | "busy"
+  | "model";
 
 /** A failure the next run could still succeed at, so the baseline must not advance. */
 export function holdsBaseline(failure: FailureClass): boolean {
@@ -45,8 +46,17 @@ export function holdsBaseline(failure: FailureClass): boolean {
     failure === "auth" ||
     failure === "billing" ||
     failure === "budget" ||
-    failure === "busy"
+    failure === "busy" ||
+    failure === "model"
   );
+}
+
+/**
+ * A rejected key, an empty account, a model the account cannot use and a busy machine end the
+ * whole run, so the work still queued is given the same answer instead of asking again.
+ */
+export function stopsEverything(failure: FailureClass): boolean {
+  return failure === "busy" || failure === "billing" || failure === "auth" || failure === "model";
 }
 
 /**
@@ -102,19 +112,19 @@ export interface JevClientOptions {
   slot?: SlotGate;
 }
 
-const MAX_ATTEMPTS = 3;
-const BACKOFF_START_MS = 1000;
-const BACKOFF_CAP_MS = 16_000;
+export const MAX_ATTEMPTS = 3;
+export const BACKOFF_START_MS = 1000;
+export const BACKOFF_CAP_MS = 16_000;
 /** Successes in a row before the in-flight ceiling goes back up by one. */
-const STEP_UP_AFTER = 4;
+export const STEP_UP_AFTER = 4;
 
-function defaultSleep(ms: number): Promise<void> {
+export function defaultSleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
     globalThis.setTimeout(resolve, ms);
   });
 }
 
-function parseRetryAfter(header: string | null): number | null {
+export function parseRetryAfter(header: string | null): number | null {
   if (header === null) return null;
   const trimmed = header.trim();
   if (/^\d+$/.test(trimmed)) return Number(trimmed) * 1000;
@@ -367,11 +377,6 @@ export class JevClient {
     const results: NodeOutcome<T>[] = [];
     let active = 0;
     let settled = false;
-
-    // A rejected key, an empty account and a busy machine end the whole run, so the work
-    // still queued is given the same answer instead of asking again and again.
-    const stopsEverything = (failure: FailureClass): boolean =>
-      failure === "busy" || failure === "billing" || failure === "auth";
 
     return new Promise<NodeOutcome<T>[]>((resolve) => {
       const pump = (): void => {

@@ -4,7 +4,8 @@
  * Jev's rate limit is per account, so every stop-rules process on this machine shares it. A
  * run holds a slot for the time of one HTTP attempt and there are eight slots, kept as files
  * in the user's cache folder that only one process can create. A slot whose owning process is
- * gone, or whose timestamp is older than 120 seconds, is taken over.
+ * gone, or whose timestamp is older than 120 seconds, is taken over. The OpenAI judge's limit
+ * is per account too, so it gets the same gate with its own eight slots.
  */
 
 import { randomBytes } from "node:crypto";
@@ -23,21 +24,31 @@ const POLL_MS = 100;
 export const MACHINE_BUSY =
   "Jev is busy on this machine, this change will be checked on the next run";
 
+/** The same message for the judge a run uses, named the way the user knows it. */
+export function machineBusy(judgeName: string): string {
+  return `${judgeName} is busy on this machine, this change will be checked on the next run`;
+}
+
 export type SlotRelease = () => Promise<void>;
 export type SlotOutcome = { ok: true; release: SlotRelease } | { ok: false; reason: string };
 
-/** Where the slot files live. An empty XDG_CACHE_HOME is an error, not a shrug. */
-export function slotsDir(env: NodeJS.ProcessEnv): string {
+/**
+ * Where the slot files live. An empty XDG_CACHE_HOME is an error, not a shrug. Each judge has
+ * its own set of slots, because each has its own per-account limit: Jev's are in `slots`, the
+ * OpenAI judge's in `openai-slots`, eight of each.
+ */
+export function slotsDir(env: NodeJS.ProcessEnv, judge: "jev" | "openai" = "jev"): string {
+  const folder = judge === "jev" ? "slots" : "openai-slots";
   const configured = env["XDG_CACHE_HOME"];
   if (configured !== undefined) {
     if (configured.trim().length === 0) {
       throw new Error("XDG_CACHE_HOME is set but empty. Unset it or point it at a folder.");
     }
-    return path.join(configured, "stop-rules", "slots");
+    return path.join(configured, "stop-rules", folder);
   }
   const home = os.homedir();
-  if (process.platform === "darwin") return path.join(home, "Library", "Caches", "stop-rules", "slots");
-  return path.join(home, ".cache", "stop-rules", "slots");
+  if (process.platform === "darwin") return path.join(home, "Library", "Caches", "stop-rules", folder);
+  return path.join(home, ".cache", "stop-rules", folder);
 }
 
 interface SlotFile {

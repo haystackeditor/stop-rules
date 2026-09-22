@@ -6,3 +6,4 @@
 [template.environment]
   TYPESAFE_API_KEY = "your Jev API key from TypeSafe, which stays on this server"
   STOP_RULES_TOKEN = "the token your developers' hooks will send, from openssl rand -hex 24"
+  OPENAI_API_KEY = "your OpenAI API key, needed only if your repos use the openai judge"

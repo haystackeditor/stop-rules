@@ -14,16 +14,23 @@ Every key is optional.
   "endpoint": "https://stop-rules.your-team.example.com",
   "cut": "hunks",
   "threshold": 0.6,
-  "maxCalls": 60
+  "maxCalls": 60,
+  "judge": {"kind": "jev"}
 }
 ```
 
 | Knob | File key | Flag | Default |
 |---|---|---|---|
-| Where questions go | `endpoint` | `--team <url>` on `init` | your own Jev key |
+| Where questions go | `endpoint` | `--team <url>` on `init` | your own key |
 | How a change is cut into pieces | `cut` | `--cut hunks\|functions\|chunks` | `hunks` |
 | The bar a score must reach | `threshold` | `--threshold <0..1>` | `0.6` |
-| Requests to Jev in one run | `maxCalls` | `--max-calls <n>` | `60` |
+| Requests to the judge in one run | `maxCalls` | `--max-calls <n>` | `60` for Jev, `240` for OpenAI |
+| Which service scores the pieces | `judge.kind` | `--judge jev\|openai` | `jev` |
+| The OpenAI model | `judge.model` | `--model <name>` | `gpt-6-luna` |
+| How long the OpenAI model reasons | `judge.effort` | `--effort none\|low\|medium\|high` | `low` |
+| OpenAI calls one run keeps open | `judge.inFlight` | none | `4` |
+
+The four judge knobs are in [section 8](#8-the-judge-judge).
 
 Every default in that table was measured, and none of them is a recommendation. The two this
 file spends the most words on are the cut, which is `hunks` because it parses nothing and
@@ -463,7 +470,7 @@ score. The pieces, calls and token rows were re-run on 20 September 2026.
 
 | | `hunks`, the default | `functions` | `chunks` |
 |---|---|---|---|
-| Install size, a TypeScript and Python repo | 1 file, 334,419 bytes | 4 files, 3,340,480 bytes (`stop-rules.mjs`, `tree-sitter.wasm` 205,488, `grammars/typescript.wasm` 2,342,690, `grammars/python.wasm` 457,883) | 1 file, 334,419 bytes |
+| Install size, a TypeScript and Python repo | 1 file, 380,463 bytes | 4 files, 3,386,524 bytes (`stop-rules.mjs`, `tree-sitter.wasm` 205,488, `grammars/typescript.wasm` 2,342,690, `grammars/python.wasm` 457,883) | 1 file, 380,463 bytes |
 | Languages | every language | 10 have a parser: TypeScript, TSX, JavaScript, Python, Go, Rust, Ruby, Java, Kotlin, Swift. Any other file is cut into hunks | every language |
 | What the agent is handed | the hunk the fault sits in | the one function at fault | up to 12,000 bytes of diff |
 | Pieces, 172 changes | 532 | 643 | 172 |
@@ -850,9 +857,10 @@ range we would stay in, for noise rather than for money.
 
 ## 4. Calls per run: `maxCalls`
 
-One run sends at most this many requests to Jev, counted across retries and splits. `60` is
-the default, which is far more than a normal turn needs: four pieces ride in one request, so a
-change that touches forty hunks is ten requests.
+One run sends at most this many requests to the judge, counted across retries and splits. `60`
+is the default for Jev, which is far more than a normal turn needs: four pieces ride in one
+request, so a change that touches forty hunks is ten requests. The OpenAI judge takes one piece
+per request, so its default is `240`, the same number of pieces; see section 8.
 
 When the budget runs out, the work left over is reported and nothing pretends it was checked.
 Ten new files, one hunk each, in the default mode, with a budget of one request:
@@ -925,6 +933,8 @@ Latency, from the same runs: the median change took 192 ms of Jev time on the de
 203 ms cut into functions. The check itself adds the git snapshot, and in `functions` mode the
 parse, so a blocking hook feels like about a second either way.
 
+The OpenAI judge's cost and time are in section 8.
+
 ## 6. Background or blocking, one person or a team
 
 **In Claude Code** the hook entry `init` writes has `asyncRewake`, so the check runs in the
@@ -943,9 +953,12 @@ team token. Set it with `endpoint` in `.stop-rules.json`, which is committed.
 
 Jev's rate limit is per account, so the whole team shares it, and so does every tool on your
 machine. About 16 requests in flight per account is fine. The tool's own caps are 4 in flight
-per run, 8 per machine, and 12 per server instance. On serverless platforms the server cap is
+per run, 8 per machine, and 12 per server instance. The OpenAI judge has the same caps, counted
+separately: `inFlight` per run, 8 per machine, 12 per server instance. Those were not measured
+against OpenAI's own limits, which depend on the account's usage tier. On serverless platforms the server cap is
 per instance, so a busy team on a platform that starts many instances can still push the
 account over its limit.
+
 
 ## 7. Things that are fixed, and why
 
@@ -969,3 +982,115 @@ These are not knobs. Each one was measured, and none of them is worth a setting.
   coding rule is about them.
 - **Lock files, minified bundles, maps, snapshots, logs, CSV and TSV files, SVGs and binaries
   are skipped,** and `check --json` lists what was skipped and why.
+
+## 8. The judge: `judge`
+
+Which service scores the pieces. `{"kind": "jev"}` is the default and needs nothing set. The
+other is OpenAI's `gpt-6-luna` through the Responses API:
+
+```json
+{
+  "judge": {"kind": "openai", "model": "gpt-6-luna", "effort": "low", "inFlight": 4}
+}
+```
+
+`init --judge openai` writes that, without `inFlight`. `--judge`, `--model` and `--effort` beat
+the file for one run, the same as every other flag. `--model` or `--effort` with the Jev judge is
+an error, not a flag that is quietly dropped.
+
+How each is asked. Jev gets its claim sentence per (piece, rule), up to four pieces per call.
+gpt-6-luna gets one call per piece: a fixed system instruction, then your rules, one `id: text`
+line each, then the piece last (the file path and the diff with its 25 lines around it, or the
+whole function in `functions` mode), and it must answer `{"scores": [...]}` with one number from
+0 to 1 per rule, in rule order, under a strict JSON schema. The part every call shares comes
+first, and a `prompt_cache_key` that is a hash of it goes with each call, so OpenAI can reuse
+that part. An answer with the wrong count of numbers, a number outside 0 to 1, or anything that
+is not that JSON is asked again up to twice, and then the piece is reported as not checked and
+the hook baseline holds. It is never read as a zero.
+
+### What each judge measured
+
+Measured on 22 September 2026 on the 240 real agent written changes (804 pieces, the six starter
+rules, 32 real breaks after the latest adjudication; the 20 September tables above say 31, from
+before 16 more disputes were ruled on). At a bar of 0.5, the bar the comparison was run at, not
+the default 0.6. Each piece shown alone unless the row says otherwise. A check is one piece
+asked about all six rules.
+
+| Judge | Median time per call | Slowest 5% of calls took over | Real breaks caught, of 32 | Plainly false flags | Arguable flags | Flags nobody has ruled on | Dollars per 1,000 checks |
+|---|---|---|---|---|---|---|---|
+| Jev, 4 pieces per call | 194 ms | 268 ms | 20 | 10 | 5 | 11 | $0.0329 |
+| gpt-6-luna, effort none | 1,380 ms | 2,546 ms | 23 | 10 | 5 | 28 | $0.1188 |
+| gpt-6-luna, effort low | 2,405 ms | 4,769 ms | 29 | 17 | 9 | 52 | $0.1826 |
+| gpt-6-luna, effort low, rules first and one number per rule | 2,564 ms | 5,082 ms | 29 | 17 | 12 | 66 | $0.1568 |
+| gpt-6-luna, effort low, 25 lines around the piece | 2,902 ms | 6,325 ms | 29 | 14 | 9 | 28 | $0.2255 |
+| gpt-6-luna, effort medium | 3,328 ms | 8,753 ms | 30 | 18 | 11 | 62 | $0.2267 |
+
+The tool sends the shape of the two middle rows together: rules first, one number per rule, and
+the 25 lines around the piece. Each half was measured on its own and no run measured both at
+once, so read those two rows as the bounds of what to expect, not as this build's score.
+
+On one demo turn, one piece and three rules, one warm-up and then five timed runs each: the whole
+Jev `check` took a median 0.63 s; a single gpt-6-luna call took a median 1.67 s at effort none,
+2.05 s at low and 2.70 s at medium.
+
+The same demo with this build, five runs each with the answer cache deleted first, wall time
+of the whole `check` process on this machine:
+
+| Judge | The agent's change, 3 rules broken | The fixed code |
+|---|---|---|
+| Jev | median 1.02 s, exit 2 every time | median 0.59 s, exit 0 every time |
+| gpt-6-luna, effort low | median 2.89 s, exit 2 every time | median 2.79 s, exit 0 three times and exit 2 twice |
+
+The two exit 2 runs on the fixed code are the stubs rule. The fixed file's only doubtful line is
+a placeholder `https://api.example.com` URL. Asked eight more times, cache deleted each time,
+gpt-6-luna at effort low scored the stubs rule 0.95 four times and 0.05 or less four times; at
+effort medium it scored it 0.88 to 0.95 six times in six. Jev scored it 0.18. A borderline piece
+moves more with this judge, and more effort made it more sure of the flag.
+
+### `effort`
+
+How long the model reasons before it answers: `none`, `low`, `medium` or `high`. `low` is the
+default: the owner's ruling is that the model reasons, and `low` is the cheapest effort that
+does. From the table: going from `none` to `low` caught 6 more of 32 and cost 7 more plainly
+false flags, 1,025 ms more per call and $0.064 more per 1,000 checks. Going from `low` to
+`medium` caught 1 more, cost 1 more plainly false flag, 923 ms more per call and $0.044 more per
+1,000 checks. `high` is accepted and was never measured, so there is no number for it here.
+
+### `model`
+
+`gpt-6-luna` is the default and the only model measured. Any model name your key can use is
+accepted. One it cannot use stops the run with OpenAI's own words:
+
+```
+stop-rules: OpenAI will not run gpt-6-nonexistent at effort low for this key (404): The model `gpt-6-nonexistent` does not exist or you do not have access to it.
+```
+
+### `inFlight`
+
+How many calls one run keeps open at once, 1 to 8, default 4. Each call carries one piece, so a
+big change is many calls. Measured on 22 September 2026, a 52 piece diff scored at effort low,
+cache deleted first, one run each:
+
+| `inFlight` | Wall time | Calls |
+|---|---|---|
+| 1 | 90.9 s | 52 |
+| 4, the default | 23.4 s | 52 |
+| 8 | 14.9 s | 52 |
+| 16, allowed before the cap | 14.9 s | 52 |
+
+Past 8 nothing changes, because every stop-rules process on a machine shares 8 slots per judge,
+which is why 8 is the most the file accepts. The same diff on Jev took 1.05 s in 13 calls. On a
+429 the ceiling halves and climbs back one step after four answers in a row, the same as Jev.
+
+### `maxCalls` on the OpenAI judge
+
+The default is 240 instead of 60. Jev answers four pieces per call and gpt-6-luna one, so 240
+calls cover the same 240 pieces either way, and switching judge never leaves a change half
+checked. A `maxCalls` you set yourself applies to either judge as it is.
+
+### Money
+
+Nothing in the tool knows OpenAI's price either. `check --json` and `run.log` carry
+`inputTokens`, `cachedInputTokens` (served from OpenAI's prompt cache, a part of the input),
+`outputTokens` and `reasoningTokens` (a part of the output). On the demo change at effort low,
+two pieces took 1,158 input tokens and 115 output tokens, 67 of them reasoning.

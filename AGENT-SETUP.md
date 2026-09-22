@@ -83,17 +83,18 @@ stops and names both repositories instead of quietly checking the wrong one.
 
 ## 5. Show the human the knobs, and ask
 
-There are four knobs, they all live in `.stop-rules.json` in the repository root, and you do
+There are five knobs, they all live in `.stop-rules.json` in the repository root, and you do
 not pick them silently. Show the human this list, say what each default is, and ask which
 ones they want to change. [docs/TUNING.md](docs/TUNING.md) has the real examples and the
 measured totals behind each one, so read it before you answer questions about it.
 
 | Knob | Default | What turning it does |
 |---|---|---|
-| `cut` | `hunks` | `hunks` uses no parser, is one file of 334 KB, covers every language, and hands the agent the git diff hunk the fault sits in. `functions` uses tree-sitter, hands the agent the one function at fault instead, and copies a few megabytes of grammar files into `.stop-rules/`. `chunks` installs the same one file as the default and uses bigger pieces, up to 12,000 bytes, which is the quietest of the three and hands over the most code. |
+| `cut` | `hunks` | `hunks` uses no parser, is one file of 380 KB, covers every language, and hands the agent the git diff hunk the fault sits in. `functions` uses tree-sitter, hands the agent the one function at fault instead, and copies a few megabytes of grammar files into `.stop-rules/`. `chunks` installs the same one file as the default and uses bigger pieces, up to 12,000 bytes, which is the quietest of the three and hands over the most code. |
 | `threshold` | `0.6` | The bar a score must reach to count. Lower catches more and flags more. Measured on 96 agent sessions with well-worded rules: 0.5 caught 59 of 62 real breaks with 13 wrong flags, 0.6 caught 56 with 5, 0.7 caught 46 with 2. There is no single right number: it is how much the team minds a wrong flag against a missed break. Tell them that, show them those three rows, and say that `stop-rules score` on their own recent changes is how to see where their real problems and their noise land before settling on one. |
 | `maxCalls` | `60` | Requests to Jev in one run. When it runs out, the rest of the change is reported as not checked and picked up on the next run. |
 | `endpoint` | none, so each person uses their own Jev key | Team mode: questions go to your team's server, which holds the one key. |
+| `judge` | `{"kind": "jev"}` | Which service scores the pieces. The one-line switch is `node .stop-rules/stop-rules.mjs init --judge openai`, which writes `{"kind": "openai", "model": "gpt-6-luna", "effort": "low"}`. Measured at bar 0.5 on 240 changes: Jev caught 20 of 32 real breaks with 10 plainly false flags at $0.0329 per 1,000 checks and 194 ms per call; gpt-6-luna at effort low caught 29 with 17 at $0.1826 and 2,405 ms. The README's "Which judge" has the whole table. |
 
 Say this about the cut, in plain words, because it is the one the human is most likely to want
 changed: the default is git diff hunks, and nothing is installed for it. Tree-sitter would buy
@@ -228,6 +229,12 @@ In local mode, the human's own Jev key:
 printf %s "$JEV_KEY" | node .stop-rules/stop-rules.mjs login --jev-key-stdin
 ```
 
+Or, when the repo's judge is openai, their own OpenAI key:
+
+```bash
+printf %s "$OPENAI_API_KEY" | node .stop-rules/stop-rules.mjs login --openai-key-stdin
+```
+
 Rules you must follow here:
 
 - The secret arrives on stdin. Never put it in a command line argument, where it lands in
@@ -239,8 +246,8 @@ Rules you must follow here:
   `cat /path/to/key | node .stop-rules/stop-rules.mjs login --jev-key-stdin`. Do not write
   `printf %s "$(cat /path/to/key)"`, which puts the secret in the process list.
 
-The file it writes is `~/.config/stop-rules/token` or `~/.config/stop-rules/jev-key`, mode
-0600, outside the repo.
+The file it writes is `~/.config/stop-rules/token`, `~/.config/stop-rules/jev-key` or
+`~/.config/stop-rules/openai-key`, mode 0600, outside the repo.
 
 ## 8. Only if the team server is not deployed yet
 
@@ -261,6 +268,7 @@ after the login is yours to run. Do not make the human click buttons or copy com
 npx wrangler deploy                                   # prints the endpoint URL
 npx wrangler secret put TYPESAFE_API_KEY < /path/to/jev-key-file
 npx wrangler secret put STOP_RULES_TOKEN < /tmp/stop-rules-token
+npx wrangler secret put OPENAI_API_KEY < /path/to/openai-key-file   # only for the openai judge
 ```
 
 5. Wait for `<endpoint>/health` to answer `"configured":true`. It says the secrets are
@@ -277,7 +285,8 @@ For every other cloud, [DEPLOY.md](DEPLOY.md) has the same three steps (deploy, 
 health) in that platform's own commands, and a deploy button for a human who is setting it
 up without an agent. Two secrets, always the same two: `TYPESAFE_API_KEY` (their Jev key,
 which stays on the server) and `STOP_RULES_TOKEN` (the team token every developer's hook
-sends).
+sends). A team on the openai judge adds a third, `OPENAI_API_KEY`, and `/health` then shows
+`"judges": {"jev": ..., "openai": true}`.
 
 If you ever need to take the server down, `npx wrangler delete` needs a real terminal; run
 it through `script -q /dev/null npx wrangler delete --force` from a script, and check that
@@ -353,7 +362,7 @@ Commit:
 
 - `.stop-rules.md`, the rules.
 - `.stop-rules/`, so teammates and cloud agents get the check with nothing to install. On a
-  default install that is one file of 334 KB. In `functions` mode it also holds the parser and
+  default install that is one file of 380 KB. In `functions` mode it also holds the parser and
   the grammars, a few megabytes of wasm; if the team would rather not keep binaries in their
   history, commit only `.stop-rules/stop-rules.mjs` and tell them that each person runs `init`
   again once on their own machine; until they do, files in that language are reported as not
@@ -394,9 +403,13 @@ Never commit, and never print:
 | `no Jev API key and no team endpoint. Set TYPESAFE_API_KEY, or store a key with stop-rules login --jev-key-stdin, or point this repo at your team server with stop-rules team <url>` | Nothing is configured yet. Do step 7. |
 | `the Jev account is out of credits. Add credits at TypeSafe, then run again.` | The account behind the key has no credits. The check did not run and the same change is checked again next time. The human adds credits at TypeSafe. |
 | `Jev rejected the API key.` | The key is wrong or revoked. Store the right one. |
+| `no OpenAI API key and no team endpoint, and this repo's judge is openai. ...` | The repo is on the openai judge and this machine has no OpenAI key. Do step 7 with `--openai-key-stdin`. |
+| `OpenAI rejected the API key.` | The OpenAI key is wrong or revoked. Store the right one. |
+| `OpenAI will not run <model> at effort <effort> for this key (404): ...` | The key's project cannot use that model. The human picks another model or grants the project access. Nothing switches model on its own. |
+| `the team server is not set up for the openai judge: it is missing OPENAI_API_KEY` | The repo is on the openai judge and the server holds no OpenAI key. Set that secret on the server. |
 | `the team token is missing or wrong; run stop-rules login` | The server said 401. Get the current token from the human and store it again. |
 | `no team token for <url>. Store one with: printf %s "$TOKEN" \| stop-rules login --token-stdin` | Team mode is configured but this machine has no token. |
-| `<repo>/.stop-rules.json sets "x", which stop-rules does not know. The settings are endpoint, cut, threshold, maxCalls.` | A typo in the settings file. Fix that one key. The same shape of message names a wrong type, a value out of range, or a `cut` that is not functions, hunks or chunks. |
+| `<repo>/.stop-rules.json sets "x", which stop-rules does not know. The settings are endpoint, cut, threshold, maxCalls, judge.` | A typo in the settings file. Fix that one key. The same shape of message names a wrong type, a value out of range, a `cut` that is not functions, hunks or chunks, or a `judge.effort` that is not none, low, medium or high. |
 | `TYPESAFE_API_KEY is set but empty. Unset it or put your key in it.` | An empty variable beats a stored key, so it has to be one or the other. Same for any other variable set to nothing. |
 | `no rules file at <path>. Run "stop-rules init" to create one.` | `.stop-rules.md` is missing. Run `init` in that repo. |
 | `no rules found in <path>. Each top-level list item is one rule.` | The rules file has no top-level bullets. Rules are `- ` items at column 0. |

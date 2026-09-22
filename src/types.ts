@@ -1,5 +1,7 @@
 /** Shared value types. Kept dependency free on purpose. */
 
+import type { JudgeInfo } from "./judge.js";
+
 export interface Rule {
   /** First 8 hex chars of sha256 of the normalised rule text. */
   id: string;
@@ -132,6 +134,10 @@ export interface RunStats {
   tooBigToWiden: WidenRefused[];
   inputTokens: number;
   outputTokens: number;
+  /** OpenAI judge only: input tokens served from OpenAI's prompt cache, a part of inputTokens. */
+  cachedInputTokens?: number;
+  /** OpenAI judge only: output tokens spent reasoning, a part of outputTokens. */
+  reasoningTokens?: number;
   durationMs: number;
 }
 
@@ -172,6 +178,8 @@ export interface PieceScore {
 
 /** What `stop-rules score` returns: every piece, every rule, every score, no cutoff. */
 export interface ScoreReport {
+  /** Which judge gave the scores, and its model. */
+  judge: JudgeInfo;
   pieces: PieceScore[];
   notChecked: NotChecked[];
   skipped: SkippedFile[];
@@ -181,6 +189,8 @@ export interface ScoreReport {
 }
 
 export interface CheckReport {
+  /** Which judge gave the scores, and its model. */
+  judge: JudgeInfo;
   /** One entry per piece that broke a rule, in file then line order. */
   pieces: PieceFinding[];
   /**

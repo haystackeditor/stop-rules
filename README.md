@@ -4,7 +4,8 @@
 finishes a turn, it cuts the code changed since the last check into pieces, one git diff hunk
 each, and asks [Jev](https://typesafe.ai) one yes or no question per piece and per rule, with 25
 lines of the surrounding file so the question can be answered. If a rule is likely broken, it
-hands that piece of code back to the agent so it fixes it before you see it.
+hands that piece of code back to the agent so it fixes it before you see it. Jev is the default
+judge; OpenAI's `gpt-6-luna` is the other one, see [Which judge](#which-judge).
 
 Cutting by git diff hunk is the default, and it needs nothing installed. A team that would
 rather have one whole function per piece switches to tree-sitter with
@@ -25,11 +26,11 @@ No `npm install`, no build: `bin/stop-rules.mjs` is committed and ready to run.
 
 `init` finds which coding agents your repo already uses, copies itself into
 `.stop-rules/stop-rules.mjs` there, writes a starter `.stop-rules.md`, and wires the hook into
-each agent's own config file. That is one file of 334 KB and no grammar files at all, because
+each agent's own config file. That is one file of 380 KB and no grammar files at all, because
 cutting by git diff hunk parses nothing. It says so:
 
 ```
-  cutting by git diff hunk, no grammar files needed (.stop-rules is 0.3 MB)
+  cutting by git diff hunk, no grammar files needed (.stop-rules is 0.4 MB)
   run init --cut functions to cut by whole function with tree-sitter
 ```
 
@@ -79,7 +80,65 @@ Share the team token through your password manager, not in a repo or a chat.
 
 Jev is TypeSafe's service. You need your own API key from them; we do not provide one and
 there is no offline mode. In team mode the key sits on your server, so developers only need
-the team token.
+the team token. A repo on the OpenAI judge needs an OpenAI key instead, in the same places.
+
+## Which judge
+
+Two services can score the pieces. **Jev** is the default: TypeSafe's scoring service, asked up
+to four pieces per call. The other is **OpenAI's `gpt-6-luna`**, asked through the Responses
+API with strict JSON output: one call per piece, the system instruction and your rules first,
+the piece last, and one number per rule back. Everything else is the same with either judge:
+the cutting, the 25 lines around each change, the bar, the cache, the report, the hooks and
+team mode.
+
+To switch a repo to OpenAI, run this and commit the `.stop-rules.json` it writes:
+
+```bash
+node .stop-rules/stop-rules.mjs init --judge openai
+printf %s "$OPENAI_API_KEY" | node .stop-rules/stop-rules.mjs login --openai-key-stdin
+node .stop-rules/stop-rules.mjs login --check
+```
+
+That puts `"judge": {"kind": "openai", "model": "gpt-6-luna", "effort": "low"}` in
+`.stop-rules.json`. `{"kind": "jev"}`, or no `judge` key at all, is Jev. `effort` is how long the
+model reasons before it answers: `none`, `low`, `medium` or `high`, and `low` is the default.
+`--judge`, `--model` and `--effort` on any command beat the file for that run. The key comes
+from `OPENAI_API_KEY`, from `OPENAI_API_KEY_FILE`, or from the file `login --openai-key-stdin`
+writes next to the Jev key, mode 0600. In team mode the server holds it instead, as
+`OPENAI_API_KEY` (see [DEPLOY.md](DEPLOY.md)).
+
+The two judges never mix. The cache key holds the judge, the model and the effort, so an
+answer from one is never read as an answer from the other. Nothing switches judge on its own: a
+missing key, a rejected key, a model your key cannot use, or an answer that breaks the schema
+stops the run with one line, and the baseline stays where it was.
+
+What the trade looks like. Measured on 22 September 2026 on the same 240 real agent written
+changes (804 pieces, the six starter rules, 32 real breaks after the latest adjudication), at a
+bar of 0.5, not the tool's default of 0.6, because 0.5 is the bar the comparison was run at.
+Each piece was shown alone unless the row says otherwise. A check is one piece asked about all
+six rules.
+
+| Judge | Median time per call | Real breaks caught, of 32 | Plainly false flags | Arguable flags | Flags nobody has ruled on | Dollars per 1,000 checks |
+|---|---|---|---|---|---|---|
+| Jev, 4 pieces per call | 194 ms | 20 | 10 | 5 | 11 | $0.0329 |
+| gpt-6-luna, effort none | 1,380 ms | 23 | 10 | 5 | 28 | $0.1188 |
+| gpt-6-luna, effort low | 2,405 ms | 29 | 17 | 9 | 52 | $0.1826 |
+| gpt-6-luna, effort low, rules first and one number per rule | 2,564 ms | 29 | 17 | 12 | 66 | $0.1568 |
+| gpt-6-luna, effort low, 25 lines around the piece | 2,902 ms | 29 | 14 | 9 | 28 | $0.2255 |
+| gpt-6-luna, effort medium | 3,328 ms | 30 | 18 | 11 | 62 | $0.2267 |
+
+How to read it. At effort low, gpt-6-luna caught 29 of 32 where Jev caught 20, and it also raised
+more flags the reviewers did not agree with: 17 plainly false against 10, and many more nobody
+has ruled on yet, which a round of review could still turn either way. Each call took about 12
+times as long as a Jev call, which carries four pieces, and a check cost about 5.5 times as
+much, which is still under 25 cents per 1,000 checks. Effort `high` was not measured.
+
+What the tool sends is the two middle rows put together: the rules first with one number per
+rule back, and the 25 lines around the piece. Each was measured on its own; no run measured the
+two at once. On one demo turn, one piece and three rules, the whole Jev `check` took a median
+0.63 s, and a single gpt-6-luna call took a median 1.67 s at effort none, 2.05 s at low and
+2.70 s at medium. The knobs and what each one costs are in
+[docs/TUNING.md](docs/TUNING.md#8-the-judge-judge).
 
 ## Which agents are supported
 
@@ -393,10 +452,11 @@ before you settle on a bar.
 Jev's rate limit is per account, so a whole team shares it and so does every tool on your
 machine. Three things keep this one polite:
 
-- One run keeps at most 4 requests in flight.
-- Every stop-rules process on the machine shares 8 slots, held as lock files in your cache
-  folder. If they are all busy for a minute the run stops and says so, and the same change is
-  checked on the next turn.
+- One run keeps at most 4 requests in flight. On the OpenAI judge that is `"inFlight"` in the
+  judge setting, 4 by default, 1 to 8.
+- Every stop-rules process on the machine shares 8 slots per judge, held as lock files in your
+  cache folder. If they are all busy for a minute the run stops and says so, and the same
+  change is checked on the next turn.
 - A 429 halves the in-flight ceiling, waits as long as `Retry-After` says, and earns one slot
   back after four answers in a row.
 
@@ -442,23 +502,29 @@ whole function the change sits in), and the text of your rules. Nothing else: no
 history, no file the diff does not touch. In team mode the same request goes to your own server, which adds the Jev key
 and forwards it.
 
+Sent to OpenAI, when the judge is openai, per request: the same things for one piece, plus
+the fixed instruction, a `prompt_cache_key` that is a hash of that instruction and your rules,
+and `"store": false`, which asks OpenAI not to keep the response. In team mode it goes to your
+server first, which forwards only those fields with its own key.
+
 Kept on your machine and never committed, in `<git dir>/stop-rules/`: `state.json` (the
 baseline tree, which findings were delivered, per-session counters), `cache.json` (claim
 hashes and their scores), `run.log` (one JSON line per run, capped at 1 MB) and `lock`. The
 machine wide slots are small files in your cache folder (`$XDG_CACHE_HOME/stop-rules/slots`,
-or `~/Library/Caches/stop-rules/slots` on a Mac), each holding a process id and a time. Your
+or `~/Library/Caches/stop-rules/slots` on a Mac, and `openai-slots` beside it for the OpenAI
+judge), each holding a process id and a time. Your
 key or token lives in `~/.config/stop-rules/` with mode 0600. Neither is ever written into
 the repo, printed, or included in an error message.
 
 ## Commands
 
 ```
-stop-rules init [--dir <repo>] [--agents a,b,c] [--team <url>] [--cut <mode>] [--json]
+stop-rules init [--dir <repo>] [--agents a,b,c] [--team <url>] [--cut <mode>] [--judge <kind>] [--json]
 stop-rules check [--dir <repo>] [--base <rev>] [--json]
 stop-rules score [--dir <repo>] [--base <rev>] [--diff <file>] [--show-context] [--json]
 stop-rules hook [--dir <repo>] --agent <name>
 stop-rules team [--dir <repo>] <url>
-stop-rules login --jev-key-stdin | --token-stdin | --check [--dir <repo>]
+stop-rules login --jev-key-stdin | --openai-key-stdin | --token-stdin | --check [--dir <repo>]
 stop-rules serve [--port n]
 stop-rules baseline --reset [--dir <repo>]
 ```
@@ -466,7 +532,8 @@ stop-rules baseline --reset [--dir <repo>]
 - **init** installs into a repo. `--dir` picks the repo, `--agents` overrides detection,
   `--team` switches the repo to team mode, `--cut functions` adds the parser and the grammars
   for the languages the repo uses and writes `"cut": "functions"` into `.stop-rules.json`,
-  `--json` prints the same facts for an agent to read.
+  `--judge openai` (with `--model` and `--effort` if you want others than the defaults) writes
+  the judge into `.stop-rules.json`, `--json` prints the same facts for an agent to read.
 - **check** runs the same pipeline in a terminal, for a pre-commit hook or CI. `check`
   prints its report on stdout and exits 2 when a rule is broken. Exit 0 clean, 2 findings,
   1 could not run. With `--base <rev>` it diffs that revision against your working tree;
@@ -475,17 +542,21 @@ stop-rules baseline --reset [--dir <repo>]
   where your own code sits before you pick a bar. It changes nothing. `--diff <file>` scores
   a unified diff file instead of the working tree; a diff file has no file content, so there
   are no lines around a change to send and the output says so. `--show-context` prints exactly
-  what Jev saw for each piece, which is the way to see the 25 lines for yourself.
+  what the judge saw for each piece, which is the way to see the 25 lines for yourself. The
+  header names the judge and its model.
 - **hook** is what the agents call. `--agent` says whose protocol to speak.
 - **team** writes the endpoint into `.stop-rules.json`. Commit that file.
-- **login** stores your Jev key or your team token, read from stdin so it never lands in
-  shell history. `--check` calls your server's health route and makes one real Jev call.
+- **login** stores your Jev key, your OpenAI key or your team token, read from stdin so it
+  never lands in shell history. `--check` calls your server's health route and makes one real
+  call to the judge this repo is set to.
 - **serve** runs the team server on a laptop or a plain VM.
 - **baseline --reset** forgets what was checked, so the next run starts from HEAD.
 
 Shared flags: `--dir <path>` (the repository to work on), `--rules <path>` (default
 `<repo root>/.stop-rules.md`), `--cut <mode>` (default hunks), `--threshold <0..1>`
-(default 0.6), `--max-calls <n>` (default 60), `--help`, `--version`.
+(default 0.6), `--max-calls <n>` (default 60 for Jev, 240 for OpenAI, which is 240 pieces
+either way), `--judge jev|openai`, `--model <name>` and `--effort <level>` (the OpenAI judge
+only), `--help`, `--version`.
 
 Which repository a command works on is one rule: `--dir` when you give it, and otherwise the
 repository that holds the folder you are in. The copy of stop-rules that `init` vendors into
@@ -503,11 +574,14 @@ committed and holds no secret. Every key is optional, and a flag beats the file.
   "endpoint": "https://stop-rules.your-team.example.com",
   "cut": "hunks",
   "threshold": 0.6,
-  "maxCalls": 60
+  "maxCalls": 60,
+  "judge": {"kind": "jev"}
 }
 ```
 
-Those are the defaults for the three knobs that have one, so a file like that changes nothing.
+Those are the defaults for the knobs that have one, so a file like that changes nothing.
+`judge` is `{"kind": "jev"}` or `{"kind": "openai", "model": "gpt-6-luna", "effort": "low",
+"inFlight": 4}`; see [Which judge](#which-judge).
 `cut` is `hunks` (one diff hunk per piece, no parser, the default), `functions` (tree-sitter,
 one whole function per piece) or `chunks` (a file's hunks grouped into pieces of up to 12,000
 bytes, no parser). A key stop-rules does not know, a value of the wrong type or a value out of
@@ -518,14 +592,20 @@ turn it each way, real examples with the scores the live service gave them, what
 caught and flagged on 240 real agent written changes, and what the tokens cost in money at
 TypeSafe's published price.
 
-Environment: `TYPESAFE_API_KEY` or `TYPESAFE_API_KEY_FILE` for your own key,
+Environment: `TYPESAFE_API_KEY` or `TYPESAFE_API_KEY_FILE` for your own Jev key,
+`OPENAI_API_KEY` or `OPENAI_API_KEY_FILE` for your own OpenAI key,
 `STOP_RULES_ENDPOINT` and `STOP_RULES_TOKEN` for team mode,
 `STOP_RULES_JEV_ENDPOINT` and `STOP_RULES_JEV_MODEL` to point somewhere else. A variable
 that is set but empty is an error, not a shrug.
 
 ## Limits, honestly
 
-- You need a Jev API key from TypeSafe.
+- You need a Jev API key from TypeSafe, or an OpenAI key for the OpenAI judge.
+- The OpenAI judge's answers move more between runs on a borderline piece. Asked eight times,
+  cache cleared each time, about the fixed file in the demo, whose only doubtful line is a
+  placeholder `https://api.example.com` URL, gpt-6-luna at effort low scored the stubs rule 0.95
+  four times and 0.05 or less four times. At effort medium it scored it 0.88 to 0.95 six times
+  in six. Jev scored it 0.18.
 - Each piece is judged on its own, with 25 lines of the same file around it and nothing from
   any other file, so rules about cross-file architecture or consistency across a codebase are
   weak.
@@ -558,6 +638,11 @@ that is set but empty is an error, not a shrug.
 
 ## Changelog
 
+- **22 September 2026, a second judge.** `"judge": {"kind": "openai"}` in `.stop-rules.json`
+  scores the pieces with OpenAI's `gpt-6-luna` instead of Jev. Jev stays the default, and a
+  repo that sets nothing sees no change: its cached answers are still valid. The team server
+  has a second route, `POST /v1/responses`, and an optional `OPENAI_API_KEY`. See "Which judge"
+  above.
 - **20 September 2026, the code around each piece.** Jev now sees 25 unchanged lines above and
   below every change, or the whole function in `functions` mode, and the claim sentence says so.
   Both go into the cache key, so the first run after this upgrade asks every piece once more and

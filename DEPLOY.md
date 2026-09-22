@@ -11,6 +11,17 @@ at 1,000,000 bytes, it rejects anything that is not a set of `noul` questions, i
 Jev model itself, and it relays the upstream status, body and `Retry-After` unchanged so
 the client's own rate limit backoff and request splitting keep working.
 
+For a repository whose judge is openai (see the README's "Which judge") it also answers
+`POST /v1/responses`, with the same team token check, the same body cap and the same
+unchanged relay. It forwards only a Responses API request in strict structured output, and
+only the fields the client sends (`model`, `reasoning`, `instructions`, `input`, `text`,
+`max_output_tokens`, `prompt_cache_key`), with `"store": false`, to
+`https://api.openai.com/v1/responses` with its own `OPENAI_API_KEY`. The model and effort
+come from the repository's `.stop-rules.json`, because the client keys its cache on them.
+It keeps at most 12 calls open to OpenAI per instance, counted apart from Jev's 12, and waits
+up to 60 seconds for an answer instead of Jev's 30, because the model reasons first: the
+slowest of 804 calls at effort medium took 26 seconds.
+
 ## The rate limit is per Jev account, so the server holds a line
 
 One server instance keeps at most 12 calls open to Jev at a time. Past that it answers 429
@@ -33,16 +44,21 @@ Read that number honestly:
 |---|---|
 | `TYPESAFE_API_KEY` | Your Jev API key from TypeSafe. It never leaves the server. |
 | `STOP_RULES_TOKEN` | The token your developers send. Make one with `openssl rand -hex 24`. |
+| `OPENAI_API_KEY` | Needed only when a repository's judge is openai. Your OpenAI API key. It never leaves the server. |
+
+A team that only uses the openai judge can leave `TYPESAFE_API_KEY` out: the server is ready as
+soon as the token and one judge's key are set, and each route answers 503 with the name of the
+key it is missing.
 
 Optional: `STOP_RULES_JEV_MODEL` (default `jev-latest`), `STOP_RULES_JEV_UPSTREAM`
 (default `https://api.typesafe.ai/v1/systemone`), `PORT` (default 8080, container targets
 only).
 
-Open `<endpoint>/health` in a browser after deploying. It reports which of the two names is
-still missing, never their values:
+Open `<endpoint>/health` in a browser after deploying. It reports which names are still
+missing, never their values, and which judge's route is ready:
 
 ```
-{"ok":true,"service":"stop-rules","version":"0.1.0","configured":true,"missing":[]}
+{"ok":true,"service":"stop-rules","version":"0.1.0","configured":true,"missing":[],"judges":{"jev":true,"openai":true}}
 ```
 
 ## Then point each repository at it
@@ -106,6 +122,7 @@ what makes the button ask for the two secrets. By hand:
 ```bash
 npx wrangler secret put TYPESAFE_API_KEY
 npx wrangler secret put STOP_RULES_TOKEN
+npx wrangler secret put OPENAI_API_KEY      # only for the openai judge
 npx wrangler deploy
 ```
 
@@ -133,8 +150,9 @@ is a real failure this was caught on, not a precaution.
 ```
 
 The endpoint to give `stop-rules team` is `https://<app>.vercel.app/api`. Vercel routes by
-file name, so `api/health.ts` and `api/v1/systemone.ts` are the two routes and no rewrite
-rule is involved. `vercel.json` sets `buildCommand` to `npm run build:server`, which is the
+file name, so `api/health.ts`, `api/v1/systemone.ts` and `api/v1/responses.ts` are the
+routes and no rewrite rule is involved. The button asks for the two secrets every deploy
+needs; for the openai judge, add `OPENAI_API_KEY` in the project's environment variables. `vercel.json` sets `buildCommand` to `npm run build:server`, which is the
 TypeScript compile on its own, and serves `public/`
 as the site.
 
@@ -150,8 +168,9 @@ it does not appear in the documentation pages that were read.
 `netlify.toml` builds with `npm run build:server`, publishes `public/`, and lists both secrets
 under `[template.environment]`, whose placeholder strings become the labels the button
 shows. `netlify/functions/stop-rules.mts` declares
-`config = { path: ["/health", "/v1/systemone"] }`, so those two paths go to the function and
-the site root stays a static page. The endpoint to give `stop-rules team` is the site URL.
+`config = { path: ["/health", "/v1/systemone", "/v1/responses"] }`, so those paths go to the
+function and the site root stays a static page. `OPENAI_API_KEY` is listed there too, and may
+be left empty unless a repository uses the openai judge. The endpoint to give `stop-rules team` is the site URL.
 
 ### Render
 
@@ -205,7 +224,9 @@ only.
 `deploy/aws/template.yaml` carries the whole proxy inline, so there is nothing to build,
 upload or host. It creates a Lambda function on `nodejs22.x`, a function URL with
 `AuthType: NONE`, and the two `lambda:InvokeFunctionUrl` and `lambda:InvokeFunction`
-permissions a public function URL now needs. Both secrets are `NoEcho` parameters.
+permissions a public function URL now needs. Both secrets are `NoEcho` parameters, and so is
+`OpenAiApiKey`, which may be left empty unless a repository uses the openai judge. The
+function's timeout is 70 seconds, room for the server's 60 second wait on OpenAI.
 
 ```
 https://console.aws.amazon.com/cloudformation/home?region=us-east-1#/stacks/create/review?templateURL=<public https url to deploy/aws/template.yaml>&stackName=stop-rules
@@ -236,7 +257,7 @@ in the dashboard. A `deno.json` is optional, so this repository does not ship on
 ### Supabase Edge Functions
 
 ```bash
-supabase secrets set TYPESAFE_API_KEY=... STOP_RULES_TOKEN=...
+supabase secrets set TYPESAFE_API_KEY=... STOP_RULES_TOKEN=...   # add OPENAI_API_KEY=... for the openai judge
 supabase functions deploy stop-rules
 ```
 
@@ -249,7 +270,7 @@ function's own URL.
 
 ```bash
 fly launch                      # rewrites app and primary_region in fly.toml for you
-fly secrets set TYPESAFE_API_KEY=... STOP_RULES_TOKEN=...
+fly secrets set TYPESAFE_API_KEY=... STOP_RULES_TOKEN=...   # add OPENAI_API_KEY=... for the openai judge
 fly deploy
 ```
 
@@ -261,14 +282,14 @@ checks `/health`. Fly has no deploy button: its documented path is the CLI.
 ```bash
 docker build -t stop-rules .
 docker run -p 8080:8080 \
-  -e TYPESAFE_API_KEY=... -e STOP_RULES_TOKEN=... stop-rules
+  -e TYPESAFE_API_KEY=... -e STOP_RULES_TOKEN=... -e OPENAI_API_KEY=... stop-rules
 ```
 
 Or with Node 20 or newer and no container:
 
 ```bash
 npm ci && npm run build:server
-TYPESAFE_API_KEY=... STOP_RULES_TOKEN=... npm start        # or: stop-rules serve --port 8080
+TYPESAFE_API_KEY=... STOP_RULES_TOKEN=... OPENAI_API_KEY=... npm start        # or: stop-rules serve --port 8080
 ```
 
 The image is `node:22-alpine`, listens on `$PORT` (default 8080) and binds `0.0.0.0`.
@@ -297,7 +318,9 @@ repository's `Dockerfile` is an owner action. After that:
 ```
 
 The template takes both secrets as `secureString` parameters, stores them as container app
-secrets and passes them to the container by `secretRef`. The `endpoint` output is the URL to
+secrets and passes them to the container by `secretRef`. It takes `openaiApiKey` the same way,
+with an empty default for a team that does not use the openai judge. Unconfirmed: whether
+Container Apps accepts a secret whose value is empty, since this template was never deployed. The `endpoint` output is the URL to
 give `stop-rules team`. The CLI alternative that does build from source is
 `az containerapp up --source .`, which needs `az login` and is not a one click link.
 
@@ -343,8 +366,8 @@ HTTP 200 when this file was written.
 
 ## What the server never does
 
-It never returns the Jev key or the team token, in a body, a header or a log line. Error
-messages are passed through a redaction step that replaces either secret with `[redacted]`
+It never returns the Jev key, the OpenAI key or the team token, in a body, a header or a log
+line. Error messages are passed through a redaction step that replaces any of them with `[redacted]`
 before it can be returned. `GET /health` reports only the names of missing variables. The
 token comparison hashes both sides with SHA-256 and compares the digests byte by byte with
 no early exit.

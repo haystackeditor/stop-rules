@@ -1,3 +1,4 @@
+import { describeJudge, judgeName } from "./judge.js";
 import type {
   BrokenRule,
   CheckReport,
@@ -138,26 +139,27 @@ function headline(report: CheckReport): string {
 }
 
 /**
- * What Jev was shown beside each piece, in one sentence, read off the run's own counts. It
- * goes in the header line because the piece printed below is the narrower one: the report
- * hands the agent the piece's own diff, whatever Jev saw.
+ * What the judge was shown beside each piece, in one sentence, read off the run's own counts.
+ * It goes in the header line because the piece printed below is the narrower one: the report
+ * hands the agent the piece's own diff, whatever the judge saw. `judge` is the judge's name
+ * as the user knows it: Jev, or the OpenAI model.
  */
-export function whatJevSaw(stats: RunStats): string | null {
+export function whatJevSaw(stats: RunStats, judge = "Jev"): string | null {
   const parts: string[] = [];
   const lines = stats.contextLines;
   if (stats.withFunction > 0 && stats.widened > 0) {
     parts.push(
-      `Jev saw the whole function for ${plural(stats.withFunction, "piece")} and ${lines} lines around the other ${stats.widened}.`,
+      `${judge} saw the whole function for ${plural(stats.withFunction, "piece")} and ${lines} lines around the other ${stats.widened}.`,
     );
   } else if (stats.withFunction > 0) {
-    parts.push("Jev saw the whole function each piece is.");
+    parts.push(`${judge} saw the whole function each piece is.`);
   } else if (stats.widened > 0) {
-    parts.push(`Jev saw ${lines} lines around it.`);
+    parts.push(`${judge} saw ${lines} lines around it.`);
   }
   const refused = stats.tooBigToWiden.length;
   if (refused > 0) {
     parts.push(
-      `${plural(refused, "piece")} ${refused === 1 ? "was" : "were"} too big to widen, so Jev saw ${refused === 1 ? "it" : "them"} without the code around ${refused === 1 ? "it" : "them"}.`,
+      `${plural(refused, "piece")} ${refused === 1 ? "was" : "were"} too big to widen, so ${judge} saw ${refused === 1 ? "it" : "them"} without the code around ${refused === 1 ? "it" : "them"}.`,
     );
   }
   return parts.length === 0 ? null : parts.join(" ");
@@ -167,7 +169,7 @@ export function whatJevSaw(stats: RunStats): string | null {
 export function renderReport(report: CheckReport): string {
   const { pieces, notChecked } = report;
   const sections: string[] = [];
-  const saw = whatJevSaw(report.stats);
+  const saw = whatJevSaw(report.stats, judgeName(report.judge));
 
   if (pieces.length === 0) {
     sections.push(saw === null ? headline(report) : `${headline(report)} ${saw}`);
@@ -193,9 +195,9 @@ export function cutWords(cut: CutMode): string {
   return "diff hunks grouped into 12,000 byte chunks, with no parser";
 }
 
-/** `--show-context`: exactly what Jev was sent for this piece, printed in full. */
-function jevSawLines(saw: JevView): string[] {
-  const lines = ["   What Jev saw:", `     file: ${saw.file}`, "     diff:"];
+/** `--show-context`: exactly what the judge was sent for this piece, printed in full. */
+function jevSawLines(saw: JevView, judge: string): string[] {
+  const lines = [`   What ${judge} saw:`, `     file: ${saw.file}`, "     diff:"];
   for (const line of saw.diff.split("\n")) {
     if (line.length > 0) lines.push(`       ${line}`);
   }
@@ -206,11 +208,11 @@ function jevSawLines(saw: JevView): string[] {
   return lines;
 }
 
-function scoreBlock(piece: PieceScore, index: number): string {
+function scoreBlock(piece: PieceScore, index: number, judge: string): string {
   const unit = piece.unit === null ? "" : ` in ${piece.unit}`;
   const lines = [`${index}. ${piece.file} ${where(piece.fromLine, piece.toLine)}${unit}`];
   for (const rule of piece.rules) lines.push(`   ${confidence(rule.score)}  ${rule.rule}`);
-  if (piece.jevSaw !== undefined) lines.push(...jevSawLines(piece.jevSaw));
+  if (piece.jevSaw !== undefined) lines.push(...jevSawLines(piece.jevSaw, judge));
   return lines.join("\n");
 }
 
@@ -219,16 +221,20 @@ export function renderScores(report: ScoreReport): string {
   const { pieces, notChecked, stats, source } = report;
   const sections: string[] = [];
   const scores = pieces.reduce((total, piece) => total + piece.rules.length, 0);
+  const judge = judgeName(report.judge);
 
   if (pieces.length === 0) {
-    sections.push(`stop-rules score: nothing to score in ${source}.`);
+    sections.push(
+      `stop-rules score: nothing to score in ${source}.\nJudge: ${describeJudge(report.judge)}.`,
+    );
   } else {
     const count = pieces.length === 1 ? "1 piece" : `${pieces.length} pieces`;
     sections.push(
-      `stop-rules score: ${count}, ${scores} scores, ${stats.calls} Jev calls, ${stats.cacheHits} answers from the cache.\n` +
+      `stop-rules score: ${count}, ${scores} scores, ${stats.calls} ${judge} calls, ${stats.cacheHits} answers from the cache.\n` +
+        `Judge: ${describeJudge(report.judge)}.\n` +
         `Scored ${source}. No cutoff applied, nothing was marked as checked, and the baseline did not move.`,
     );
-    sections.push(pieces.map((piece, i) => scoreBlock(piece, i + 1)).join("\n\n"));
+    sections.push(pieces.map((piece, i) => scoreBlock(piece, i + 1, judge)).join("\n\n"));
   }
 
   sections.push(...notCheckedSections(notChecked));

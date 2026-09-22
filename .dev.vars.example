@@ -1,2 +1,4 @@
 TYPESAFE_API_KEY=your-jev-api-key-from-typesafe
 STOP_RULES_TOKEN=a-random-team-token-openssl-rand-hex-24
+# Only when your repos use the openai judge.
+OPENAI_API_KEY=your-openai-api-key

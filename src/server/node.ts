@@ -5,7 +5,7 @@
  */
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { handle, missingEnv, SERVER_VERSION } from "./handler.js";
+import { handle, missingEnv, missingFor, SERVER_VERSION } from "./handler.js";
 
 export const DEFAULT_PORT = 8080;
 const HOST = "0.0.0.0";
@@ -127,10 +127,16 @@ export function startServer(port: number, env: NodeJS.ProcessEnv = process.env):
 /** The lines printed on startup. Env NAMES only, never values. */
 export function startupLines(port: number, env: NodeJS.ProcessEnv): string[] {
   const lines = [`stop-rules ${SERVER_VERSION} listening on http://${HOST}:${port}`];
-  const missing = missingEnv(env as Record<string, string | undefined>);
+  const serverEnv = env as Record<string, string | undefined>;
+  const missing = missingEnv(serverEnv);
   if (missing.length > 0) {
     lines.push(`not configured yet: set ${missing.join(" and ")} and restart`);
   }
+  const judge = (name: string, route: "jev" | "openai"): string => {
+    const needs = missingFor(serverEnv, route);
+    return needs.length === 0 ? `${name} ready` : `${name} needs ${needs.join(" and ")}`;
+  };
+  lines.push(`judges: ${judge("jev", "jev")}, ${judge("openai", "openai")}`);
   return lines;
 }
 

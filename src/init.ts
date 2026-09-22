@@ -14,7 +14,15 @@ import {
 } from "./languages.js";
 import { resolveRepo } from "./repo.js";
 import { parseRules, STARTER_RULES } from "./rules.js";
-import { DEFAULT_CUT, loadSettings, SETTINGS_FILE, writeSettings } from "./settings.js";
+import { describeJudge, type Effort, type JudgeInfo, type JudgeKind } from "./judge.js";
+import {
+  chooseJudge,
+  DEFAULT_CUT,
+  loadSettings,
+  SETTINGS_FILE,
+  writeSettings,
+  type JudgeSetting,
+} from "./settings.js";
 import { grammarWasmPath, runtimeWasmPath, vendorDir } from "./treesitter.js";
 import type { CutMode } from "./types.js";
 import { isBundled } from "./version.js";
@@ -64,6 +72,8 @@ export interface InitReport {
   cut: CutMode;
   /** Team mode when this repo sends its questions to a team server, local mode otherwise. */
   mode: "team" | "local";
+  /** Which judge this repo asks. The Jev model is read from the environment at run time. */
+  judge: JudgeInfo;
   bundle: { path: string; written: boolean };
   grammars: InitGrammars;
   rules: { path: string; created: boolean };
@@ -88,6 +98,10 @@ export interface InitOptions {
   team?: string;
   /** How this repo cuts a change into pieces. Only `functions` copies parser files. */
   cut?: CutMode;
+  /** `--judge`, `--model` and `--effort`: which judge this repo asks. Written to the settings. */
+  judge?: JudgeKind;
+  model?: string;
+  effort?: Effort;
   /** Environment, so an endpoint already set in it counts as team mode. */
   env: NodeJS.ProcessEnv;
 }
@@ -102,6 +116,7 @@ function failure(repo: string, reason: string): InitReport {
     repo,
     cut: DEFAULT_CUT,
     mode: "local",
+    judge: { kind: "jev", model: "jev-latest" },
     bundle: { path: BUNDLE_PATH, written: false },
     grammars: noGrammars(),
     rules: { path: ".stop-rules.md", created: false },
@@ -157,11 +172,27 @@ export async function init(options: InitOptions): Promise<InitReport> {
   if (!existingSettings.ok) return failure(root, existingSettings.reason);
   const cut = options.cut ?? existingSettings.loaded.settings.cut ?? DEFAULT_CUT;
 
+  // The judge flags ask for, else the one this repo already set, else Jev.
+  const judgeFlagsGiven =
+    options.judge !== undefined || options.model !== undefined || options.effort !== undefined;
+  const pickedJudge = chooseJudge(existingSettings.loaded.settings.judge, {
+    ...(options.judge !== undefined ? { judge: options.judge } : {}),
+    ...(options.model !== undefined ? { model: options.model } : {}),
+    ...(options.effort !== undefined ? { effort: options.effort } : {}),
+  });
+  if (!pickedJudge.ok) return failure(root, pickedJudge.reason);
+  const choice = pickedJudge.choice;
+  const judge: JudgeInfo =
+    choice.kind === "jev"
+      ? { kind: "jev", model: "jev-latest" }
+      : { kind: "openai", model: choice.model, effort: choice.effort };
+
   const report: InitReport = {
     ok: true,
     repo: root,
     cut,
     mode: "local",
+    judge,
     bundle: { path: BUNDLE_PATH, written: false },
     grammars: noGrammars(),
     rules: { path: ".stop-rules.md", created: false },
@@ -197,6 +228,24 @@ export async function init(options: InitOptions): Promise<InitReport> {
     const written = await writeSettings(root, { cut: options.cut });
     if (!written.ok) return failure(root, written.reason ?? `could not write ${written.file}`);
     wroteKeys.push("cut");
+  }
+  if (judgeFlagsGiven) {
+    // An inFlight the file already had is kept; the flags set kind, model and effort only.
+    const existingJudge = existingSettings.loaded.settings.judge;
+    const setting: JudgeSetting =
+      choice.kind === "jev"
+        ? { kind: "jev" }
+        : {
+            kind: "openai",
+            model: choice.model,
+            effort: choice.effort,
+            ...(existingJudge?.kind === "openai" && existingJudge.inFlight !== undefined
+              ? { inFlight: existingJudge.inFlight }
+              : {}),
+          };
+    const written = await writeSettings(root, { judge: setting });
+    if (!written.ok) return failure(root, written.reason ?? `could not write ${written.file}`);
+    wroteKeys.push("judge");
   }
   if (wroteKeys.length > 0) report.settings = { path: SETTINGS_FILE, wrote: wroteKeys };
 
@@ -270,11 +319,13 @@ export async function init(options: InitOptions): Promise<InitReport> {
     });
   }
 
-  // What is left for the human depends on where the Jev key lives.
+  // What is left for the human depends on where the judge's key lives.
   report.todo.push(
     report.mode === "team"
       ? 'Store the team token: printf %s "$TOKEN" | stop-rules login --token-stdin'
-      : 'Give it your own Jev key from TypeSafe: set TYPESAFE_API_KEY, or run printf %s "$KEY" | stop-rules login --jev-key-stdin',
+      : judge.kind === "openai"
+        ? 'Give it your own OpenAI key: set OPENAI_API_KEY, or run printf %s "$KEY" | stop-rules login --openai-key-stdin'
+        : 'Give it your own Jev key from TypeSafe: set TYPESAFE_API_KEY, or run printf %s "$KEY" | stop-rules login --jev-key-stdin',
   );
   report.todo.push(`Edit ${report.rules.path} so it says what your team actually cares about.`);
   // Nothing to parse means nothing was installed to parse it with, and the user is the only
@@ -428,10 +479,12 @@ export function renderInit(report: InitReport): string[] {
         : `  team server already set to ${report.team.endpoint} (from ${report.team.path})`,
     );
   }
+  const keyName = report.judge.kind === "openai" ? "OpenAI key" : "Jev key";
+  lines.push(`  judge: ${describeJudge(report.judge)}`);
   lines.push(
     report.mode === "team"
-      ? "  mode: team (the Jev key stays on your team's server)"
-      : "  mode: local (this machine needs your own Jev key)",
+      ? `  mode: team (the ${keyName} stays on your team's server)`
+      : `  mode: local (this machine needs your own ${keyName})`,
   );
   lines.push("");
   for (const agent of report.agents) {

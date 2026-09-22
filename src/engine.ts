@@ -1,6 +1,8 @@
 /**
  * The check engine. Stage 1 asks, for every piece and rule, whether the added lines break
- * the rule. Up to four pieces ride in one call. Plain inputs, plain outputs, no Node-only
+ * the rule. The judge is a seam: Jev takes up to four pieces in one call, the OpenAI judge one
+ * piece per call with several calls in flight, and everything around the asking (the cache,
+ * the cutoff, the grouping) is the same for both. Plain inputs, plain outputs, no Node-only
  * imports and no environment reads, so the same code runs in a CLI, a worker or an edge
  * function. Parsing happens above this file; here a piece is just text.
  */
@@ -11,11 +13,20 @@ import {
   JevClient,
   holdsBaseline,
   type AskNode,
+  type FailureClass,
   type FetchLike,
   type JevQuestion,
-  type JevUsage,
   type SlotGate,
 } from "./jev.js";
+import { cacheModel, judgeName, type Judge } from "./judge.js";
+import {
+  OpenAiClient,
+  promptCacheKey,
+  requestBody,
+  userInput,
+  type OpenAiNode,
+  type OpenAiQuestion,
+} from "./openai.js";
 import {
   NO_CONTEXT,
   type BrokenRule,
@@ -43,8 +54,21 @@ import {
  */
 export const DEFAULT_THRESHOLD = 0.6;
 
-/** The one ceiling on Jev requests in one run. Raise it with `maxCalls` or `--max-calls`. */
+/**
+ * The one ceiling on requests to the judge in one run. Raise it with `maxCalls` or
+ * `--max-calls`. Jev takes up to four pieces per call, so 60 calls cover up to 240 pieces.
+ */
 export const DEFAULT_MAX_CALLS = 60;
+/**
+ * The same ceiling for the OpenAI judge, which takes one piece per call. 240 calls cover the
+ * same 240 pieces Jev's 60 do, so switching judge never leaves a change half checked.
+ */
+export const DEFAULT_MAX_CALLS_OPENAI = 240;
+
+/** The call ceiling a judge gets when neither the file nor a flag sets one. */
+export function defaultMaxCalls(judge: { kind: "jev" | "openai" }): number {
+  return judge.kind === "jev" ? DEFAULT_MAX_CALLS : DEFAULT_MAX_CALLS_OPENAI;
+}
 
 /** Measured: four pieces per call moved scores by 0.03 on average, eight was worse. */
 export const PIECES_PER_CALL = 4;
@@ -70,7 +94,8 @@ export interface EngineInput {
   rules: readonly Rule[];
   threshold: number;
   maxCalls: number;
-  model: string;
+  /** Which service scores the pieces, with every value filled in. */
+  judge: Judge;
   endpoint: string;
   apiKey: string;
   fetchImpl: FetchLike;
@@ -83,6 +108,16 @@ export interface EngineInput {
   sleep?: (ms: number) => Promise<void>;
   concurrency?: number;
   slot?: SlotGate;
+}
+
+export type Blocked = "auth" | "billing" | "busy" | "model";
+
+/** Tokens the judge counted. The two OpenAI counts are parts of input and output. */
+export interface JudgeUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cachedInputTokens?: number;
+  reasoningTokens?: number;
 }
 
 export interface EngineResult {
@@ -107,11 +142,14 @@ export interface EngineResult {
   /** A failure the next run could still succeed at. */
   holdBaseline: boolean;
   /**
-   * Set when nothing the agent can do would help: the credential was rejected, the Jev
-   * account has no credits, or every Jev slot on this machine is busy.
+   * Set when nothing the agent can do would help: the credential was rejected, the judge's
+   * account has no credits, the model cannot be used with this key, or every slot on this
+   * machine is busy.
    */
-  blocked: "auth" | "billing" | "busy" | null;
-  usage: JevUsage;
+  blocked: Blocked | null;
+  /** The judge's own words for why it is blocked, for a model it cannot use. */
+  blockedMessage: string | null;
+  usage: JudgeUsage;
   /** (rule, piece) pairs whose violations are in this result. */
   findings: { ruleId: string; pieceText: string }[];
 }
@@ -264,13 +302,133 @@ export function packWork(model: string, work: readonly Work[]): Work[][] {
   return packs;
 }
 
+type OpenAiJudge = Extract<Judge, { kind: "openai" }>;
+
+/** The length of a real prompt cache key, so a body can be weighed before it is hashed. */
+const CACHE_KEY_STAND_IN = `stop-rules-${"0".repeat(24)}`;
+
+function openAiRules(rules: readonly Rule[]): { id: string; text: string }[] {
+  return rules.map((rule) => ({ id: rule.id, text: rule.text }));
+}
+
+/** The bytes one OpenAI call carrying only this piece would weigh. */
+function openAiBytes(judge: OpenAiJudge, work: Work): number {
+  const question: OpenAiQuestion = {
+    input: userInput(pieceState(work.piece, work.context), openAiRules(work.rules)),
+    promptCacheKey: CACHE_KEY_STAND_IN,
+    ids: [],
+  };
+  return utf8Bytes(requestBody(judge.model, judge.effort, question));
+}
+
+/** One piece, every rule it still needs, one call. The halves keep the same rules and key. */
+function makeOpenAiNode(work: Work, cacheKeyText: string): OpenAiNode<PackPayload> {
+  const byQuestion: Record<string, { piece: Piece; rule: Rule }> = {};
+  const ids = work.rules.map((rule, index) => {
+    const id = `q0_${index}`;
+    byQuestion[id] = { piece: work.piece, rule };
+    return id;
+  });
+  return {
+    payload: { work: [work], byQuestion },
+    question: {
+      input: userInput(pieceState(work.piece, work.context), openAiRules(work.rules)),
+      promptCacheKey: cacheKeyText,
+      ids,
+    },
+    halve: () => {
+      const halves = halvePiece(work.piece);
+      if (halves === null) return null;
+      return [
+        makeOpenAiNode({ piece: halves[0], context: halves[0].context, rules: work.rules }, cacheKeyText),
+        makeOpenAiNode({ piece: halves[1], context: halves[1].context, rules: work.rules }, cacheKeyText),
+      ];
+    },
+  };
+}
+
+/** The bytes a call carrying only this piece would weigh, for the judge that will be asked. */
+function soloBytes(judge: Judge, work: Work): number {
+  return judge.kind === "jev" ? packBytes(judge.model, [work]) : openAiBytes(judge, work);
+}
+
+/** What the engine needs back from either judge for one call. */
+interface CallResult {
+  payload: PackPayload;
+  outcome:
+    | { ok: true; answers: Record<string, number> }
+    | { ok: false; failure: FailureClass; message: string };
+}
+
+interface Asked {
+  results: CallResult[];
+  calls: number;
+  usage: JudgeUsage;
+}
+
+/** The seam: the work goes to whichever judge the run uses, and every call comes back. */
+async function askJudge(
+  input: EngineInput,
+  work: readonly Work[],
+): Promise<Asked> {
+  const { judge, note } = input;
+  if (judge.kind === "jev") {
+    const client = new JevClient({
+      endpoint: input.endpoint,
+      model: judge.model,
+      apiKey: input.apiKey,
+      maxCalls: input.maxCalls,
+      fetchImpl: input.fetchImpl,
+      note,
+      ...(input.sleep ? { sleep: input.sleep } : {}),
+      ...(input.concurrency !== undefined ? { concurrency: input.concurrency } : {}),
+      ...(input.slot ? { slot: input.slot } : {}),
+    });
+    const nodes = packWork(judge.model, work).map((pack) => makePackNode(judge.model, pack));
+    const results = (await client.askAll(nodes)).map((result) => ({
+      payload: result.node.payload,
+      outcome: result.outcome,
+    }));
+    return { results, calls: client.calls, usage: { ...client.usage } };
+  }
+
+  const client = new OpenAiClient({
+    endpoint: input.endpoint,
+    model: judge.model,
+    effort: judge.effort,
+    apiKey: input.apiKey,
+    maxCalls: input.maxCalls,
+    fetchImpl: input.fetchImpl,
+    concurrency: input.concurrency ?? judge.inFlight,
+    note,
+    ...(input.sleep ? { sleep: input.sleep } : {}),
+    ...(input.slot ? { slot: input.slot } : {}),
+  });
+  const keys = new Map<string, string>();
+  const nodes: OpenAiNode<PackPayload>[] = [];
+  for (const item of work) {
+    const rulesKey = item.rules.map((rule) => rule.id).join(",");
+    let key = keys.get(rulesKey);
+    if (key === undefined) {
+      key = await promptCacheKey(openAiRules(item.rules));
+      keys.set(rulesKey, key);
+    }
+    nodes.push(makeOpenAiNode(item, key));
+  }
+  const results = (await client.askAll(nodes)).map((result) => ({
+    payload: result.node.payload,
+    outcome: result.outcome,
+  }));
+  return { results, calls: client.calls, usage: { ...client.usage } };
+}
+
 /**
  * The code around a piece, unless sending it would put a call carrying only this piece over
  * the 60,000 byte cap. In that case the piece goes with its diff alone and the run says so,
  * once in the run log and once in the stats: it is a recorded fact, not a quiet retreat.
  */
 function contextThatFits(
-  model: string,
+  judge: Judge,
   piece: Piece,
   rules: readonly Rule[],
   refused: WidenRefused[],
@@ -278,30 +436,22 @@ function contextThatFits(
 ): PieceContext {
   const context = piece.context;
   if (context.kind === "none") return context;
-  const bytes = packBytes(model, [{ piece, context, rules: [...rules] }]);
+  const bytes = soloBytes(judge, { piece, context, rules: [...rules] });
   if (bytes <= PACK_MAX_BYTES) return context;
   refused.push({ file: piece.file, fromLine: piece.fromLine, toLine: piece.toLine, bytes });
   note(
     `${piece.file} lines ${piece.fromLine}-${piece.toLine}: too big to widen, ` +
       `a call with the ${CONTEXT_LINES} lines around it would be ${bytes} bytes, over the ` +
-      `${PACK_MAX_BYTES} byte cap, so Jev saw the diff alone`,
+      `${PACK_MAX_BYTES} byte cap, so ${judgeName(judge)} saw the diff alone`,
   );
   return NO_CONTEXT;
 }
 
 export async function runEngine(input: EngineInput): Promise<EngineResult> {
-  const { cache, note, threshold, model } = input;
-  const client = new JevClient({
-    endpoint: input.endpoint,
-    model,
-    apiKey: input.apiKey,
-    maxCalls: input.maxCalls,
-    fetchImpl: input.fetchImpl,
-    note,
-    ...(input.sleep ? { sleep: input.sleep } : {}),
-    ...(input.concurrency !== undefined ? { concurrency: input.concurrency } : {}),
-    ...(input.slot ? { slot: input.slot } : {}),
-  });
+  const { cache, note, threshold, judge } = input;
+  // The model string the cache is keyed on. For Jev it is the bare model name it always was.
+  const model = cacheModel(judge);
+  const name = judgeName(judge);
 
   const notChecked: NotChecked[] = [];
   /** Every (piece, rule) that got a score, whatever the score was. */
@@ -314,19 +464,22 @@ export async function runEngine(input: EngineInput): Promise<EngineResult> {
   let answered = 0;
   let holdBaseline = false;
   let transportFailed = false;
-  let blocked: "auth" | "billing" | "busy" | null = null;
+  let blocked: Blocked | null = null;
+  let blockedMessage: string | null = null;
 
-  const noteFailure = (failure: string): void => {
+  const noteFailure = (failure: string, message: string): void => {
     if (blocked !== null) return;
     if (failure === "auth") blocked = "auth";
     else if (failure === "billing") blocked = "billing";
     else if (failure === "busy") blocked = "busy";
+    else if (failure === "model") blocked = "model";
+    if (blocked !== null) blockedMessage = message;
   };
 
-  // Stage 1. A piece whose every rule is already answered costs nothing and rides in no pack.
+  // Stage 1. A piece whose every rule is already answered costs nothing and rides in no call.
   const work: Work[] = [];
   for (const piece of input.pieces) {
-    const context = contextThatFits(model, piece, input.rules, tooBigToWiden, note);
+    const context = contextThatFits(judge, piece, input.rules, tooBigToWiden, note);
     if (context.kind === "wide") widened += 1;
     if (context.kind === "function") withFunction += 1;
     const state = soloState(piece, context);
@@ -346,15 +499,15 @@ export async function runEngine(input: EngineInput): Promise<EngineResult> {
     }
   }
 
-  const stage1Nodes = packWork(model, work).map((pack) => makePackNode(model, pack));
+  const asked = await askJudge(input, work);
 
-  for (const result of await client.askAll(stage1Nodes)) {
-    const { work: sent, byQuestion } = result.node.payload;
+  for (const result of asked.results) {
+    const { work: sent, byQuestion } = result.payload;
     piecesPerCall.push(sent.length);
     if (!result.outcome.ok) {
       const failure = result.outcome.failure;
       if (holdsBaseline(failure)) holdBaseline = true;
-      noteFailure(failure);
+      noteFailure(failure, result.outcome.message);
       if (failure !== "budget") transportFailed = true;
       for (const item of sent) {
         notChecked.push(notCheckedFor(item.piece, reasonFor(failure, result.outcome.message)));
@@ -365,9 +518,9 @@ export async function runEngine(input: EngineInput): Promise<EngineResult> {
       const noul = result.outcome.answers[id];
       if (noul === undefined) {
         // A missing answer is an error for that question, never a zero.
-        note(`Jev returned no answer for rule ${target.rule.id} on ${target.piece.file}`);
+        note(`${name} returned no answer for rule ${target.rule.id} on ${target.piece.file}`);
         notChecked.push(
-          notCheckedFor(target.piece, `Jev returned no answer for rule ${target.rule.id}`),
+          notCheckedFor(target.piece, `${name} returned no answer for rule ${target.rule.id}`),
         );
         continue;
       }
@@ -408,7 +561,7 @@ export async function runEngine(input: EngineInput): Promise<EngineResult> {
     pieces,
     scores: groupScores(scored, input.showContext === true),
     notChecked,
-    calls: client.calls,
+    calls: asked.calls,
     cacheHits,
     answered,
     piecesPerCall,
@@ -418,7 +571,8 @@ export async function runEngine(input: EngineInput): Promise<EngineResult> {
     transportFailed,
     holdBaseline,
     blocked,
-    usage: client.usage,
+    blockedMessage,
+    usage: asked.usage,
     findings,
   };
 }
