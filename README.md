@@ -26,7 +26,7 @@ No `npm install`, no build: `bin/stop-rules.mjs` is committed and ready to run.
 
 `init` finds which coding agents your repo already uses, copies itself into
 `.stop-rules/stop-rules.mjs` there, writes a starter `.stop-rules.md`, and wires the hook into
-each agent's own config file. That is one file of 394 KB and no grammar files at all, because
+each agent's own config file. That is one file of 390 KB and no grammar files at all, because
 cutting by git diff hunk parses nothing. It says so:
 
 ```
@@ -183,10 +183,11 @@ what that agent's hook system can do.
 | Kiro | told to fix it | simulated hook input only, matches its docs |
 | OpenCode | told to fix it | generated plugin file, type checked, never run in OpenCode |
 | Amp | told to fix it | generated plugin file, type checked, never run in Amp |
+| Pi | told to fix it | ran for real, `pi --mode json` with the extension installed |
 | Aider | told to fix it, as lint output | simulated run only, matches its docs |
 | Windsurf Cascade | shown to you only | simulated hook input only, matches its docs |
 | Cline | shown to you only | simulated hook input only, see the note below |
-| plain | prints the report, exit 2 | used by the OpenCode and Amp plugins |
+| plain | prints the report, exit 2 | used by the OpenCode and Amp plugins and the Pi extension |
 
 Only Claude Code can run the check in the background and still reach the agent. Every other
 agent runs it as a normal blocking hook, which takes about a second.
@@ -195,6 +196,12 @@ Cline is the one case where the documentation disagrees with itself. Its hooks R
 documents the `TaskComplete` hook, the file it lives in and the JSON it must answer with,
 and the same README marks that event "coming soon!". The file is written to the documented
 contract, so if your Cline never runs it, that is why.
+
+Pi loads a project extension only once you trust the folder. In the terminal it asks.
+`pi --print` and `pi --mode json` cannot ask, so pass `--approve` or save the decision once
+with `/trust`. Without either, Pi skips the extension and says nothing: measured on 22
+September 2026 with Pi 0.87.1, an untrusted `pi --print` run over a change that breaks three
+rules exited 0 and never started the check.
 
 ## Which languages it can cut into pieces
 
@@ -386,20 +393,21 @@ a miss: after upgrading, each piece is asked once more. See the changelog at the
 
 ### Where the report comes out, per agent
 
-Measured on 19 September 2026 by feeding each adapter the payload its own agent documents.
+Measured on 19 September 2026 by feeding each adapter the payload its own agent documents,
+and for Pi on 22 September 2026 the same way.
 When a rule is broken:
 
 | Agent | Where the report goes | Exit code |
 |---|---|---|
 | Claude Code, Codex, Gemini CLI, Factory Droid, Windsurf Cascade | stderr | 2 |
-| OpenCode, Amp, plain | stdout and stderr, the same text on both | 2 |
+| OpenCode, Amp, Pi, plain | stdout and stderr, the same text on both | 2 |
 | Aider | stdout, as lint output | 2 |
 | Cursor | stdout, as JSON in `followup_message` | 0 |
 | GitHub Copilot CLI, Kiro | stdout, as JSON in `reason`, next to `"decision": "block"` | 0 |
 | Cline | stdout, as JSON in `contextModification` | 0 |
 
 Read that before you wrap the hook in anything. A wrapper that captures only stdout loses
-the entire report for the five agents that write it to stderr, and four of the thirteen
+the entire report for the five agents that write it to stderr, and four of the fourteen
 deliver a report while exiting 0, so an exit code alone does not tell you whether the turn
 was clean. On a clean turn every adapter exits 0 and writes nothing, except Gemini CLI and
 Cursor, which write `{}`, and Cline, which writes `{"cancel":false}`.
@@ -675,6 +683,12 @@ that is set but empty is an error, not a shrug.
   repo that sets nothing sees no change: its cached answers are still valid. The team server
   has a second route, `POST /v1/responses`, and an optional `OPENAI_API_KEY`. See "Which judge"
   above.
+- **22 September 2026, Pi.** `init` finds a `.pi` folder and writes
+  `.pi/extensions/stop-rules.ts`, which runs the check when Pi is about to settle and, when a
+  rule is broken, hands the report to the model with one more turn. Run with Pi 0.87.1 and
+  `gpt-6-luna`: the report named two broken rules, the model replaced the direct `fetch` and the TODO
+  stub with `httpGet` and `httpDelete`, and the second check was clean. Pi needs the folder trusted, see "Which agents
+  are supported".
 - **20 September 2026, the code around each piece.** Jev now sees 25 unchanged lines above and
   below every change, or the whole function in `functions` mode, and the claim sentence says so.
   Both go into the cache key, so the first run after this upgrade asks every piece once more and

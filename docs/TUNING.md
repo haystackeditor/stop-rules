@@ -471,7 +471,7 @@ score. The pieces, calls and token rows were re-run on 20 September 2026.
 
 | | `hunks`, the default | `functions` | `chunks` |
 |---|---|---|---|
-| Install size, a TypeScript and Python repo | 1 file, 394,286 bytes | 4 files, 3,400,347 bytes (`stop-rules.mjs`, `tree-sitter.wasm` 205,488, `grammars/typescript.wasm` 2,342,690, `grammars/python.wasm` 457,883) | 1 file, 394,286 bytes |
+| Install size, a TypeScript and Python repo | 1 file, 399,446 bytes | 4 files, 3,405,507 bytes (`stop-rules.mjs`, `tree-sitter.wasm` 205,488, `grammars/typescript.wasm` 2,342,690, `grammars/python.wasm` 457,883) | 1 file, 399,446 bytes |
 | Languages | every language | 10 have a parser: TypeScript, TSX, JavaScript, Python, Go, Rust, Ruby, Java, Kotlin, Swift. Any other file is cut into hunks | every language |
 | What the agent is handed | the hunk the fault sits in | the one function at fault | up to 12,000 bytes of diff |
 | Pieces, 172 changes | 532 | 643 | 172 |

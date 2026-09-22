@@ -90,7 +90,7 @@ measured totals behind each one, so read it before you answer questions about it
 
 | Knob | Default | What turning it does |
 |---|---|---|
-| `cut` | `hunks` | `hunks` uses no parser, is one file of 394 KB, covers every language, and hands the agent the git diff hunk the fault sits in. `functions` uses tree-sitter, hands the agent the one function at fault instead, and copies a few megabytes of grammar files into `.stop-rules/`. `chunks` installs the same one file as the default and uses bigger pieces, up to 12,000 bytes, which is the quietest of the three and hands over the most code. |
+| `cut` | `hunks` | `hunks` uses no parser, is one file of 390 KB, covers every language, and hands the agent the git diff hunk the fault sits in. `functions` uses tree-sitter, hands the agent the one function at fault instead, and copies a few megabytes of grammar files into `.stop-rules/`. `chunks` installs the same one file as the default and uses bigger pieces, up to 12,000 bytes, which is the quietest of the three and hands over the most code. |
 | `threshold` | `0.6` | The bar a score must reach to count. Lower catches more and flags more. Measured on 96 agent sessions with well-worded rules: 0.5 caught 59 of 62 real breaks with 13 wrong flags, 0.6 caught 56 with 5, 0.7 caught 46 with 2. There is no single right number: it is how much the team minds a wrong flag against a missed break. Tell them that, show them those three rows, and say that `stop-rules score` on their own recent changes is how to see where their real problems and their noise land before settling on one. |
 | `maxCalls` | `60` | Requests to Jev in one run. When it runs out, the rest of the change is reported as not checked and picked up on the next run. |
 | `endpoint` | none, so each person uses their own Jev key | Team mode: questions go to your team's server, which holds the one key. |
@@ -332,20 +332,21 @@ The example above breaks "do not silently swallow errors".
 
 ### Where the report comes out, per agent
 
-Measured on 19 September 2026 by feeding each adapter the payload its own agent documents.
+Measured on 19 September 2026 by feeding each adapter the payload its own agent documents,
+and for Pi on 22 September 2026 the same way.
 When a rule is broken:
 
 | Agent | Where the report goes | Exit code |
 |---|---|---|
 | Claude Code, Codex, Gemini CLI, Factory Droid, Windsurf Cascade | stderr | 2 |
-| OpenCode, Amp, plain | stdout and stderr, the same text on both | 2 |
+| OpenCode, Amp, Pi, plain | stdout and stderr, the same text on both | 2 |
 | Aider | stdout, as lint output | 2 |
 | Cursor | stdout, as JSON in `followup_message` | 0 |
 | GitHub Copilot CLI, Kiro | stdout, as JSON in `reason`, next to `"decision": "block"` | 0 |
 | Cline | stdout, as JSON in `contextModification` | 0 |
 
 Tell the human this if anything of theirs wraps the hook. A wrapper that captures only stdout
-loses the entire report for the five agents that write it to stderr, and four of the thirteen
+loses the entire report for the five agents that write it to stderr, and four of the fourteen
 deliver a report while exiting 0, so the exit code alone does not say whether the turn was
 clean. On a clean turn every adapter exits 0 and writes nothing, except Gemini CLI and Cursor,
 which write `{}`, and Cline, which writes `{"cancel":false}`.
@@ -356,13 +357,18 @@ when a rule is broken.
 If the agent is Claude Code, tell the human this: if `disableAllHooks` is set in their
 Claude Code settings, no hook runs at all and nothing warns them.
 
+If the agent is Pi, tell the human this: Pi loads the extension in `.pi/extensions/` only once
+the folder is trusted. The terminal asks. `pi --print` and `pi --mode json` cannot ask, so they
+need `--approve` or a decision saved once with `/trust`; without one, Pi skips the check and
+says nothing.
+
 ## 10. Commit, and never commit
 
 Commit:
 
 - `.stop-rules.md`, the rules.
 - `.stop-rules/`, so teammates and cloud agents get the check with nothing to install. On a
-  default install that is one file of 394 KB. In `functions` mode it also holds the parser and
+  default install that is one file of 390 KB. In `functions` mode it also holds the parser and
   the grammars, a few megabytes of wasm; if the team would rather not keep binaries in their
   history, commit only `.stop-rules/stop-rules.mjs` and tell them that each person runs `init`
   again once on their own machine; until they do, files in that language are reported as not

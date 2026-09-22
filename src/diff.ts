@@ -67,7 +67,11 @@ const SKIP_SUFFIXES = [
 const OWN_DIR = ".stop-rules/";
 
 /** Plugin files stop-rules generates itself. No rule of the team's is about them. */
-const OWN_FILES = new Set([".opencode/plugins/stop-rules.ts", ".amp/plugins/stop-rules.ts"]);
+const OWN_FILES = new Set([
+  ".opencode/plugins/stop-rules.ts",
+  ".amp/plugins/stop-rules.ts",
+  ".pi/extensions/stop-rules.ts",
+]);
 
 export function isSkippedPath(filePath: string, extraSkip: readonly string[] = []): boolean {
   if (filePath.startsWith(OWN_DIR) || OWN_FILES.has(filePath)) return true;
