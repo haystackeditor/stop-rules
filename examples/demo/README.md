@@ -1,12 +1,14 @@
 # The stop-rules demo graphic
 
-![stop-rules in five beats: an agent writes code, the stop hook fires, three rules come back broken, the check took 0.533 s, the agent repairs the code and the check is clean](stop-rules-demo.svg)
+![stop-rules in five beats: an agent writes code, the stop hook fires, three rules come back broken, Jev answered in 0.338 s against 1.039 s and 1.547 s for GPT-6 Luna, the agent repairs the code and the check is clean](stop-rules-demo.svg)
 
 The graphic shows one agent turn in a small TypeScript project: the agent adds `src/user.ts`
 with a direct `fetch`, a catch that drops the error and a TODO stub, and ends its turn. The
 stop hook cuts the change into pieces, asks Jev about each of the project's three rules, and
 hands back three findings with their scores. The agent rewrites the code with the project's
-`httpGet` helper, and the same check comes back clean.
+`httpGet` helper, and the same check comes back clean. In between, beat 4 times how long
+each type of model takes to answer the same three questions: Jev, a small model built for yes
+or no questions, and GPT-6 Luna with and without reasoning.
 
 A still version for places that do not play animation is
 [`stop-rules-demo.png`](stop-rules-demo.png), the five beats stacked.
@@ -14,9 +16,9 @@ A still version for places that do not play animation is
 ## What is real and what is scripted
 
 - **Real:** the project, the rules, the findings and scores in beat 3, the clean result in
-  beat 5, and the timings in beat 4. All of it came from the live Jev service on 22 September
+  beat 5, and the timings in beat 4. The scores came from the live Jev service on 22 September
   2026, which reported its version as `jev-1.13.0`, using stop-rules 0.1.0 from this
-  repository.
+  repository. The timings in beat 4 came from Jev and from GPT-6 Luna on the same day.
 - **Scripted:** the agent's two turns. The broken change is
   [`agent-change.diff`](agent-change.diff) and the repair is [`agent-fix.diff`](agent-fix.diff),
   both written by hand and applied with `git apply`. We gave the same task to Claude Code
@@ -59,18 +61,28 @@ and beat 5 the lines that changed. The whole files are the two diffs.
 
 ## The latency
 
-Wall time of `node .stop-rules/stop-rules.mjs check` on the broken change, five runs, each
-with the answer cache deleted first so every run made one real request to Jev. One warm-up run
-before them was not counted. Measured on one Mac with Node 22.23.2.
+Beat 4 races the model types on the same piece of `src/user.ts` and the same three rules,
+each asked the three yes or no questions at once. All of it was measured on 22 September 2026
+within the same hour: 5 timed runs per row, after one warm-up run that was not counted.
 
-| Run | 1 | 2 | 3 | 4 | 5 |
-|---|---|---|---|---|---|
-| Seconds | 0.540 | 0.605 | 0.533 | 0.499 | 0.490 |
+| Model type | Run 1 | Run 2 | Run 3 | Run 4 | Run 5 | Median |
+|---|---|---|---|---|---|---|
+| Jev `jev-1.13.0`, the call alone | 0.338 | 0.429 | 0.400 | 0.332 | 0.329 | **0.338 s** |
+| GPT-6 Luna, reasoning effort none | 1.135 | 1.039 | 1.363 | 1.010 | 0.923 | **1.039 s** |
+| GPT-6 Luna, reasoning effort low | 1.427 | 2.682 | 1.547 | 1.514 | 1.728 | **1.547 s** |
+| Jev, `stop-rules check` end to end | 0.855 | 0.764 | 0.671 | 0.812 | 0.783 | **0.783 s** |
 
-The median is 0.533 s, and that is the number beat 4 lands on. The timer in the graphic runs
-at real speed. This is the time for the check itself. In Claude Code the hook runs in the
-background and the agent is woken with the report, so the time until the agent reads it also
-includes Claude Code's own step, which we did not measure.
+- "The call alone" is the time from sending the request to the last byte of the answer.
+- The GPT-6 Luna rows are one Responses API call each, with strict JSON output, asking the
+  same three questions about the same piece. It scored all three rules as broken on every
+  run, 0.98 or 0.99 each. No medium reasoning effort row was measured.
+- The end-to-end row is the wall time of the whole check process, answer cache deleted first:
+  git, Node startup, cutting the change, the Jev call and printing the report. It is the
+  number the graphic gives as "as a stop hook, including git and startup: 0.78 s".
+- The bars in the graphic grow at real speed from a shared start and stop at each median.
+
+This does not include the time Claude Code takes to wake the agent with the report, which
+was not measured.
 
 ## Run it yourself
 
@@ -94,7 +106,7 @@ Set `TYPESAFE_API_KEY` or `TYPESAFE_API_KEY_FILE` first, or store the key once w
 `stop-rules login --jev-key-stdin`. Use `score` in place of `check` to see every rule's score,
 including the ones under the bar.
 
-To time it the way beat 4 was timed, with the broken change applied:
+To time the end-to-end check the way the last row was timed, with the broken change applied:
 
 ```bash
 cd "$demo"
@@ -110,7 +122,7 @@ Scores move a little between runs and between Jev versions, so yours will not be
 
 | File | What it is |
 |---|---|
-| `stop-rules-demo.svg` | the animated graphic, five beats in a 32 second loop, in Haystack's dark palette |
+| `stop-rules-demo.svg` | the animated graphic, five beats in an 18.5 second loop, in Haystack's dark palette |
 | `stop-rules-demo.png` | the same five beats stacked, as a still image |
 | `stop-rules-demo-static.svg` | the source of that PNG |
 | `project/` | the small TypeScript project: `src/http.ts` holds `httpGet` and `httpDelete`, `src/team.ts` uses them |
