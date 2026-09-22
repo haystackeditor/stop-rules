@@ -9,6 +9,7 @@ import { droidAdapter } from "./droid.js";
 import { geminiAdapter } from "./gemini.js";
 import { kiroAdapter } from "./kiro.js";
 import { opencodeAdapter } from "./opencode.js";
+import { piAdapter } from "./pi.js";
 import { plainAdapter } from "./plain.js";
 import { windsurfAdapter } from "./windsurf.js";
 import type { AgentAdapter } from "./types.js";
@@ -26,6 +27,7 @@ export const ADAPTERS: readonly AgentAdapter[] = [
   kiroAdapter,
   opencodeAdapter,
   ampAdapter,
+  piAdapter,
   windsurfAdapter,
   clineAdapter,
   aiderAdapter,

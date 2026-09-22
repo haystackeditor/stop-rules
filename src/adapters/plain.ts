@@ -4,7 +4,7 @@ import type { AgentAdapter, CheckResult, HookContext, HookOutput, InstallResult 
 /**
  * No agent protocol at all: `{ "session_id", "cwd" }` in, the report on both streams out,
  * exit 2 when there is something to fix. This is what the generated OpenCode and Amp
- * plugins spawn, and what any other runner can use.
+ * plugins and the Pi extension spawn, and what any other runner can use.
  */
 export const plainAdapter: AgentAdapter = {
   name: "plain",
@@ -22,7 +22,8 @@ export const plainAdapter: AgentAdapter = {
 
   parseInput(stdinText: string): HookContext {
     // The documented input is {"session_id": "...", "cwd": "..."}, which is what the
-    // generated OpenCode and Amp plugins send. Nothing is invented when it is missing.
+    // generated OpenCode and Amp plugins and the Pi extension send. Nothing is invented
+    // when it is missing.
     return contextFrom(stdinText, {
       agent: "plain",
       session: ["session_id", "sessionId"],

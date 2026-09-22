@@ -1119,8 +1119,165 @@ var opencodeAdapter = {
   }
 };
 
-// src/adapters/windsurf.ts
+// src/adapters/pi.ts
+import * as fs7 from "node:fs";
 import * as path13 from "node:path";
+
+// src/plugins/pi.ts
+function piExtension(bundlePath) {
+  return `// Written by stop-rules. Re-run "stop-rules init" to update it.
+import { spawn } from "node:child_process"
+import { join } from "node:path"
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent"
+
+const BUNDLE = ${JSON.stringify(bundlePath)}
+const CUSTOM_TYPE = "stop-rules"
+
+type Run = { code: number; stdout: string; stderr: string }
+
+function runStopRules(root: string, sessionID: string): Promise<Run> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [join(root, BUNDLE), "hook", "--agent", "plain"], {
+      cwd: root,
+      stdio: ["pipe", "pipe", "pipe"],
+    })
+    let stdout = ""
+    let stderr = ""
+    child.stdout.on("data", (chunk: Buffer) => {
+      stdout += chunk.toString("utf8")
+    })
+    child.stderr.on("data", (chunk: Buffer) => {
+      stderr += chunk.toString("utf8")
+    })
+    child.on("error", reject)
+    child.on("close", (code, signal) => {
+      // A signal death has no exit code. Calling that 0 would report a killed check as clean.
+      if (code === null) {
+        reject(new Error("stop-rules was killed by " + String(signal)))
+        return
+      }
+      resolve({ code, stdout, stderr })
+    })
+    child.stdin.end(JSON.stringify({ session_id: sessionID, cwd: root }))
+  })
+}
+
+// For the user, never the model: the model cannot fix a missing key.
+function tellUser(ctx: ExtensionContext, line: string): void {
+  if (ctx.hasUI) ctx.ui.notify(line, "error")
+  else console.error(line)
+}
+
+export default function (pi: ExtensionAPI) {
+  pi.on("agent_before_settle", async (event, ctx) => {
+    if (event.outcome !== "completed") return undefined
+    const already = event.entries.some(
+      (entry) => entry.type === "custom_message" && entry.customType === CUSTOM_TYPE,
+    )
+    if (already) return undefined
+
+    // Pi reads .pi/extensions from the working directory, so that is where init wrote this.
+    const root = ctx.cwd
+    let run: Run
+    try {
+      run = await runStopRules(root, ctx.sessionManager.getSessionId())
+    } catch (error) {
+      // Never swallow it: the user needs to know the check did not run.
+      tellUser(ctx, "stop-rules: could not run the check: " + String(error))
+      return undefined
+    }
+    if (run.code === 2) {
+      const report = (run.stdout.trim().length > 0 ? run.stdout : run.stderr).trim()
+      if (report.length === 0) return undefined
+      return {
+        entries: [
+          ...event.entries,
+          { type: "custom_message" as const, customType: CUSTOM_TYPE, content: report, display: true },
+        ],
+        continue: true,
+      }
+    }
+    if (run.code !== 0) tellUser(ctx, run.stderr.trim())
+    return undefined
+  })
+}
+`;
+}
+
+// src/adapters/pi.ts
+var BUNDLE3 = ".stop-rules/stop-rules.mjs";
+var EXTENSION = ".pi/extensions/stop-rules.ts";
+var TRUST_NOTE = "Pi loads project extensions only once the folder is trusted: accept its trust prompt, or pass --approve to pi --print and pi --mode json";
+var piAdapter = {
+  name: "pi",
+  title: "Pi",
+  feedback: "continues-agent",
+  effect: "gets the report as a message and one more turn to fix it",
+  detect(repoRoot) {
+    return anyExists(repoRoot, [".pi"]);
+  },
+  command(bundlePath) {
+    return `node "${bundlePath}" hook --agent plain`;
+  },
+  parseInput(stdinText) {
+    return plainAdapter.parseInput(stdinText);
+  },
+  deliver(result, report) {
+    return plainAdapter.deliver(result, report);
+  },
+  deliverError(message) {
+    return plainAdapter.deliverError(message);
+  },
+  install(repoRoot, _command) {
+    const file = path13.join(repoRoot, EXTENSION);
+    const shown = relative2(repoRoot, file);
+    const wanted = piExtension(BUNDLE3);
+    let existing = null;
+    try {
+      existing = fs7.readFileSync(file, "utf8");
+    } catch (error) {
+      const err2 = error;
+      if (err2.code !== "ENOENT") {
+        return {
+          ok: false,
+          files: [shown],
+          changed: false,
+          notes: [`could not read ${shown}: ${err2.message}`]
+        };
+      }
+    }
+    if (existing !== null && !existing.includes("stop-rules")) {
+      return {
+        ok: false,
+        files: [shown],
+        changed: false,
+        notes: [`${shown} exists and is not a stop-rules extension. Nothing was changed.`]
+      };
+    }
+    if (existing === wanted) {
+      return {
+        ok: true,
+        files: [shown],
+        changed: false,
+        notes: [`left ${shown} alone: it is already up to date`, TRUST_NOTE]
+      };
+    }
+    fs7.mkdirSync(path13.dirname(file), { recursive: true });
+    fs7.writeFileSync(file, wanted, "utf8");
+    return {
+      ok: true,
+      files: [shown],
+      changed: true,
+      notes: [
+        existing === null ? `wrote the extension ${shown}` : `updated the extension ${shown}`,
+        TRUST_NOTE
+      ]
+    };
+  }
+};
+
+// src/adapters/windsurf.ts
+import * as path14 from "node:path";
 var windsurfAdapter = {
   name: "windsurf",
   title: "Windsurf Cascade",
@@ -1143,7 +1300,7 @@ var windsurfAdapter = {
 `);
   },
   install(repoRoot, command) {
-    const file = path13.join(repoRoot, ".windsurf", "hooks.json");
+    const file = path14.join(repoRoot, ".windsurf", "hooks.json");
     const shown = relative2(repoRoot, file);
     const read = readJsonFile(file, shown);
     if (!read.ok) return failed(shown, read.reason);
@@ -1189,6 +1346,7 @@ var ADAPTERS = [
   kiroAdapter,
   opencodeAdapter,
   ampAdapter,
+  piAdapter,
   windsurfAdapter,
   clineAdapter,
   aiderAdapter,
@@ -1202,8 +1360,8 @@ function getAdapter(name2) {
 }
 
 // src/check.ts
-import { promises as fs15 } from "node:fs";
-import * as path20 from "node:path";
+import { promises as fs16 } from "node:fs";
+import * as path21 from "node:path";
 
 // src/types.ts
 var NO_CONTEXT = { kind: "none" };
@@ -1255,7 +1413,11 @@ var SKIP_SUFFIXES = [
   ".lock"
 ];
 var OWN_DIR = ".stop-rules/";
-var OWN_FILES = /* @__PURE__ */ new Set([".opencode/plugins/stop-rules.ts", ".amp/plugins/stop-rules.ts"]);
+var OWN_FILES = /* @__PURE__ */ new Set([
+  ".opencode/plugins/stop-rules.ts",
+  ".amp/plugins/stop-rules.ts",
+  ".pi/extensions/stop-rules.ts"
+]);
 function isSkippedPath(filePath, extraSkip = []) {
   if (filePath.startsWith(OWN_DIR) || OWN_FILES.has(filePath)) return true;
   const base = baseName(filePath);
@@ -1735,9 +1897,9 @@ function wideContext(piece, fileText, taken = []) {
 }
 
 // src/credentials.ts
-import { promises as fs9 } from "node:fs";
+import { promises as fs10 } from "node:fs";
 import { homedir } from "node:os";
-import * as path15 from "node:path";
+import * as path16 from "node:path";
 
 // src/jev.ts
 var DEFAULT_ENDPOINT = "https://api.typesafe.ai/v1/systemone";
@@ -2033,7 +2195,7 @@ var JevClient = class {
 };
 
 // src/key.ts
-import { promises as fs7 } from "node:fs";
+import { promises as fs8 } from "node:fs";
 async function resolveApiKey(env) {
   const direct = env["TYPESAFE_API_KEY"];
   if (typeof direct === "string") {
@@ -2052,7 +2214,7 @@ async function resolveApiKey(env) {
     }
     const keyPath = file.trim();
     try {
-      const key = (await fs7.readFile(keyPath, "utf8")).trim();
+      const key = (await fs8.readFile(keyPath, "utf8")).trim();
       if (key.length === 0) {
         return { ok: false, reason: `${keyPath}, named by TYPESAFE_API_KEY_FILE, is empty` };
       }
@@ -2072,8 +2234,8 @@ async function resolveApiKey(env) {
 }
 
 // src/settings.ts
-import { promises as fs8 } from "node:fs";
-import * as path14 from "node:path";
+import { promises as fs9 } from "node:fs";
+import * as path15 from "node:path";
 var SETTINGS_FILE = ".stop-rules.json";
 var DEFAULT_CUT = "hunks";
 var KNOWN_KEYS = ["endpoint", "cut", "threshold", "maxCalls"];
@@ -2134,10 +2296,10 @@ function parseSettings(file, raw) {
   return { ok: true, loaded: { settings, file, exists: true } };
 }
 async function loadSettings(repoRoot) {
-  const file = path14.join(repoRoot, SETTINGS_FILE);
+  const file = path15.join(repoRoot, SETTINGS_FILE);
   let text;
   try {
-    text = await fs8.readFile(file, "utf8");
+    text = await fs9.readFile(file, "utf8");
   } catch (error) {
     const err2 = error;
     if (err2.code === "ENOENT") {
@@ -2157,11 +2319,11 @@ async function loadSettings(repoRoot) {
   return parseSettings(file, raw);
 }
 async function writeSettings(repoRoot, patch) {
-  const file = path14.join(repoRoot, SETTINGS_FILE);
+  const file = path15.join(repoRoot, SETTINGS_FILE);
   const load = await loadSettings(repoRoot);
   if (!load.ok) return { ok: false, wrote: [], file, existed: true, reason: load.reason };
   const merged = { ...load.loaded.settings, ...patch };
-  await fs8.writeFile(file, `${JSON.stringify(merged, null, 2)}
+  await fs9.writeFile(file, `${JSON.stringify(merged, null, 2)}
 `, "utf8");
   return { ok: true, wrote: Object.keys(patch), file, existed: load.loaded.exists };
 }
@@ -2183,19 +2345,19 @@ function envValue(env, name2) {
 function configDir(env) {
   const xdg = envValue(env, "XDG_CONFIG_HOME");
   if (!xdg.ok) throw new Error(xdg.reason);
-  const base = xdg.value === null ? path15.join(homedir(), ".config") : xdg.value;
-  return path15.join(base, "stop-rules");
+  const base = xdg.value === null ? path16.join(homedir(), ".config") : xdg.value;
+  return path16.join(base, "stop-rules");
 }
 function tokenPath(env) {
-  return path15.join(configDir(env), TOKEN_FILE);
+  return path16.join(configDir(env), TOKEN_FILE);
 }
 function jevKeyPath(env) {
-  return path15.join(configDir(env), JEV_KEY_FILE);
+  return path16.join(configDir(env), JEV_KEY_FILE);
 }
 async function readTrimmed(file) {
   let text;
   try {
-    text = (await fs9.readFile(file, "utf8")).trim();
+    text = (await fs10.readFile(file, "utf8")).trim();
   } catch (error) {
     const err2 = error;
     if (err2.code === "ENOENT") return { value: null };
@@ -2329,10 +2491,10 @@ async function login(env, target, secret) {
   }
   const dir = configDir(env);
   const file = target === "token" ? tokenPath(env) : jevKeyPath(env);
-  await fs9.mkdir(dir, { recursive: true, mode: 448 });
-  await fs9.writeFile(file, `${value2}
+  await fs10.mkdir(dir, { recursive: true, mode: 448 });
+  await fs10.writeFile(file, `${value2}
 `, { encoding: "utf8", mode: 384 });
-  await fs9.chmod(file, 384);
+  await fs10.chmod(file, 384);
   return {
     ok: true,
     lines: [
@@ -3225,11 +3387,11 @@ function chunkPieces(file, source) {
 }
 
 // src/treesitter.ts
-import { promises as fs10 } from "node:fs";
-import * as path16 from "node:path";
+import { promises as fs11 } from "node:fs";
+import * as path17 from "node:path";
 import { fileURLToPath } from "node:url";
 
-// node_modules/web-tree-sitter/tree-sitter.js
+// ../../../../private/tmp/claude-501/-Users-akshaysubramaniam-haystack-review/86acc7b8-f4aa-4d0c-bcb0-6c6afc607144/scratchpad/pi/deps/node_modules/web-tree-sitter/tree-sitter.js
 var __defProp = Object.defineProperty;
 var __name = (target, value2) => __defProp(target, "name", { value: value2, configurable: true });
 var SIZE_OF_SHORT = 2;
@@ -5303,11 +5465,11 @@ var Module2 = (() => {
       throw toThrow;
     }, "quit_");
     var scriptDirectory = "";
-    function locateFile(path23) {
+    function locateFile(path24) {
       if (Module["locateFile"]) {
-        return Module["locateFile"](path23, scriptDirectory);
+        return Module["locateFile"](path24, scriptDirectory);
       }
-      return scriptDirectory + path23;
+      return scriptDirectory + path24;
     }
     __name(locateFile, "locateFile");
     var readAsync, readBinary;
@@ -7186,18 +7348,18 @@ function isBundled() {
 var RUNTIME_WASM = "tree-sitter.wasm";
 var GRAMMAR_DIR = "grammars";
 function vendorDir() {
-  const here = path16.dirname(fileURLToPath(import.meta.url));
-  return isBundled() ? here : path16.join(here, "..", "bin");
+  const here = path17.dirname(fileURLToPath(import.meta.url));
+  return isBundled() ? here : path17.join(here, "..", "bin");
 }
 function runtimeWasmPath(dir = vendorDir()) {
-  return path16.join(dir, RUNTIME_WASM);
+  return path17.join(dir, RUNTIME_WASM);
 }
 function grammarWasmPath(key, dir = vendorDir()) {
-  return path16.join(dir, GRAMMAR_DIR, grammarWasmName(key));
+  return path17.join(dir, GRAMMAR_DIR, grammarWasmName(key));
 }
 async function exists(file) {
   try {
-    await fs10.access(file);
+    await fs11.access(file);
     return true;
   } catch (error) {
     const err2 = error;
@@ -7634,8 +7796,8 @@ function groupScores(scored, showContext) {
 
 // src/git.ts
 import { execFile } from "node:child_process";
-import { promises as fs11 } from "node:fs";
-import * as path17 from "node:path";
+import { promises as fs12 } from "node:fs";
+import * as path18 from "node:path";
 import { randomBytes } from "node:crypto";
 var MAX_BUFFER = 256 * 1024 * 1024;
 function runGit(cwd, args2, extraEnv) {
@@ -7697,8 +7859,8 @@ async function emptyTree(root) {
   return out3.trim();
 }
 async function snapshotWorkingTree(repo, stateDir) {
-  await fs11.mkdir(stateDir, { recursive: true });
-  const indexPath = path17.join(stateDir, `index-${process.pid}-${randomBytes(4).toString("hex")}`);
+  await fs12.mkdir(stateDir, { recursive: true });
+  const indexPath = path18.join(stateDir, `index-${process.pid}-${randomBytes(4).toString("hex")}`);
   const env = { GIT_INDEX_FILE: indexPath };
   try {
     if (await hasHead(repo.root)) {
@@ -7708,8 +7870,8 @@ async function snapshotWorkingTree(repo, stateDir) {
     const tree = await gitOrThrow(repo.root, ["write-tree"], env);
     return tree.trim();
   } finally {
-    await fs11.rm(indexPath, { force: true });
-    await fs11.rm(`${indexPath}.lock`, { force: true });
+    await fs12.rm(indexPath, { force: true });
+    await fs12.rm(`${indexPath}.lock`, { force: true });
   }
 }
 async function readBlob(root, tree, filePath) {
@@ -7890,7 +8052,7 @@ Scored ${source}. No cutoff applied, nothing was marked as checked, and the base
 
 // src/rules.ts
 import { createHash } from "node:crypto";
-import { promises as fs12 } from "node:fs";
+import { promises as fs13 } from "node:fs";
 var TOP_LEVEL_ITEM = /^(?:[-*+]|\d+[.)])\s+(.*)$/;
 var FENCE = /^\s*(?:```|~~~)/;
 function normalise(text) {
@@ -7963,7 +8125,7 @@ function parseRules(markdown) {
 async function loadRules(rulesPath) {
   let source;
   try {
-    source = await fs12.readFile(rulesPath, "utf8");
+    source = await fs13.readFile(rulesPath, "utf8");
   } catch (error) {
     const err2 = error;
     if (err2.code === "ENOENT") {
@@ -8004,9 +8166,9 @@ has the checklist and the measurements behind it.
 
 // src/slots.ts
 import { randomBytes as randomBytes2 } from "node:crypto";
-import { promises as fs13 } from "node:fs";
+import { promises as fs14 } from "node:fs";
 import * as os from "node:os";
-import * as path18 from "node:path";
+import * as path19 from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 var MACHINE_SLOTS = 8;
 var SLOT_WAIT_MS = 6e4;
@@ -8019,11 +8181,11 @@ function slotsDir(env) {
     if (configured.trim().length === 0) {
       throw new Error("XDG_CACHE_HOME is set but empty. Unset it or point it at a folder.");
     }
-    return path18.join(configured, "stop-rules", "slots");
+    return path19.join(configured, "stop-rules", "slots");
   }
   const home = os.homedir();
-  if (process.platform === "darwin") return path18.join(home, "Library", "Caches", "stop-rules", "slots");
-  return path18.join(home, ".cache", "stop-rules", "slots");
+  if (process.platform === "darwin") return path19.join(home, "Library", "Caches", "stop-rules", "slots");
+  return path19.join(home, ".cache", "stop-rules", "slots");
 }
 function pidAlive(pid) {
   if (!Number.isInteger(pid) || pid <= 0) return false;
@@ -8049,22 +8211,22 @@ function readSlot(text) {
   return { pid, at };
 }
 async function acquireSlot(dir, waitMs = SLOT_WAIT_MS) {
-  await fs13.mkdir(dir, { recursive: true });
+  await fs14.mkdir(dir, { recursive: true });
   const deadline = Date.now() + waitMs;
   for (; ; ) {
-    const claim = path18.join(dir, `claim-${process.pid}-${randomBytes2(4).toString("hex")}`);
-    await fs13.writeFile(claim, JSON.stringify({ pid: process.pid, at: Date.now() }), "utf8");
+    const claim = path19.join(dir, `claim-${process.pid}-${randomBytes2(4).toString("hex")}`);
+    await fs14.writeFile(claim, JSON.stringify({ pid: process.pid, at: Date.now() }), "utf8");
     try {
       for (let index = 0; index < MACHINE_SLOTS; index += 1) {
-        const file = path18.join(dir, `slot-${index}`);
+        const file = path19.join(dir, `slot-${index}`);
         try {
-          await fs13.link(claim, file);
+          await fs14.link(claim, file);
           return {
             ok: true,
             release: async () => {
               try {
-                const owner2 = readSlot(await fs13.readFile(file, "utf8"));
-                if (owner2 !== null && owner2.pid === process.pid) await fs13.rm(file, { force: true });
+                const owner2 = readSlot(await fs14.readFile(file, "utf8"));
+                if (owner2 !== null && owner2.pid === process.pid) await fs14.rm(file, { force: true });
               } catch (error) {
                 const err2 = error;
                 if (err2.code !== "ENOENT") {
@@ -8081,8 +8243,8 @@ async function acquireSlot(dir, waitMs = SLOT_WAIT_MS) {
         let owner = null;
         let writtenAt = 0;
         try {
-          owner = readSlot(await fs13.readFile(file, "utf8"));
-          writtenAt = owner === null ? (await fs13.stat(file)).mtimeMs : owner.at;
+          owner = readSlot(await fs14.readFile(file, "utf8"));
+          writtenAt = owner === null ? (await fs14.stat(file)).mtimeMs : owner.at;
         } catch (error) {
           const err2 = error;
           if (err2.code !== "ENOENT") throw err2;
@@ -8090,11 +8252,11 @@ async function acquireSlot(dir, waitMs = SLOT_WAIT_MS) {
         }
         const tooOld = Date.now() - writtenAt > SLOT_STALE_MS;
         if (tooOld || owner !== null && !pidAlive(owner.pid)) {
-          await fs13.rm(file, { force: true });
+          await fs14.rm(file, { force: true });
         }
       }
     } finally {
-      await fs13.rm(claim, { force: true });
+      await fs14.rm(claim, { force: true });
     }
     if (Date.now() >= deadline) return { ok: false, reason: MACHINE_BUSY };
     await delay(POLL_MS);
@@ -8103,15 +8265,15 @@ async function acquireSlot(dir, waitMs = SLOT_WAIT_MS) {
 
 // src/state.ts
 import { createHash as createHash2, randomBytes as randomBytes3 } from "node:crypto";
-import { promises as fs14 } from "node:fs";
-import * as path19 from "node:path";
+import { promises as fs15 } from "node:fs";
+import * as path20 from "node:path";
 import { setTimeout as delay2 } from "node:timers/promises";
 var MAX_CACHE_ENTRIES = 5e3;
 var MAX_REPORTED_ENTRIES = 5e3;
 var MAX_LOG_BYTES = 1024 * 1024;
 var LOCK_POLL_MS = 200;
 function stateDirFor(gitDir) {
-  return path19.join(gitDir, "stop-rules");
+  return path20.join(gitDir, "stop-rules");
 }
 function emptyState() {
   return { version: 1, reported: {}, sessions: {} };
@@ -8122,7 +8284,7 @@ function emptyCache() {
 async function readJson(file) {
   let text;
   try {
-    text = await fs14.readFile(file, "utf8");
+    text = await fs15.readFile(file, "utf8");
   } catch (error) {
     const err2 = error;
     if (err2.code === "ENOENT") return null;
@@ -8138,16 +8300,16 @@ async function readJson(file) {
 }
 async function writeJsonAtomic(file, value2) {
   const temp = `${file}.tmp-${process.pid}-${randomBytes3(4).toString("hex")}`;
-  await fs14.mkdir(path19.dirname(file), { recursive: true });
-  await fs14.writeFile(temp, `${JSON.stringify(value2)}
+  await fs15.mkdir(path20.dirname(file), { recursive: true });
+  await fs15.writeFile(temp, `${JSON.stringify(value2)}
 `, "utf8");
-  await fs14.rename(temp, file);
+  await fs15.rename(temp, file);
 }
 function isRecord2(value2) {
   return typeof value2 === "object" && value2 !== null && !Array.isArray(value2);
 }
 async function loadState(stateDir) {
-  const file = path19.join(stateDir, "state.json");
+  const file = path20.join(stateDir, "state.json");
   const raw = await readJson(file);
   if (raw === null) return emptyState();
   if (!isRecord2(raw)) {
@@ -8176,10 +8338,10 @@ function prune(entries, at, max) {
 }
 async function saveState(stateDir, state) {
   prune(state.reported, (value2) => value2, MAX_REPORTED_ENTRIES);
-  await writeJsonAtomic(path19.join(stateDir, "state.json"), state);
+  await writeJsonAtomic(path20.join(stateDir, "state.json"), state);
 }
 async function loadCache(stateDir) {
-  const file = path19.join(stateDir, "cache.json");
+  const file = path20.join(stateDir, "cache.json");
   const raw = await readJson(file);
   if (raw === null) return emptyCache();
   if (!isRecord2(raw) || !isRecord2(raw["entries"])) {
@@ -8188,11 +8350,11 @@ async function loadCache(stateDir) {
   return { version: 1, entries: raw["entries"] };
 }
 async function resetState(stateDir) {
-  await writeJsonAtomic(path19.join(stateDir, "state.json"), emptyState());
+  await writeJsonAtomic(path20.join(stateDir, "state.json"), emptyState());
 }
 async function saveCache(stateDir, cache) {
   prune(cache.entries, (value2) => value2.at, MAX_CACHE_ENTRIES);
-  await writeJsonAtomic(path19.join(stateDir, "cache.json"), cache);
+  await writeJsonAtomic(path20.join(stateDir, "cache.json"), cache);
 }
 function reportedKey(ruleId2, chunkText2) {
   return createHash2("sha256").update(`${ruleId2}\0${chunkText2}`, "utf8").digest("hex");
@@ -8209,12 +8371,12 @@ function pidAlive2(pid) {
   }
 }
 async function acquireLock(stateDir, timeoutMs = 6e4) {
-  await fs14.mkdir(stateDir, { recursive: true });
-  const lockPath = path19.join(stateDir, "lock");
+  await fs15.mkdir(stateDir, { recursive: true });
+  const lockPath = path20.join(stateDir, "lock");
   const deadline = Date.now() + timeoutMs;
   for (; ; ) {
     try {
-      const handle3 = await fs14.open(lockPath, "wx");
+      const handle3 = await fs15.open(lockPath, "wx");
       try {
         await handle3.writeFile(String(process.pid), "utf8");
       } finally {
@@ -8222,8 +8384,8 @@ async function acquireLock(stateDir, timeoutMs = 6e4) {
       }
       return async () => {
         try {
-          const owner = await fs14.readFile(lockPath, "utf8");
-          if (owner.trim() === String(process.pid)) await fs14.rm(lockPath, { force: true });
+          const owner = await fs15.readFile(lockPath, "utf8");
+          if (owner.trim() === String(process.pid)) await fs15.rm(lockPath, { force: true });
         } catch (error) {
           const err2 = error;
           if (err2.code !== "ENOENT") {
@@ -8238,14 +8400,14 @@ async function acquireLock(stateDir, timeoutMs = 6e4) {
     }
     let ownerPid = 0;
     try {
-      ownerPid = Number.parseInt((await fs14.readFile(lockPath, "utf8")).trim(), 10);
+      ownerPid = Number.parseInt((await fs15.readFile(lockPath, "utf8")).trim(), 10);
     } catch (readError) {
       const err2 = readError;
       if (err2.code !== "ENOENT") throw err2;
       continue;
     }
     if (!pidAlive2(ownerPid)) {
-      await fs14.rm(lockPath, { force: true });
+      await fs15.rm(lockPath, { force: true });
       continue;
     }
     if (Date.now() >= deadline) return null;
@@ -8253,19 +8415,19 @@ async function acquireLock(stateDir, timeoutMs = 6e4) {
   }
 }
 async function appendRunLog(stateDir, line) {
-  const logPath = path19.join(stateDir, "run.log");
-  await fs14.mkdir(stateDir, { recursive: true });
-  await fs14.appendFile(logPath, `${JSON.stringify(line)}
+  const logPath = path20.join(stateDir, "run.log");
+  await fs15.mkdir(stateDir, { recursive: true });
+  await fs15.appendFile(logPath, `${JSON.stringify(line)}
 `, "utf8");
-  const stats = await fs14.stat(logPath);
+  const stats = await fs15.stat(logPath);
   if (stats.size <= MAX_LOG_BYTES) return;
-  const contents = await fs14.readFile(logPath, "utf8");
+  const contents = await fs15.readFile(logPath, "utf8");
   const lines = contents.split("\n").filter((entry) => entry.length > 0);
   const kept = lines.slice(Math.floor(lines.length / 2));
   const temp = `${logPath}.tmp-${process.pid}-${randomBytes3(4).toString("hex")}`;
-  await fs14.writeFile(temp, `${kept.join("\n")}
+  await fs15.writeFile(temp, `${kept.join("\n")}
 `, "utf8");
-  await fs14.rename(temp, logPath);
+  await fs15.rename(temp, logPath);
 }
 
 // src/check.ts
@@ -8301,7 +8463,7 @@ async function run2(options) {
     notes.push(message);
   };
   const repo = options.repo;
-  const rulesPath = options.rulesPath ? path20.resolve(options.cwd, options.rulesPath) : path20.join(repo.root, ".stop-rules.md");
+  const rulesPath = options.rulesPath ? path21.resolve(options.cwd, options.rulesPath) : path21.join(repo.root, ".stop-rules.md");
   const rulesLoad = await loadRules(rulesPath);
   if (!rulesLoad.ok) return cannotRun(rulesLoad.reason);
   const settingsLoad = await loadSettings(repo.root);
@@ -8344,10 +8506,10 @@ async function run2(options) {
   }
 }
 async function diffFileWork(args2, diffFile) {
-  const full = path20.resolve(args2.options.cwd, diffFile);
+  const full = path21.resolve(args2.options.cwd, diffFile);
   let text;
   try {
-    text = await fs15.readFile(full, "utf8");
+    text = await fs16.readFile(full, "utf8");
   } catch (error) {
     const err2 = error;
     return { ok: false, reason: `could not read the diff file ${full}: ${err2.code ?? err2.message}` };
@@ -8399,7 +8561,7 @@ async function workingTreeWork(args2, state) {
   } else {
     baseline = await emptyTree(repo.root);
   }
-  const rulesRelative = path20.relative(repo.root, rulesPath).split(path20.sep).join("/");
+  const rulesRelative = path21.relative(repo.root, rulesPath).split(path21.sep).join("/");
   const parsed = parseDiff(await diffTrees(repo.root, baseline, snapshot), [rulesRelative]);
   const against = options.base === void 0 ? "the last check" : `${options.base}`;
   return {
@@ -8589,18 +8751,18 @@ ${text}` };
 }
 
 // src/repo.ts
-import { promises as fs16 } from "node:fs";
-import * as path21 from "node:path";
-var VENDORED_TAIL = path21.join(".stop-rules", "stop-rules.mjs");
+import { promises as fs17 } from "node:fs";
+import * as path22 from "node:path";
+var VENDORED_TAIL = path22.join(".stop-rules", "stop-rules.mjs");
 async function vendoredIn(selfPath) {
   if (!selfPath.endsWith(VENDORED_TAIL)) return null;
-  const repo = await findRepo(path21.dirname(selfPath));
+  const repo = await findRepo(path22.dirname(selfPath));
   return repo === null ? null : repo.root;
 }
 async function resolveRepo(request) {
-  const from = request.dir === void 0 ? request.cwd : path21.resolve(request.cwd, request.dir);
+  const from = request.dir === void 0 ? request.cwd : path22.resolve(request.cwd, request.dir);
   try {
-    const info2 = await fs16.stat(from);
+    const info2 = await fs17.stat(from);
     if (!info2.isDirectory()) return { ok: false, kind: "no-repo", reason: `${from} is not a directory.` };
   } catch (error) {
     const err2 = error;
@@ -8626,8 +8788,8 @@ async function resolveRepo(request) {
 }
 
 // src/init.ts
-import { promises as fs17 } from "node:fs";
-import * as path22 from "node:path";
+import { promises as fs18 } from "node:fs";
+import * as path23 from "node:path";
 var NO_LANGUAGES = "no source files in a supported language yet: run stop-rules init again after you add some";
 var BUNDLE_PATH = ".stop-rules/stop-rules.mjs";
 var BUNDLE_NAME = "stop-rules.mjs";
@@ -8653,7 +8815,7 @@ function failure(repo, reason) {
 }
 function bundleSource(selfPath) {
   if (isBundled()) return selfPath;
-  return path22.join(path22.dirname(selfPath), BUNDLE_NAME);
+  return path23.join(path23.dirname(selfPath), BUNDLE_NAME);
 }
 async function init2(options) {
   const resolved = await resolveRepo({ cwd: options.dir, selfPath: options.selfPath });
@@ -8720,11 +8882,11 @@ async function init2(options) {
   }
   if (wroteKeys.length > 0) report.settings = { path: SETTINGS_FILE, wrote: wroteKeys };
   const source = bundleSource(options.selfPath);
-  const target = path22.join(root, BUNDLE_PATH);
-  if (path22.resolve(source) !== path22.resolve(target)) {
+  const target = path23.join(root, BUNDLE_PATH);
+  if (path23.resolve(source) !== path23.resolve(target)) {
     try {
-      await fs17.mkdir(path22.dirname(target), { recursive: true });
-      await fs17.copyFile(source, target);
+      await fs18.mkdir(path23.dirname(target), { recursive: true });
+      await fs18.copyFile(source, target);
       report.bundle.written = true;
     } catch (error) {
       const err2 = error;
@@ -8735,13 +8897,13 @@ async function init2(options) {
     }
   }
   try {
-    report.grammars = cut === "functions" ? await copyGrammars(root) : { languages: [], added: [], kept: [], bytes: await folderBytes(path22.join(root, VENDOR_DIR)) };
+    report.grammars = cut === "functions" ? await copyGrammars(root) : { languages: [], added: [], kept: [], bytes: await folderBytes(path23.join(root, VENDOR_DIR)) };
   } catch (error) {
     return failure(root, error instanceof Error ? error.message : String(error));
   }
-  const rulesPath = path22.join(root, ".stop-rules.md");
+  const rulesPath = path23.join(root, ".stop-rules.md");
   try {
-    await fs17.writeFile(rulesPath, STARTER_RULES, { encoding: "utf8", flag: "wx" });
+    await fs18.writeFile(rulesPath, STARTER_RULES, { encoding: "utf8", flag: "wx" });
     report.rules.created = true;
   } catch (error) {
     const err2 = error;
@@ -8806,15 +8968,15 @@ async function languagesInRepo(root) {
 async function copyIfNew(source, target) {
   let fresh = true;
   try {
-    await fs17.access(target);
+    await fs18.access(target);
     fresh = false;
   } catch (error) {
     const err2 = error;
     if (err2.code !== "ENOENT") throw new Error(`could not look at ${target}: ${err2.message}`);
   }
-  await fs17.mkdir(path22.dirname(target), { recursive: true });
+  await fs18.mkdir(path23.dirname(target), { recursive: true });
   try {
-    await fs17.copyFile(source, target);
+    await fs18.copyFile(source, target);
   } catch (error) {
     const err2 = error;
     throw new Error(
@@ -8825,24 +8987,24 @@ async function copyIfNew(source, target) {
 }
 async function folderBytes(dir) {
   let total = 0;
-  const entries = await fs17.readdir(dir, { withFileTypes: true });
+  const entries = await fs18.readdir(dir, { withFileTypes: true });
   for (const entry of entries) {
-    const full = path22.join(dir, entry.name);
+    const full = path23.join(dir, entry.name);
     if (entry.isDirectory()) total += await folderBytes(full);
-    else total += (await fs17.stat(full)).size;
+    else total += (await fs18.stat(full)).size;
   }
   return total;
 }
 async function copyGrammars(root) {
   const from = vendorDir();
-  const into = path22.join(root, VENDOR_DIR);
+  const into = path23.join(root, VENDOR_DIR);
   const languages = await languagesInRepo(root);
-  await copyIfNew(runtimeWasmPath(from), path22.join(into, "tree-sitter.wasm"));
+  await copyIfNew(runtimeWasmPath(from), path23.join(into, "tree-sitter.wasm"));
   const added = [];
   const kept = [];
   for (const key of languages) {
     const name2 = grammarWasmName(key);
-    const fresh = await copyIfNew(grammarWasmPath(key, from), path22.join(into, "grammars", name2));
+    const fresh = await copyIfNew(grammarWasmPath(key, from), path23.join(into, "grammars", name2));
     if (fresh) added.push(name2);
     else kept.push(name2);
   }
@@ -9075,9 +9237,9 @@ async function systemone(request, env) {
   );
 }
 async function route(request, env) {
-  const path23 = new URL(request.url).pathname.replace(/\/+$/, "");
-  if (request.method === "GET" && (path23 === "" || path23.endsWith("/health"))) return health(env);
-  if (request.method === "POST" && path23.endsWith("/v1/systemone")) return systemone(request, env);
+  const path24 = new URL(request.url).pathname.replace(/\/+$/, "");
+  if (request.method === "GET" && (path24 === "" || path24.endsWith("/health"))) return health(env);
+  if (request.method === "POST" && path24.endsWith("/v1/systemone")) return systemone(request, env);
   return json(404, {
     error: "not_found",
     message: "stop-rules serves GET /health and POST /v1/systemone"
