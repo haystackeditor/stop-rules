@@ -110,7 +110,7 @@ Scores move a little between runs and between Jev versions, so yours will not be
 
 | File | What it is |
 |---|---|
-| `stop-rules-demo.svg` | the animated graphic, five beats in a 32 second loop, light and dark |
+| `stop-rules-demo.svg` | the animated graphic, five beats in a 32 second loop, in Haystack's dark palette |
 | `stop-rules-demo.png` | the same five beats stacked, as a still image |
 | `stop-rules-demo-static.svg` | the source of that PNG |
 | `project/` | the small TypeScript project: `src/http.ts` holds `httpGet` and `httpDelete`, `src/team.ts` uses them |
