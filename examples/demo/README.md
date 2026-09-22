@@ -1,56 +1,50 @@
 # The stop-rules demo
 
-![The change the agent wrote across the top, then two columns, Jev and GPT-6 Luna with reasoning low, each scoring the same three rules and sending the same findings back; Jev answers first](stop-rules-demo.gif)
+![A Claude Code window on the left where the agent adds src/user.ts, a Stop hook box in the middle that fires when the agent's turn ends, and Jev and GPT-6 Luna on the right checking the same change against three rules; Jev answers in 0.20 s, Luna in 2.64 s, the code goes back, the agent fixes it, and the second check comes back clean](stop-rules-demo.gif)
 
-The demo is one page that compares two judges running the same stop hook check at the same
-moment: Jev, and GPT-6 Luna with low reasoning. The change the agent wrote runs across the top.
-Under it, each judge has its own column: the three rules, which fill with score chips when that
-judge answers, the findings it sends back to the agent, a status line with a timer, and four
-numbers.
+One page, three regions, one lit at a time. On the left, a Claude Code window: the agent
+adds `src/user.ts` (an Update tool call with its diff), ends its turn, and the prompt comes
+back. That moment fires the Stop hook box in the middle. On the right, Jev and GPT-6 Luna
+check the same change against the same three rules at the same instant, each with a timer
+and a running dollar figure. Jev stops at 0.20 s. Luna keeps going to 2.64 s, then also shows
+the exact line it quoted for each rule. The code goes back to the agent: Claude Code shows the
+hook's real feedback line, the agent rewrites the file with the project's helpers, ends its
+turn again, the hook fires again, and both judges come back clean. The timers and dollars
+carry over from the first check to the second, so nothing on screen ever resets.
 
-In turn 1 the agent adds `src/user.ts` with a direct `fetch`, a catch that drops the error and a
-TODO stub. Both judges start at the same instant. Jev answers in 0.362 s and GPT-6 Luna in
-1.881 s, and both score all three rules at or above the 0.6 bar, so three findings go back.
-In turn 2 the agent rewrites the piece with the project's `httpGet` helper. Jev answers in
-0.400 s and GPT-6 Luna in 1.695 s, and both score it clean.
-
-The four numbers under each column are the time spent waiting on the judge, its cost per 1,000
-checks, and how many of 32 real breaks it caught and how many plainly false alarms it raised on
-240 blind-labelled agent-written changes. The better of the two in each is blue. Jev is faster
-and cheaper and raises fewer false alarms; GPT-6 Luna catches more real breaks.
-
-The GIF above is one loop at 1x (21.4 s). The page itself is [`page/index.html`](page/index.html);
-open it in a browser for Pause, Restart and 2x speed. It loads Haystack's fonts from a `fonts/`
-folder next to it, which is not in this repository, so a clone shows the system fonts instead.
-[`stop-rules-demo.png`](stop-rules-demo.png) is four stills of the page: Jev done while GPT-6
-Luna is still running, both judged, both handed back, and turn 2 clean.
+The GIF is one loop at 1x (22.2 s, 1280 wide). [`stop-rules-demo.mp4`](stop-rules-demo.mp4)
+is the same loop at 1280 x 806, 30 fps, and [`stop-rules-demo-4k.mp4`](stop-rules-demo-4k.mp4)
+at 3840 x 2418, 60 fps; both are the graphic alone, with no header or footer. The page itself
+is [`page/index.html`](page/index.html): open it in a browser for Pause, Restart and 2x. It
+loads Haystack's fonts from a `fonts/` folder next to it, which is not in this repository, so a
+clone shows the system fonts instead.
 
 ## Where each number on the page comes from
 
-Every number is written into the page when it is built, read from the comparison's
-`summary.json` (`reports/2026-09-22-jev-vs-luna/` in the workbench), not typed in. The two turns
-were timed and scored in one sitting at 20:46Z and 20:47Z on 22 September 2026, on this demo at
-commit a7ba284, 5 calls per judge per turn after one warm-up.
+Every number is read from the comparison's `summary.json`
+(`reports/2026-09-22-jev-vs-luna/` in the private workbench) when the page is built. Jev is
+`jev-1.13.0`; GPT-6 Luna is `gpt-6-luna` asked the review form (one call per change, findings
+with the quoted line) at low reasoning effort.
 
-| On the page | Jev | GPT-6 Luna, reasoning low | Source in `summary.json` |
+| On the page | Jev | GPT-6 Luna | Source |
 |---|---|---|---|
-| turn 1 scores (fetch, errors, stub) | 0.94, 0.87, 0.95 | 0.99, 0.99, 0.99 | `demoTurn`, the per-rule median of the 5 `broken` runs |
-| turn 1 time | 0.362 s | 1.881 s | `demoTurn`, `broken.callMedianMs`, the call alone |
-| turn 2 scores | 0.06, 0.07, 0.04 | 0.05, 0.05, 0.05 | `demoTurn`, the per-rule median of the 5 `repaired` runs |
-| turn 2 time | 0.400 s | 1.695 s | `demoTurn`, `repaired.callMedianMs` |
-| $ per 1,000 checks | $0.033 | $0.183 | runs `hunks-240` and `luna-240-low` |
-| real breaks caught, of 32 | 20 | 29 | same runs, bar 0.5 |
-| plainly false, and not ruled | 10, +11 | 17, +52 | same runs |
+| first check, time | 0.20 s | 2.64 s | `workingSet`: median per change over the 240 corpus changes (Jev: the check's engine wall, 197.6 ms; Luna: `latencyMsPerChange.median`, 2,643 ms) |
+| first check, dollars | $0.08 | $0.21 | `workingSet`: `costPerChange.medianCents` (0.0084 and 0.0212 cents per change) times 1,000 changes |
+| second check, time | 0.40 s | 1.01 s | `demoTurn`, `repaired.callMedianMs` on this demo's repaired file, 5 calls after a warm-up |
+| second check, dollars | $0.04 | $0.07 | `demoTurn`, `repaired.dollarsPerCall` times 1,000 |
+| totals shown at the end | 0.60 s, $0.12 | 3.65 s, $0.28 | the two checks added |
+| rules and quoted lines | | | `demoTurn.rules` and the review-form findings on the broken piece |
 
-- **Rule order.** Both judges answer `q0_0`, `q0_1` and `q0_2`, which `summary.json` maps to the
-  rules in the order they appear in `.stop-rules.md`: the `fetch` rule, the errors rule, the stub
-  rule. The page checks that mapping against the rule text when it is built.
-- **Question form.** GPT-6 Luna is asked the same question as Jev, a probability per rule. The
-  comparison also measured a review form (findings with the quoted line); the page does not show it.
-- **The bar.** The catches and false alarms are at the comparison's bar of 0.5. The demo runs at
-  the tool's default of 0.6, and the source line under the columns says so.
-- **Not ruled.** These are flags no reviewer has ruled on yet. They are neither confirmed breaks
-  nor confirmed false alarms.
+- **A typical change** in the working set is 3 hunks and 26 added lines (medians), with the
+  tool's six rules. The first check uses those medians because the demo file is a toy; the
+  second check uses the demo's own repaired file because the working set has no clean-pass
+  measurement.
+- **Dollars are per 1,000 changes.** The per-change cost is a fraction of a cent for both
+  judges, so the page shows what 1,000 such changes cost. The footer says so.
+- **Rule order.** Both judges answer `q0_0`, `q0_1` and `q0_2`, which map to the rules in the
+  order they appear in `.stop-rules.md`: the `fetch` rule, the errors rule, the stub rule.
+- **Not on the page.** Catch rates and false alarms are in the "Quality and cost" section
+  below, not on the graphic.
 
 ## The project
 

@@ -3,285 +3,439 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>stop-rules demo</title>
-<link rel="icon" type="image/svg+xml" href="brand/favicon.svg">
+<title>stop-rules, a stop hook</title>
+<link rel="icon" href="brand/favicon.svg" type="image/svg+xml">
 <style>
-@font-face{font-family:"Archivo";font-weight:800;font-display:swap;src:url(fonts/archivo-800.woff2) format("woff2")}
-@font-face{font-family:"Archivo";font-weight:700;font-display:swap;src:url(fonts/archivo-700.woff2) format("woff2")}
-@font-face{font-family:"Inter";font-weight:400;font-display:swap;src:url(fonts/inter-400.woff2) format("woff2")}
-@font-face{font-family:"Inter";font-weight:500;font-display:swap;src:url(fonts/inter-500.woff2) format("woff2")}
-@font-face{font-family:"Inter";font-weight:600;font-display:swap;src:url(fonts/inter-600.woff2) format("woff2")}
-@font-face{font-family:"JetBrains Mono";font-weight:500;font-display:swap;src:url(fonts/jetbrains-mono-500.woff2) format("woff2")}
-:root{color-scheme:dark;--void:#05080f;--panel:#0b111f;--panel2:#0e1526;--card:#0c1220;--line:#1a2540;--line2:#26334e;
---text:#e9eef8;--muted:#8592a9;--faint:#566079;--blue:#4f8dff;--cyan:#58d7ff;--pass:#46e0a0;--fail:#ff6a5d;
---display:"Archivo",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
---sans:"Inter",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
---mono:"JetBrains Mono",ui-monospace,"SF Mono",Menlo,monospace}
-*{box-sizing:border-box}
-body{margin:0;background:var(--void);color:var(--text);font-family:var(--sans);font-size:17px;line-height:1.5}
-.wrap{max-width:1240px;margin:0 auto;padding:0 28px}
-header{border-bottom:1px solid var(--line)}
-header .wrap{display:flex;align-items:center;gap:12px;height:60px}
-.mark{width:28px;height:28px}
-.wordmark{font-family:var(--display);font-weight:800;font-size:20px;letter-spacing:-.02em}
-.sep{width:1px;height:22px;background:var(--line)}
-.label{font-family:var(--mono);font-weight:500;font-size:14px;letter-spacing:.17em;text-transform:uppercase;color:var(--faint)}
-h1{font-family:var(--display);font-weight:800;font-size:clamp(30px,4vw,44px);letter-spacing:-.03em;line-height:1.08;margin:26px 0 10px}
-.lede{color:var(--muted);max-width:1000px;margin:0 0 16px;font-size:18px}
-.lede b{color:var(--text);font-weight:600}
-.controls{display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin-bottom:14px}
-button{font-family:var(--sans);font-size:15px;font-weight:500;color:var(--text);background:var(--panel2);border:1px solid var(--line2);
-border-radius:8px;padding:8px 14px;cursor:pointer}
-button.on{background:rgba(79,141,255,.16);border-color:var(--blue);color:#fff}
+@font-face{font-family:Archivo;font-weight:800;font-display:block;src:url(fonts/archivo-800.woff2) format("woff2")}
+@font-face{font-family:Inter;font-weight:400;font-display:block;src:url(fonts/inter-400.woff2) format("woff2")}
+@font-face{font-family:Inter;font-weight:500;font-display:block;src:url(fonts/inter-500.woff2) format("woff2")}
+@font-face{font-family:Inter;font-weight:600;font-display:block;src:url(fonts/inter-600.woff2) format("woff2")}
+@font-face{font-family:"JetBrains Mono";font-weight:500;font-display:block;src:url(fonts/jetbrains-mono-500.woff2) format("woff2")}
+:root{
+  --ground:#05080f;--panel:#0b111f;--card:#0c1220;--line:#1a2540;
+  --text:#e9eef8;--muted:#8592a9;--faint:#566079;
+  --blue:#4f8dff;--red:#ff5f57;--green:#4ade80;--cyan:#58d7ff;--pass:#46e0a0;--fail:#ff6a5d;
+  --display:Archivo,system-ui,sans-serif;--body:Inter,system-ui,sans-serif;--mono:"JetBrains Mono",ui-monospace,monospace;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{background:var(--ground);color:var(--text)}
+body{font:400 16px/1.5 var(--body);min-height:100vh;display:flex;justify-content:center}
+.wrap{width:100%;max-width:1280px;padding:14px 24px 12px;display:flex;flex-direction:column;gap:16px}
+
+header{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.lockup{display:flex;align-items:center;gap:8px;font:800 20px/1.5 var(--display);letter-spacing:-.01em}
+.lockup img{width:28px;height:28px;display:block}
+.controls{display:flex;gap:8px}
+button{font:500 16px/1.5 var(--body);color:var(--text);background:var(--card);border:1px solid var(--line);border-radius:8px;padding:4px 14px;cursor:pointer}
+button:hover{border-color:var(--blue)}
+button[aria-pressed="true"]{border-color:var(--blue);color:var(--blue)}
 button:focus-visible{outline:2px solid var(--blue);outline-offset:2px}
-.dots{display:flex;gap:6px;margin-left:auto}
-.dot{width:26px;height:4px;border-radius:2px;background:var(--line2)}
-.dot.on{background:var(--cyan)}
-.pane{background:var(--card);border:1px solid var(--line);border-radius:12px;overflow:hidden}
-.phead{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:10px 16px;border-bottom:1px solid var(--line);background:var(--panel)}
-.pmeta{font-family:var(--mono);font-size:14px;color:var(--muted);text-align:right}
-.pbody{padding:12px 16px}
-.change .pbody{display:grid;grid-template-columns:1fr 1fr;gap:4px 24px}
-.fname{font-family:var(--mono);font-size:15px;color:var(--muted);margin-bottom:6px;grid-column:1/-1}
-.code{font-family:var(--mono);font-weight:500;font-size:17px;line-height:1.55;font-variant-ligatures:none}
-.ln{display:grid;grid-template-columns:30px 1fr;gap:10px;padding:0 6px;border-radius:4px}
-.ln .n{color:var(--faint);text-align:right}
-.ln .c{white-space:pre-wrap;word-break:break-word;padding-left:1.2ch;text-indent:-1.2ch}
-.ln.bad{background:rgba(255,106,93,.13);color:var(--fail)}
-.ln.good{background:rgba(70,224,160,.11);color:var(--pass)}
-.gap .c{color:var(--faint)}
-.cols{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:14px}
-.col{display:flex;flex-direction:column;gap:12px}
-.chead{display:flex;align-items:baseline;justify-content:space-between;gap:10px;border-bottom:2px solid var(--line2);padding:2px 2px 8px}
-.chead h2{font-family:var(--display);font-weight:800;font-size:26px;letter-spacing:-.02em;margin:0}
-.chead .pmeta{font-size:14px}
-.rule{display:grid;grid-template-columns:124px 1fr;gap:12px;align-items:center;padding:6px 10px;border:1px solid var(--line);
-border-radius:10px;margin-bottom:8px;background:var(--panel2)}
-.rule:last-child{margin-bottom:0}
-.rule.hit{border-color:rgba(255,106,93,.45)}
-.chip{font-family:var(--mono);font-size:19px;font-weight:500;text-align:center;border-radius:6px;padding:0;height:40px;display:flex;align-items:center;justify-content:center;background:var(--panel);color:var(--faint);border:1px solid var(--line2)}
-.chip.hit{background:rgba(255,106,93,.16);color:var(--fail);border-color:rgba(255,106,93,.5)}
-.chip.low{background:rgba(70,224,160,.08);color:var(--muted)}
-.chip.nm{font-size:15px}
-.rtext{font-weight:600;font-size:17px;line-height:1.3}
-.cards{min-height:176px}
-.card{display:flex;gap:12px;align-items:baseline;border-radius:10px;padding:8px 12px;margin-bottom:8px;border:1px solid rgba(255,106,93,.45);background:rgba(255,106,93,.08)}
-.card:last-child{margin-bottom:0}
-.card.clean{border-color:rgba(70,224,160,.45);background:rgba(70,224,160,.08)}
-.card.nm{border-color:var(--line2);background:var(--panel2)}
-.card .what{font-weight:600;font-size:17px}
-.v{font-family:var(--mono);font-size:15px;white-space:nowrap;min-width:108px}.v.b{color:var(--fail)}.v.c{color:var(--pass)}.v.n{color:var(--muted)}
-.empty{color:var(--faint);font-size:16px;padding:4px 0}
-.status{display:flex;align-items:center;gap:12px;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 16px;min-height:66px}
-.judge{font-family:var(--mono);font-size:14px;letter-spacing:.1em;text-transform:uppercase;padding:4px 10px;border-radius:999px;border:1px solid var(--line2);color:var(--muted);white-space:nowrap}
-.judge.live{background:rgba(79,141,255,.18);border-color:var(--blue);color:#fff}
-.stext{font-size:18px;font-weight:600;line-height:1.3}
-.timer{margin-left:auto;font-family:var(--mono);font-size:28px;color:var(--muted);white-space:nowrap}
-.timer.live{color:#fff}.timer.done{color:var(--blue)}
-.score{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
-.cell{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:10px 12px}
-.big{font-family:var(--mono);font-size:26px;font-weight:500;line-height:1.15;white-space:nowrap}
-.big.best{color:var(--blue)}
-.cell .label{display:block;margin-top:4px;font-size:14px;letter-spacing:.06em;line-height:1.3}
-.csub{font-size:15px;color:var(--muted)}
-.source{color:var(--muted);font-size:15px;margin-top:12px}
-footer{color:var(--muted);font-size:15px;margin:22px 0 44px;padding-top:16px;border-top:1px solid var(--line)}
-footer a{color:var(--blue)}
-code{font-family:var(--mono);font-size:.92em}
-@media (max-width:900px){
-.wrap{padding:0 16px}
-.change .pbody{grid-template-columns:1fr}
-.cols{grid-template-columns:1fr}
-.score{grid-template-columns:1fr 1fr}
-.dots{margin-left:0}
+
+.intro h1{font:800 32px/1.5 var(--display);letter-spacing:-.02em;line-height:1.25}
+.intro h1 span{color:var(--blue)}
+.intro p{color:var(--muted);font-size:18px;margin-top:6px}
+
+.flow{display:grid;grid-template-columns:minmax(0,1fr) 150px minmax(0,1fr);column-gap:28px;align-items:stretch}
+.region{transition:opacity .25s}
+.region.dim{opacity:.4}
+.title{font:800 20px/1.5 var(--display)}
+
+/* coding CLI: a terminal window */
+.cli{display:flex;flex-direction:column;gap:12px;min-width:0;min-height:0}
+.win{flex:1;min-height:0;display:flex;flex-direction:column;border:1px solid var(--line);border-radius:10px;overflow:hidden;background:#03060b}
+.tbar{position:relative;display:flex;align-items:center;gap:8px;padding:0 12px;height:36px;background:var(--panel);border-bottom:1px solid var(--line);flex:none}
+.tbar i{width:12px;height:12px;border-radius:50%;display:block}
+.tbar i:nth-child(1){background:#ff5f57}.tbar i:nth-child(2){background:#febc2e}.tbar i:nth-child(3){background:#28c840}
+.tbar span{position:absolute;left:0;right:0;text-align:center;font:500 16px/1.45 var(--mono);color:var(--muted);pointer-events:none}
+.tbody{position:relative;flex:1;min-height:720px;overflow:hidden}
+.tscroll{position:absolute;left:20px;right:20px;bottom:18px;display:flex;flex-direction:column;gap:14px;font:500 16px/1.65 var(--mono);color:var(--text)}
+.blk{display:none;white-space:pre-wrap;overflow-wrap:anywhere}
+.blk.on{display:block}
+.user{color:var(--muted)}
+.msgl{padding-left:2ch;text-indent:-2ch}
+.blk .b{color:var(--text)}
+.blk .bt{color:var(--pass)}
+.blk strong{font-weight:500;color:var(--text);text-shadow:0 0 .6px currentColor}
+.sub{color:var(--muted);padding-left:5ch;text-indent:-5ch}
+.fb{color:var(--fail);padding-left:5ch}
+.dr{display:none;grid-template-columns:3ch 1ch minmax(0,1fr);column-gap:1ch;padding:6px 0}
+.dr.on{display:grid}
+.dr .ln{color:var(--faint);text-align:right}
+.dr .sg{color:var(--faint)}
+.dr .cd{white-space:pre-wrap;overflow-wrap:anywhere}
+.dr.add{background:rgba(70,224,160,.09)}
+.dr.add .sg{color:var(--pass)}
+.dr.del{background:rgba(255,106,93,.10)}
+.dr.del .sg{color:var(--fail)}
+.dr.fold .fd{grid-column:1/-1;color:var(--faint);padding-left:1ch}
+.k{color:var(--blue)}
+.st{color:var(--pass)}
+.cm{color:var(--faint)}
+.dr.hit{background:rgba(255,106,93,.22)}
+.dr.hit,.dr.hit .k,.dr.hit .st,.dr.hit .cm,.dr.hit .sg,.dr.hit .ln{color:var(--fail)}
+.pbox{border:1px solid var(--faint);border-radius:6px;padding:2px 10px}
+.cur{animation:blink 1s step-end infinite}
+@keyframes blink{50%{opacity:0}}
+
+/* stop hook */
+.hook{position:relative;display:flex;align-items:center;justify-content:center}
+.wire{position:absolute;left:-28px;right:-28px;top:50%;height:3px;margin-top:-1px;background:var(--line);transition:background .25s}
+.hook.fired .wire{background:var(--blue)}
+.pulse{position:absolute;top:50%;width:14px;height:14px;margin-top:-7px;border-radius:50%;opacity:0;left:0}
+.pulse.fwd{background:var(--blue);box-shadow:0 0 14px var(--blue)}
+.pulse.rev{background:var(--fail);box-shadow:0 0 14px var(--fail)}
+.node-back{position:relative;z-index:1;background:var(--ground);border-radius:12px}
+.node{background:var(--card);border:2px solid var(--line);border-radius:12px;padding:12px 10px;text-align:center;width:140px;white-space:nowrap;transition:opacity .25s,border-color .25s,box-shadow .25s}
+.node .hk{font:800 20px/1.5 var(--display);color:var(--text)}
+.node .s{font:500 16px/1.5 var(--body);color:var(--faint)}
+.hook.fired .node{border-color:var(--blue);box-shadow:0 0 0 6px rgba(79,141,255,.14),0 0 28px rgba(79,141,255,.35)}
+.hook.fired .node .s{color:var(--blue)}
+.hook .node .s.pass{color:var(--pass)}
+.ret{position:absolute;left:0;right:0;top:calc(50% + 64px);text-align:center;color:var(--fail);font:600 16px/1.5 var(--body);opacity:0;transition:opacity .25s}
+.ret b{display:block;font:800 22px/1.2 var(--display)}
+.ret.on{opacity:1}
+
+/* judges */
+.judges{display:flex;flex-direction:column;gap:28px;min-width:0}
+.lane{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:20px;display:flex;flex-direction:column;gap:12px}
+.lane-top{display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap}
+.n{font:800 22px/1.5 var(--display)}
+.meter{font:500 24px/1.5 var(--mono);color:var(--muted);white-space:nowrap}
+.timer{color:var(--faint);font-variant-numeric:tabular-nums}
+.lane.run .timer,.lane.done .timer{color:var(--text)}
+.bar{height:10px;border-radius:5px;background:#101a2e;overflow:hidden}
+.bar i{display:block;height:100%;width:0;border-radius:5px}
+#jev .bar i{background:var(--blue)}
+#luna .bar i{background:var(--cyan)}
+.rules{display:flex;flex-direction:column;gap:12px}
+.rule{display:grid;grid-template-columns:22px minmax(0,1fr);column-gap:8px;row-gap:2px;align-items:baseline;color:var(--muted)}
+.rule .q{grid-column:2}
+.rule .x{font-weight:600;color:var(--faint);text-align:center}
+.rule .x::before{content:"\2715"}
+.rule .q{font:500 16px/1.5 var(--mono);white-space:pre-wrap;overflow-wrap:anywhere;color:#ffb3ab;opacity:0;transition:opacity .2s}
+.rule.hit{color:var(--text)}
+.rule.hit .x{color:var(--fail)}
+.rule.hit .q{opacity:1}
+.rule.ok{color:var(--text)}
+.rule.ok .x{color:var(--pass)}
+.rule.ok .x::before{content:"\2713"}
+.note{color:var(--muted);min-height:24px}
+.lane.run .note{color:var(--cyan)}
+.note.clean{color:var(--pass);font-weight:600}
+
+footer{color:var(--faint)}
+*{font-variant-ligatures:none!important}
+
+@media (max-width:860px){
+  .wrap{padding:16px;gap:20px}
+  .intro h1{font-size:28px}
+  .intro p{font-size:16px}
+  .flow{grid-template-columns:1fr;grid-template-rows:auto 110px auto;row-gap:0}
+  .hook{justify-content:flex-start}
+  .wire{left:40px;right:auto;top:0;bottom:0;width:3px;height:auto;margin:0}
+  .pulse{left:34px!important;margin:0}
+  .node{width:auto;display:flex;gap:10px;align-items:baseline;padding:8px 14px}
+  .ret{left:auto;right:0;top:50%;transform:translateY(-50%);text-align:left}
+  .ret b{display:inline;margin-right:6px}
+  .rule{grid-template-columns:22px minmax(0,1fr)}
+  .rule .q{grid-column:2}
+  .judges{gap:20px}
+  .tbody{flex:none;min-height:0;height:640px}
 }
 </style>
 </head>
 <body>
-<header><div class="wrap"><svg class="mark" viewBox="0 0 48 48" aria-hidden="true"><mask id="pm0" maskUnits="userSpaceOnUse" x="-64" y="-64" width="176" height="176"><circle cx="24.00" cy="15.41" r="9.50" fill="#fff"/><circle cx="33.04" cy="21.97" r="11.50" fill="#000"/></mask><circle cx="24.00" cy="15.41" r="9.50" fill="#DFE7F5" mask="url(#pm0)"/><mask id="pm1" maskUnits="userSpaceOnUse" x="-64" y="-64" width="176" height="176"><circle cx="33.04" cy="21.97" r="9.50" fill="#fff"/><circle cx="29.58" cy="32.59" r="11.50" fill="#000"/></mask><circle cx="33.04" cy="21.97" r="9.50" fill="#DFE7F5" mask="url(#pm1)"/><mask id="pm2" maskUnits="userSpaceOnUse" x="-64" y="-64" width="176" height="176"><circle cx="29.58" cy="32.59" r="9.50" fill="#fff"/><circle cx="18.42" cy="32.59" r="11.50" fill="#000"/></mask><circle cx="29.58" cy="32.59" r="9.50" fill="#DFE7F5" mask="url(#pm2)"/><mask id="pm3" maskUnits="userSpaceOnUse" x="-64" y="-64" width="176" height="176"><circle cx="18.42" cy="32.59" r="9.50" fill="#fff"/><circle cx="14.96" cy="21.97" r="11.50" fill="#000"/></mask><circle cx="18.42" cy="32.59" r="9.50" fill="#DFE7F5" mask="url(#pm3)"/><mask id="pm4" maskUnits="userSpaceOnUse" x="-64" y="-64" width="176" height="176"><circle cx="14.96" cy="21.97" r="9.50" fill="#fff"/><circle cx="24.00" cy="15.41" r="11.50" fill="#000"/></mask><circle cx="14.96" cy="21.97" r="9.50" fill="#3B82F6" mask="url(#pm4)"/></svg><span class="wordmark">haystack</span><span class="sep"></span><span class="label">stop-rules demo</span></div></header>
-<main class="wrap">
-<h1>Watch a stop hook send broken code back</h1>
-<p class="lede">When a coding agent ends its turn, stop-rules cuts what it changed into pieces and asks a judge <b>one yes or no question per piece and rule</b>. A score of 0.6 or more means the rule is broken, and <b>that piece goes back to the agent</b> to fix before you see it. Here two judges run the same check at the same moment, <b>Jev and GPT-6 Luna</b>, each with its own measured speed, cost and catch rate.</p>
-<div class="controls">
-<button id="pause" type="button">Pause</button>
-<button id="restart" type="button">Restart</button>
-<button id="speed" type="button">2x speed</button>
-<div class="dots" id="dots" aria-hidden="true"></div>
+<div class="wrap">
+  <header>
+    <div class="lockup"><img src="brand/haystack-mark-on-dark.svg" alt="">haystack</div>
+    <div class="controls">
+      <button id="pause" type="button">Pause</button>
+      <button id="speed" type="button" aria-pressed="false">2x</button>
+      <button id="restart" type="button">Restart</button>
+    </div>
+  </header>
+
+  <section class="intro">
+    <h1><span>stop-rules</span> is a stop hook for coding agents.</h1>
+    <p>When the agent ends its turn, a judge checks the change against your rules. A broken rule sends the code back to the agent before you see it.</p>
+  </section>
+
+  <section class="flow">
+    <div class="cli region" id="r-cli">
+      <div class="title">Coding CLI</div>
+      <div class="win">
+        <div class="tbar"><i></i><i></i><i></i><span>claude</span></div>
+        <div class="tbody"><div class="tscroll" id="tscroll"></div></div>
+      </div>
+    </div>
+
+    <div class="hook" id="hook">
+      <div class="wire"></div>
+      <div class="pulse" id="pulse"></div>
+      <div class="node-back"><div class="node region" id="r-hook"><div class="hk">Stop hook</div><div class="s" id="hook-s">waiting</div></div></div>
+      <div class="ret" id="ret"><b>&#x2190;</b>back to the agent</div>
+    </div>
+
+    <div class="judges region" id="r-judges">
+      <div class="lane" id="jev">
+        <div class="lane-top">
+          <div class="n">Jev</div>
+          <div class="meter"><span class="timer" id="jev-t">0.00 s</span> · <span class="cents" id="jev-c">$0.00</span></div>
+        </div>
+        <div class="bar"><i id="jev-b"></i></div>
+        <div class="rules">
+          <div class="rule"><span class="x"></span><span>Calls fetch directly</span><span class="q">const response = await fetch(</span></div>
+          <div class="rule"><span class="x"></span><span>Swallows an error</span><span class="q">return null;</span></div>
+          <div class="rule"><span class="x"></span><span>Leaves a TODO stub</span><span class="q">// TODO: call the API once the delete endpoint is ready</span></div>
+        </div>
+        <div class="note" id="jev-s"></div>
+      </div>
+
+      <div class="lane" id="luna">
+        <div class="lane-top">
+          <div class="n">GPT-6 Luna</div>
+          <div class="meter"><span class="timer" id="luna-t">0.00 s</span> · <span class="cents" id="luna-c">$0.00</span></div>
+        </div>
+        <div class="bar"><i id="luna-b"></i></div>
+        <div class="rules">
+          <div class="rule"><span class="x"></span><span>Calls fetch directly</span><span class="q">const response = await fetch(</span></div>
+          <div class="rule"><span class="x"></span><span>Swallows an error</span><span class="q">return null;</span></div>
+          <div class="rule"><span class="x"></span><span>Leaves a TODO stub</span><span class="q">// TODO: call the API once the delete endpoint is ready</span></div>
+        </div>
+        <div class="note" id="luna-s"></div>
+      </div>
+    </div>
+  </section>
+
+  <footer>First check: medians over 240 real agent-written changes (a typical change is 3 hunks, 26 added lines). Second check: the repaired demo file. Dollar figures are per 1,000 changes. <span style="white-space:nowrap">jev-1.13.0</span> and <span style="white-space:nowrap">gpt-6-luna</span> (review form, low effort), 22 Sep 2026.</footer>
 </div>
-<section class="pane change"><div class="phead"><span class="label" id="turn"></span><span class="pmeta" id="fname"></span></div>
-<div class="pbody"><div class="code" id="codeA"></div><div class="code" id="codeB"></div></div></section>
-<div class="cols" id="cols"></div>
-<p class="source" id="source"></p>
-<footer id="foot"></footer>
-</main>
+
 <script>
 (function(){
-"use strict";
-const D = {"bar":0.6,"piece":{"file":"src/user.ts","from":1,"to":21},"rules":["Never call fetch directly, use httpGet","Do not silently swallow errors","No TODO stubs presented as finished"],"change":{"from":9,"lines":["export async function loadUser(id: string): Promise<User | null> {","  try {","    const response = await fetch(`${apiBase}/users/${encodeURIComponent(id)}`);","    return (await response.json()) as User;","  } catch {","    return null;","  }","}","","export async function deleteUser(id: string): Promise<boolean> {","  // TODO: call the API once the delete endpoint is ready","  return true;","}"],"bad":[11,13,14,19,20],"gap":"lines 1-8: import apiBase, interface User"},"fix":{"from":10,"lines":["export async function loadUser(id: string): Promise<User | null> {","  try {","    return await httpGet<User>(`${apiBase}/users/${encodeURIComponent(id)}`);","  } catch (error) {","    if (error instanceof HttpError && error.status === 404) return null;","    throw error;","  }","}","","export async function deleteUser(id: string): Promise<void> {","  await httpDelete(`${apiBase}/users/${encodeURIComponent(id)}`);","}"],"good":[12,14,15,20],"gap":"lines 1-9: imports, interface User"},"models":[{"key":"jev","label":"Jev","judge":"Jev","run":"hunks-240","t1":{"ms":362.3,"scores":[0.94,0.87,0.95],"runsMs":[406.1,355.8,320,575.6,362.3],"runScores":[[0.94,0.87,0.95],[0.93,0.88,0.96],[0.94,0.87,0.95],[0.94,0.87,0.95],[0.93,0.87,0.95]]},"t2":{"ms":400.1,"scores":[0.06,0.07,0.04],"runsMs":[425.5,348.2,375.4,431.2,400.1],"runScores":[[0.06,0.07,0.04],[0.05,0.07,0.04],[0.06,0.07,0.04],[0.06,0.07,0.04],[0.06,0.07,0.04]]},"per1000":0.03294909251101322,"caught":20,"real":32,"plainlyFalse":10,"notRuled":11,"bar":0.5},{"key":"low","label":"GPT-6 Luna, reasoning low","judge":"GPT-6 Luna","run":"luna-240-low","t1":{"ms":1881,"scores":[0.99,0.99,0.99],"runsMs":[1602,1922,1857,1881,1887],"runScores":[[0.99,0.99,0.99],[0.99,0.99,0.99],[0.99,0.99,0.99],[0.99,0.98,0.99],[0.99,0.99,0.99]]},"t2":{"ms":1695,"scores":[0.05,0.05,0.05],"runsMs":[1759,1371,2455,1695,1539],"runScores":[[0.05,0.05,0.05],[0.05,0.05,0.05],[0.05,0.05,0.05],[0.05,0.05,0.05],[0.05,0.05,0.05]]},"per1000":0.18255124378109452,"caught":29,"real":32,"plainlyFalse":17,"notRuled":52,"bar":0.5}],"session":"2026-09-22T20:46:23.017Z","t2Session":"2026-09-22T20:47:10.051Z"};
-const $ = id => document.getElementById(id);
-const esc = s => s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
-const J = D.models;
-let t = 0, playing = true, speed = 1, last = null, recording = false;
+  /* Numbers, all from reports/2026-09-22-jev-vs-luna/summary.json, demoTurn (the check the viewer watches).
+     (The broken-piece values below are kept for the record; the page no longer shows them.
+     The first check uses workingSet, next comment. The second check uses the repaired values.)
+     Timings are call medians of 5 timed calls:
+       Jev broken 362.3 ms, repaired 400.1 ms (rows[jev].broken/repaired.callMedianMs).
+       Luna review-low broken 3622 ms, repaired 1008 ms (rows[review-low].broken/repaired.callMedianMs).
+     Cost is dollars per call from rows[...].broken/repaired.dollarsPerCall, shown in cents and
+     rounded to one significant figure:
+       Jev broken 3.6288e-05 $ = 0.0036 cents -> 0.004; repaired 3.7968e-05 $ = 0.0038 cents -> 0.004.
+       Luna review-low broken: five calls 0.0002194 / 0.0002054 / 0.0002264 / 0.0002314 / 0.0002764 $;
+       median 0.0002264 $ = 0.023 cents -> 0.02 (the first call, 0.0002194, rounds the same);
+       repaired 6.98e-05 $ (all five calls) = 0.0070 cents -> 0.007. */
+  /* FIRST check now uses summary.json workingSet (240 real agent changes, six rules, one change at a time):
+       Jev: judges[jev-ws-240].engineWallMsPerChange.median 197.6 ms -> "0.20 s";
+            costPerChange.medianCents 0.0083706 -> "0.008 cents".
+       Luna review-low: judges[luna-review-low].latencyMsPerChange.median 2643 ms -> "2.64 s";
+            costPerChange.medianCents 0.02123 -> "0.02 cents".
+     SECOND (clean) check keeps the demoTurn repaired-piece numbers above (400.1 ms, 1008 ms,
+     0.0037968 and 0.00698 cents); the working set has no clean-pass measurement. */
+  var JEV1 = 197.6, LUNA1 = 2643, JEV2 = 400.1, LUNA2 = 1008, SCALE = 4000;
+  // Exact cents per call (dollarsPerCall x 100) drive the count-up; CENTS are the rounded labels shown once a timer stops.
+  // Shown as dollars: the per-change cents above times 1,000 changes, divided by 100.
+  // Jev 0.0083706¢ -> $0.084, 0.0037968¢ -> $0.038; Luna 0.02123¢ -> $0.212, 0.00698¢ -> $0.070.
+  var DOLLARS = { jev: [0.083706, 0.037968], luna: [0.2123, 0.0698] };
+  // Pacing: at least 400 ms between transcript entries, diff rows at 150 ms (under 8 per second).
+  var T = {
+    tool1: 400, diff1: 800, diffStep: 150, done1: 3200, stop1: 3600,
+    hook1: 3700, judge1: 4500,
+    back: 9800, fixMsg: 10400, tool2: 10800, diff2: 11200, done2: 14900, stop2: 15300,
+    hook2: 15400, judge2: 16200,
+    clean: 19200, loop: 22200
+  };
 
-// Both judges start each turn at the same instant. A judge state holds until the slower
-// measured judge has answered, plus 1.5 s, and never less than 3 s.
-const slowest = k => Math.max(...J.map(m => m[k] ? m[k].ms : 0));
-const TL = (() => {
-  const s = []; let at = 0;
-  const add = (name, dur) => { s.push({name, start: at, end: at + dur}); at += dur; };
-  add("t1write", 2800);
-  add("t1judge", Math.max(3000, slowest("t1") + 1500));
-  add("t1back", 3200);
-  add("t2write", 2800);
-  add("t2judge", Math.max(3000, slowest("t2") + 1500));
-  add("t2done", 3000);
-  add("hold", 3000);
-  return {states: s, total: at};
-})();
-const fmtS = ms => (ms / 1000).toFixed(3) + " s";
-
-function codeHTML(block, marks, cls, gapLine){
-  let h = gapLine ? `<div class="ln gap"><span class="n"></span><span class="c">${gapLine}</span></div>` : "";
-  block.lines.forEach((line, i) => {
-    const n = block.from + i;
-    h += `<div class="ln${marks.includes(n) ? " " + cls : ""}"><span class="n">${n}</span><span class="c">${esc(line) || " "}</span></div>`;
-  });
-  return h;
-}
-function split(block){
-  // two columns of code: loadUser on the left, deleteUser on the right
-  const at = block.lines.findIndex(l => l.startsWith("export async function deleteUser"));
-  let end = at; while (end > 0 && block.lines[end - 1].trim() === "") end--;
-  return [{from: block.from, lines: block.lines.slice(0, end)}, {from: block.from + at, lines: block.lines.slice(at)}];
-}
-
-// columns
-$("cols").innerHTML = J.map((m, k) => `
-<div class="col">
-<div class="chead"><h2>${esc(m.label)}</h2><span class="pmeta">run ${esc(m.run)}</span></div>
-<section class="pane"><div class="phead"><span class="label">the rules</span><span class="pmeta">bar ${D.bar.toFixed(1)}</span></div><div class="pbody" id="rules${k}"></div></section>
-<section class="pane"><div class="phead"><span class="label">back to the agent</span><span class="pmeta" id="cmeta${k}"></span></div><div class="pbody cards" id="cards${k}"></div></section>
-<div class="status"><span class="judge" id="judge${k}"></span><div class="stext" id="stext${k}"></div><span class="timer" id="timer${k}"></span></div>
-<div class="score">
-<div class="cell"><div class="big" id="wait${k}"></div><span class="label">waiting</span></div>
-<div class="cell"><div class="big" id="cost${k}"></div><span class="label">$ per 1k checks</span></div>
-<div class="cell"><div class="big" id="caught${k}"></div><span class="label">caught of ${m.real}</span></div>
-<div class="cell"><div class="big" id="false${k}"></div><span class="label">plainly false</span><div class="csub" id="nr${k}"></div></div>
-</div>
-</div>`).join("");
-
-function chip(score, shown){
-  if (!shown) return `<span class="chip">?</span>`;
-  if (score === "nm") return `<span class="chip nm">not measured</span>`;
-  if (score === null || score === undefined) return `<span class="chip hit nm">broken</span>`;
-  return `<span class="chip ${score >= D.bar ? "hit" : "low"}">${score.toFixed(2)}</span>`;
-}
-const best = (key, lowIsBetter) => { const v = J.map(m => m[key]); return lowIsBetter ? Math.min(...v) : Math.max(...v); };
-
-function render(){
-  const st = TL.states.find(x => t >= x.start && t < x.end) || TL.states[TL.states.length - 1];
-  const i = TL.states.indexOf(st), since = t - st.start;
-  const turn2 = ["t2write", "t2judge", "t2done", "hold"].includes(st.name);
-  $("dots").innerHTML = TL.states.map((_, n) => `<span class="dot${n === i ? " on" : ""}"></span>`).join("");
-  $("turn").textContent = turn2 ? "the change, turn 2: the agent fixes it" : "the change, turn 1: the agent adds loadUser and deleteUser";
-  $("fname").textContent = D.piece.file + (turn2 ? ", after the fix" : ", as the agent wrote it");
-  const blk = turn2 ? D.fix : D.change, marks = turn2 ? D.fix.good : D.change.bad, cls = turn2 ? "good" : "bad";
-  const [a, b] = split(blk);
-  $("codeA").innerHTML = codeHTML(a, marks, cls, "... " + blk.gap);
-  $("codeB").innerHTML = codeHTML(b, marks, cls, "");
-  const loc = `${D.piece.file} lines ${D.piece.from}-${D.piece.to}`;
-
-  J.forEach((m, k) => {
-    const turn = turn2 ? m.t2 : m.t1;
-    const measured = !!turn;
-    const ms = measured ? turn.ms : null;
-    const judging = st.name === (turn2 ? "t2judge" : "t1judge");
-    const answered = measured && ((judging && since >= ms) || (!turn2 && st.name === "t1back") || (turn2 && ["t2done", "hold"].includes(st.name)));
-    const running = measured && judging && since < ms;
-    const scores = measured ? (turn.scores || [null, null, null]) : ["nm", "nm", "nm"];
-    const shownNm = !measured && (judging || ["t2done", "hold"].includes(st.name));
-    const shown = answered || shownNm;
-    $("rules" + k).innerHTML = D.rules.map((r, n) => {
-      const hit = shown && (scores[n] === null || (typeof scores[n] === "number" && scores[n] >= D.bar));
-      return `<div class="rule${hit ? " hit" : ""}">${chip(scores[n], shown)}<span class="rtext">${esc(r)}</span></div>`;
-    }).join("");
-
-    // cards
-    let cards = "", n = 0;
-    const t1s = m.t1.scores || [null, null, null];
-    const broken = D.rules.map((r, q) => ({r, s: t1s[q]})).filter(x => x.s === null || x.s >= D.bar);
-    if (!turn2 && answered) {
-      const age = st.name === "t1back" ? since : since - ms;
-      broken.forEach((x, q) => {
-        const o = Math.max(0, Math.min(1, (age - q * 200) / 250));
-        cards += `<div class="card" style="opacity:${o};transform:translateX(${(1 - o) * 30}px)"><span class="v b">fix this</span><span class="what">${esc(x.r)}</span></div>`;
-      });
-      n = broken.length;
-    } else if (st.name === "t2write" || (turn2 && !answered && !shownNm)) {
-      broken.forEach(x => { cards += `<div class="card" style="opacity:.45"><span class="v b">being fixed</span><span class="what">${esc(x.r)}</span></div>`; });
-    } else if (turn2 && answered) {
-      D.rules.forEach(r => { cards += `<div class="card clean"><span class="v c">clean</span><span class="what">${esc(r)}</span></div>`; });
-    } else if (shownNm) {
-      D.rules.forEach(r => { cards += `<div class="card nm"><span class="v n">not measured</span><span class="what">${esc(r)}</span></div>`; });
-    } else {
-      cards = `<div class="empty">nothing sent back yet</div>`;
+  // ---- Coding CLI transcript, drawn with Claude Code's conventions ----
+  // Each entry is a block (14 px apart); diff rows inside a block stream one at a time.
+  var KW = /\/\/.*|`[^`]*`|"[^"]*"|\b(?:export|async|function|const|await|return|try|catch|throw|import|from|if|instanceof)\b/g;
+  function esc(x){ return x.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
+  function hl(code){
+    var out = "", last = 0, m;
+    KW.lastIndex = 0;
+    while ((m = KW.exec(code))){
+      out += esc(code.slice(last, m.index));
+      var tok = m[0], c = tok.slice(0, 2) === "//" ? "cm" : (tok[0] === "`" || tok[0] === '"') ? "st" : "k";
+      out += '<span class="' + c + '">' + esc(tok) + "</span>";
+      last = m.index + tok.length;
     }
-    $("cards" + k).innerHTML = cards;
-    $("cmeta" + k).textContent = loc + ", " + n + (n === 1 ? " finding" : " findings");
+    return out + esc(code.slice(last));
+  }
+  var tscroll = document.getElementById("tscroll"), entries = [];
+  function el(parent, cls, html){
+    var d = document.createElement("div");
+    d.className = cls;
+    if (html !== undefined) d.innerHTML = html;
+    parent.appendChild(d);
+    return d;
+  }
+  function block(at, cls, html, until){
+    var d = el(tscroll, "blk " + cls, html);
+    entries.push({ at: at, until: until, el: d });
+    return d;
+  }
+  // rows: [lineNumber, kind ("+", "-", " ", or "fold"), text]; returns row elements by index
+  function diffBlock(at, step, rows){
+    var b = block(at, "diff"), els = [];
+    rows.forEach(function(r, i){
+      var d;
+      if (r[1] === "fold") d = el(b, "dr fold", '<span class="fd">··· ' + esc(r[2]) + "</span>");
+      else {
+        var kind = r[1] === "+" ? "add" : r[1] === "-" ? "del" : "ctx";
+        d = el(b, "dr " + kind, '<span class="ln">' + r[0] + '</span><span class="sg">' + (r[1] === " " ? "" : r[1]) +
+          '</span><span class="cd">' + hl(r[2]) + "</span>");
+      }
+      entries.push({ at: at + i * step, el: d });
+      els.push(d);
+    });
+    return els;
+  }
+  var PROMPT = '❯ <span class="cur">▍</span>';
+  function msg(at, text){ block(at, "msgl", '<span class="b">●</span> ' + esc(text)); }
+  function tool(at, sub){
+    block(at, "", '<div><span class="bt">●</span> <strong>Update</strong>(src/user.ts)</div><div class="sub">  ⎿  ' + esc(sub) + "</div>");
+  }
 
-    // status and timer
-    const judge = $("judge" + k), timer = $("timer" + k);
-    judge.className = "judge" + (running ? " live" : ""); timer.className = "timer";
-    judge.textContent = running ? "running" : "idle";
-    let text, tms = 0;
-    if (st.name === "t1write" || st.name === "t2write") text = "waiting for the agent to end its turn";
-    else if (running) { text = "3 yes or no questions"; tms = since; timer.classList.add("live"); }
-    else if (!measured) { text = "turn 2 not measured for this judge"; }
-    else if (answered) {
-      tms = ms; timer.classList.add("done");
-      const nb = scores.filter(s => s === null || s >= D.bar).length;
-      text = nb ? `answered in ${fmtS(ms)}: ${nb} rules broken` : `answered in ${fmtS(ms)}: clean`;
-    } else text = "";
-    $("stext" + k).textContent = text;
-    timer.textContent = measured && !(st.name === "t1write" || st.name === "t2write") ? fmtS(tms) : (measured || !turn2 ? "0.000 s" : "n/m");
+  block(0, "user", "&gt; add loadUser and deleteUser");
+  tool(T.tool1, "Added 21 lines");
+  // agent-change.diff (a new file): lines 1-8 folded, 9-21 shown
+  var d1 = diffBlock(T.diff1, T.diffStep, [
+    [0, "fold", "8 added lines (import, User type)"],
+    [9, "+", 'export async function loadUser(id: string): Promise<User | null> {'],
+    [10, "+", '  try {'],
+    [11, "+", '    const response = await fetch(`${apiBase}/users/${encodeURIComponent(id)}`);'],
+    [12, "+", '    return (await response.json()) as User;'],
+    [13, "+", '  } catch {'],
+    [14, "+", '    return null;'],
+    [15, "+", '  }'],
+    [16, "+", '}'],
+    [17, "+", ''],
+    [18, "+", 'export async function deleteUser(id: string): Promise<boolean> {'],
+    [19, "+", '  // TODO: call the API once the delete endpoint is ready'],
+    [20, "+", '  return true;'],
+    [21, "+", '}']
+  ]);
+  var badEls = [d1[3], d1[6], d1[11], d1[12]];   // lines 11, 14, 19, 20
+  msg(T.done1, "Added loadUser and deleteUser to src/user.ts.");
+  block(T.stop1, "pbox", PROMPT, T.back);
+  block(T.back, "", '<div class="sub">  ⎿  Stop hook feedback:</div><div class="fb">stop-rules: 3 rule violations in 1 place in your latest changes.</div>');
+  msg(T.fixMsg, "Fixing src/user.ts.");
+  tool(T.tool2, "Updated src/user.ts with 7 additions and 7 removals");
+  // agent-fix.diff with one line of context: removed lines carry old numbers, others new numbers
+  diffBlock(T.diff2, T.diffStep, [
+    [1, " ", 'import { apiBase } from "./config.js";'],
+    [2, "+", 'import { HttpError, httpDelete, httpGet } from "./http.js";'],
+    [3, " ", ''],
+    [0, "fold", "7 unchanged lines"],
+    [11, " ", '  try {'],
+    [11, "-", '    const response = await fetch(`${apiBase}/users/${encodeURIComponent(id)}`);'],
+    [12, "-", '    return (await response.json()) as User;'],
+    [13, "-", '  } catch {'],
+    [14, "-", '    return null;'],
+    [12, "+", '    return await httpGet<User>(`${apiBase}/users/${encodeURIComponent(id)}`);'],
+    [13, "+", '  } catch (error) {'],
+    [14, "+", '    if (error instanceof HttpError && error.status === 404) return null;'],
+    [15, "+", '    throw error;'],
+    [16, " ", '  }'],
+    [17, " ", '}'],
+    [18, " ", ''],
+    [18, "-", 'export async function deleteUser(id: string): Promise<boolean> {'],
+    [19, "-", '  // TODO: call the API once the delete endpoint is ready'],
+    [20, "-", '  return true;'],
+    [19, "+", 'export async function deleteUser(id: string): Promise<void> {'],
+    [20, "+", '  await httpDelete(`${apiBase}/users/${encodeURIComponent(id)}`);'],
+    [21, " ", '}']
+  ]);
+  msg(T.done2, "src/user.ts now uses httpGet and httpDelete, and the catch rethrows.");
+  block(T.stop2, "pbox", PROMPT);
 
-    // scoreboard
-    const t1ms = st.name === "t1write" ? 0 : st.name === "t1judge" ? Math.min(since, m.t1.ms) : m.t1.ms;
-    const t2ms = !m.t2 ? 0 : st.name === "t2judge" ? Math.min(since, m.t2.ms) : (["t2done", "hold"].includes(st.name) ? m.t2.ms : 0);
-    $("wait" + k).textContent = fmtS(t1ms + t2ms);
-    $("cost" + k).textContent = "$" + m.per1000.toFixed(3);
-    $("caught" + k).textContent = m.caught;
-    $("false" + k).textContent = m.plainlyFalse;
-    $("nr" + k).textContent = "+" + m.notRuled + " not ruled";
-    $("cost" + k).classList.toggle("best", m.per1000 === best("per1000", true));
-    $("caught" + k).classList.toggle("best", m.caught === best("caught", false));
-    $("false" + k).classList.toggle("best", m.plainlyFalse === best("plainlyFalse", true));
-  });
-}
+  var $ = function(id){ return document.getElementById(id); };
+  var lanes = {
+    jev: { rules: [].slice.call(document.querySelectorAll("#jev .rule")), t1: JEV1, t2: JEV2 },
+    luna: { rules: [].slice.call(document.querySelectorAll("#luna .rule")), t1: LUNA1, t2: LUNA2 }
+  };
+  var DONE_NOTE = { jev: "sends the whole piece back", luna: "quotes the exact line" };
+  function tog(el, c, on){ el.classList.toggle(c, !!on); }
+  function fmt(ms){ return (ms/1000).toFixed(2) + " s"; }
 
-function frame(now){
-  if (last !== null && playing) { t += (now - last) * speed; if (t >= TL.total) t = t % TL.total; }
-  last = now; render(); requestAnimationFrame(frame);
-}
-function syncButtons(){
-  $("pause").textContent = playing || recording ? "Pause" : "Play";
-  $("speed").classList.toggle("on", speed === 2);
-}
-$("pause").addEventListener("click", () => { playing = !playing; syncButtons(); });
-$("restart").addEventListener("click", () => { t = 0; playing = true; syncButtons(); });
-$("speed").addEventListener("click", () => { speed = speed === 2 ? 1 : 2; syncButtons(); });
-$("source").textContent = "Catches, false alarms and cost: 240 agent-written changes, blind labelled, " + J[0].real
-  + " real breaks, bar " + J[0].bar + ", 22 September 2026. Best of the two in blue.";
-$("foot").innerHTML = "Every number here is measured. Both turns' times are each judge's median of 5 calls on that piece, measured in one sitting ("
-  + D.session.slice(11, 16) + "Z and " + D.t2Session.slice(11, 16) + "Z); each score chip is the median of the same 5 calls. "
-  + "Jev reported <code>jev-1.13.0</code>; GPT-6 Luna ran as <code>gpt-6-luna</code> with low reasoning, asked for a probability per rule. The agent's two turns are scripted. "
-  + 'Source and every run: <a href="https://github.com/haystackeditor/stop-rules">github.com/haystackeditor/stop-rules</a>.';
-window.__demo = {
-  seek(ms){ recording = true; playing = false; t = ms; syncButtons(); render(); return TL.total; },
-  total(){ return TL.total; }
-};
-syncButtons();
-requestAnimationFrame(frame);
+  function renderLane(k, t){
+    var L = lanes[k], el = $(k), second = t >= T.judge2, run = t >= T.judge1;
+    var e = second ? t - T.judge2 : t - T.judge1, total = second ? L.t2 : L.t1;
+    var shown = run ? Math.max(0, Math.min(e, total)) : 0, done = run && e >= total;
+    // Running totals across both checks: the second check adds to the first instead of
+    // resetting, so the time and the dollars only ever go up.
+    var ci = second ? 1 : 0;
+    var baseMs = second ? L.t1 : 0, baseDollars = second ? DOLLARS[k][0] : 0;
+    $(k+"-t").textContent = fmt(baseMs + shown);
+    $(k+"-c").textContent = "$" + (baseDollars + DOLLARS[k][ci] * shown / total).toFixed(2);
+    $(k+"-b").style.width = ((baseMs + shown)/SCALE*100) + "%";
+    tog(el, "run", run && !done);
+    tog(el, "done", done);
+    L.rules.forEach(function(r, i){
+      var on = done && e >= total + i*90;
+      tog(r, "hit", on && !second);
+      tog(r, "ok", on && second);
+    });
+    var note = $(k+"-s"), other = k === "jev" ? lanes.luna : lanes.jev;
+    var text = "";
+    if (run && !done) text = (!second && k === "luna" && e >= JEV1) ? "Still thinking. Jev finished already." : "Checking";
+    else if (done) text = second ? "Clean. Nothing sent back." : DONE_NOTE[k];
+    note.textContent = text;
+    tog(note, "clean", done && second);
+  }
+
+  function pulseAt(t){
+    var p = $("pulse"), mobile = window.matchMedia("(max-width:860px)").matches, f = null, rev = false;
+    if (t >= T.hook1 && t < T.judge1) f = (t - T.hook1)/(T.judge1 - T.hook1);
+    else if (t >= T.hook2 && t < T.judge2) f = (t - T.hook2)/(T.judge2 - T.hook2);
+    else if (t >= T.back && t < T.back + 700){ f = 1 - (t - T.back)/700; rev = true; }
+    p.className = "pulse " + (rev ? "rev" : "fwd");
+    if (f === null){ p.style.opacity = 0; return; }
+    p.style.opacity = 1;
+    if (mobile){ p.style.top = (f*100) + "%"; p.style.left = ""; }
+    else { p.style.left = "calc(" + (f*100) + "% - 7px)"; p.style.top = ""; }
+  }
+
+  function render(t){
+    entries.forEach(function(x){ tog(x.el, "on", t >= x.at && (x.until === undefined || t < x.until)); });
+    badEls.forEach(function(d){ tog(d, "hit", t >= T.judge1 + JEV1); });
+
+    var fired = (t >= T.hook1 && t < T.back) || t >= T.hook2;
+    tog($("hook"), "fired", fired);
+    var clean = t >= T.judge2 + Math.max(JEV2, LUNA2);
+    $("hook-s").textContent = clean ? "clean" : fired ? "fired" : "waiting";
+    tog($("hook-s"), "pass", clean);
+    tog($("ret"), "on", t >= T.back && t < T.hook2);
+    pulseAt(t);
+
+    renderLane("jev", t);
+    renderLane("luna", t);
+
+    // spotlight: exactly one region lit
+    var lit = "r-cli";
+    if ((t >= T.hook1 && t < T.judge1) || (t >= T.hook2 && t < T.judge2)) lit = "r-hook";
+    else if ((t >= T.judge1 && t < T.back) || (t >= T.judge2 && t < T.clean)) lit = "r-judges";
+    ["r-cli", "r-hook", "r-judges"].forEach(function(id){ tog($(id), "dim", id !== lit); });
+  }
+
+  var q = new URLSearchParams(location.search), frozen = q.get("t");
+  var clock = 0, last = null, paused = false, speed = 1;
+  if (frozen !== null){ clock = +frozen || 0; paused = true; }
+  function frame(now){
+    if (last === null) last = now;
+    if (!paused){ clock += (now - last) * speed; if (clock >= T.loop) clock = 0; }
+    last = now;
+    render(clock);
+    requestAnimationFrame(frame);
+  }
+  var pb = $("pause"), sb = $("speed");
+  function setPaused(v){ paused = v; pb.textContent = v ? "Play" : "Pause"; }
+  setPaused(paused);
+  pb.addEventListener("click", function(){ setPaused(!paused); });
+  sb.addEventListener("click", function(){ speed = speed === 1 ? 2 : 1; sb.setAttribute("aria-pressed", String(speed === 2)); });
+  $("restart").addEventListener("click", function(){ clock = 0; setPaused(false); });
+  window.__setTime = function(ms){ clock = ms; setPaused(true); render(ms); };
+  render(clock);
+  requestAnimationFrame(frame);
 })();
 </script>
 </body>
