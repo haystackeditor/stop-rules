@@ -6,10 +6,10 @@ each, and asks [Jev](https://typesafe.ai) one yes or no question per piece and p
 lines of the surrounding file so the question can be answered. If a rule is likely broken, it
 hands that piece of code back to the agent so it fixes it before you see it.
 
-![An agent writes code, the stop hook fires, three rules come back broken, Jev answers in 0.522 s against 1.665 s for GPT-6 Luna with no reasoning, and the agent repairs the code](examples/demo/stop-rules-demo.svg)
+![The stop-rules demo: the change the agent wrote, the three rules with Jev's scores, and the findings sent back to the agent, then the repaired code coming back clean](examples/demo/stop-rules-demo.gif)
 
-[examples/demo/README.md](examples/demo/README.md) says what the graphic shows, which parts are
-real Jev output and which are scripted, and the commands that reproduce it.
+[examples/demo/README.md](examples/demo/README.md) explains the demo, where every number on it
+comes from, and the commands that reproduce the checks.
 
 Cutting by git diff hunk is the default, and it needs nothing installed. A team that would
 rather have one whole function per piece switches to tree-sitter with

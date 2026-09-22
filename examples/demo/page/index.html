@@ -1,0 +1,296 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>stop-rules demo</title>
+<link rel="icon" type="image/svg+xml" href="brand/favicon.svg">
+<style>
+@font-face{font-family:"Archivo";font-weight:800;font-display:swap;src:url(fonts/archivo-800.woff2) format("woff2")}
+@font-face{font-family:"Archivo";font-weight:700;font-display:swap;src:url(fonts/archivo-700.woff2) format("woff2")}
+@font-face{font-family:"Inter";font-weight:400;font-display:swap;src:url(fonts/inter-400.woff2) format("woff2")}
+@font-face{font-family:"Inter";font-weight:500;font-display:swap;src:url(fonts/inter-500.woff2) format("woff2")}
+@font-face{font-family:"Inter";font-weight:600;font-display:swap;src:url(fonts/inter-600.woff2) format("woff2")}
+@font-face{font-family:"JetBrains Mono";font-weight:500;font-display:swap;src:url(fonts/jetbrains-mono-500.woff2) format("woff2")}
+:root{color-scheme:dark;--void:#05080f;--panel:#0b111f;--panel2:#0e1526;--card:#0c1220;--line:#1a2540;--line2:#26334e;
+--text:#e9eef8;--muted:#8592a9;--faint:#566079;--blue:#4f8dff;--cyan:#58d7ff;--pass:#46e0a0;--fail:#ff6a5d;
+--display:"Archivo",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+--sans:"Inter",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+--mono:"JetBrains Mono",ui-monospace,"SF Mono",Menlo,monospace}
+*{box-sizing:border-box}
+body{margin:0;background:var(--void);color:var(--text);font-family:var(--sans);font-size:17px;line-height:1.5}
+.wrap{max-width:1240px;margin:0 auto;padding:0 28px}
+header{border-bottom:1px solid var(--line)}
+header .wrap{display:flex;align-items:center;gap:12px;height:60px}
+.mark{width:28px;height:28px}
+.wordmark{font-family:var(--display);font-weight:800;font-size:20px;letter-spacing:-.02em}
+.sep{width:1px;height:22px;background:var(--line)}
+.label{font-family:var(--mono);font-weight:500;font-size:14px;letter-spacing:.17em;text-transform:uppercase;color:var(--faint)}
+h1{font-family:var(--display);font-weight:800;font-size:clamp(30px,4vw,44px);letter-spacing:-.03em;line-height:1.08;margin:28px 0 10px}
+.lede{color:var(--muted);max-width:780px;margin:0 0 20px;font-size:18px}
+.lede b{color:var(--text);font-weight:600}
+.controls{display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin-bottom:12px}
+button{font-family:var(--sans);font-size:15px;font-weight:500;color:var(--text);background:var(--panel2);border:1px solid var(--line2);
+border-radius:8px;padding:8px 14px;cursor:pointer}
+button.on{background:rgba(79,141,255,.16);border-color:var(--blue);color:#fff}
+button:focus-visible{outline:2px solid var(--blue);outline-offset:2px}
+.dots{display:flex;gap:6px;margin-left:auto}
+.dot{width:26px;height:4px;border-radius:2px;background:var(--line2)}
+.dot.on{background:var(--cyan)}
+.models{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:18px;align-items:center}
+.models .label{margin-right:4px}
+.panes{display:grid;grid-template-columns:1.75fr 1fr 1fr;gap:14px}
+.pane{background:var(--card);border:1px solid var(--line);border-radius:12px;min-height:440px;display:flex;flex-direction:column;overflow:hidden}
+.phead{display:flex;justify-content:space-between;align-items:center;padding:12px 16px;border-bottom:1px solid var(--line);background:var(--panel)}
+.pmeta{font-family:var(--mono);font-size:14px;color:var(--muted)}
+.pbody{padding:14px 16px;flex:1}
+.fname{font-family:var(--mono);font-size:15px;color:var(--muted);margin-bottom:8px}
+.code{font-family:var(--mono);font-weight:500;font-size:17px;line-height:1.55;font-variant-ligatures:none}
+.ln{display:grid;grid-template-columns:30px 1fr;gap:10px;padding:0 6px;border-radius:4px;transition:background .15s,color .15s}
+.ln .n{color:var(--faint);text-align:right}
+.ln .c{white-space:pre-wrap;word-break:break-word;padding-left:1.2ch;text-indent:-1.2ch}
+.ln.bad{background:rgba(255,106,93,.13);color:var(--fail)}
+.ln.good{background:rgba(70,224,160,.11);color:var(--pass)}
+.gap .c{color:var(--faint)}
+.rule{display:grid;grid-template-columns:78px 1fr;gap:12px;align-items:center;padding:14px 12px;border:1px solid var(--line);
+border-radius:10px;margin-bottom:12px;background:var(--panel2);transition:background .15s,border-color .15s}
+.chip{font-family:var(--mono);font-size:19px;font-weight:500;text-align:center;border-radius:6px;padding:6px 0;background:var(--panel);color:var(--faint);border:1px solid var(--line2)}
+.chip.hit{background:rgba(255,106,93,.16);color:var(--fail);border-color:rgba(255,106,93,.5)}
+.chip.low{background:rgba(70,224,160,.08);color:var(--muted);border-color:var(--line2)}
+.chip.nm{font-size:14px;letter-spacing:.06em}
+.rule.hit{border-color:rgba(255,106,93,.45)}
+.rtext{font-weight:600;font-size:17px;line-height:1.3}
+.rnum{display:block;font-family:var(--mono);font-size:14px;color:var(--faint);font-weight:500;margin-bottom:2px}
+.barnote{font-size:15px;color:var(--muted);margin-top:4px}
+.card{border-radius:10px;padding:12px 14px;margin-bottom:12px;border:1px solid rgba(255,106,93,.45);background:rgba(255,106,93,.08);
+transition:transform .25s ease-out,opacity .25s,background .15s,border-color .15s}
+.card.clean{border-color:rgba(70,224,160,.45);background:rgba(70,224,160,.08)}
+.card.nm{border-color:var(--line2);background:var(--panel2)}
+.card .top{display:flex;justify-content:space-between;font-family:var(--mono);font-size:15px;color:var(--muted)}
+.card .what{font-weight:600;font-size:17px;margin-top:4px}
+.card .verdict{font-family:var(--mono);font-size:15px;margin-top:4px}
+.card .verdict.b{color:var(--fail)}.card .verdict.c{color:var(--pass)}.card .verdict.n{color:var(--muted)}
+.empty{color:var(--faint);font-size:16px}
+.status{display:flex;align-items:center;gap:14px;margin-top:14px;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px 18px;min-height:78px}
+.judge{font-family:var(--mono);font-size:14px;letter-spacing:.1em;text-transform:uppercase;padding:5px 10px;border-radius:999px;border:1px solid var(--line2);color:var(--muted);white-space:nowrap}
+.judge.live{background:rgba(79,141,255,.18);border-color:var(--blue);color:#fff}
+.stext{font-size:19px;font-weight:600}
+.ssub{font-size:15px;color:var(--muted)}
+.timer{margin-left:auto;font-family:var(--mono);font-size:26px;color:var(--muted);white-space:nowrap}
+.timer.live{color:#fff}.timer.done{color:var(--blue)}
+.score{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-top:14px}
+.cell{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px 18px}
+.big{font-family:var(--mono);font-size:34px;font-weight:500;line-height:1.1}
+.cell .label{display:block;margin-top:6px}
+.csub{font-size:15px;color:var(--muted);margin-top:2px}
+footer{color:var(--muted);font-size:15px;margin:28px 0 48px;padding-top:18px;border-top:1px solid var(--line)}
+footer a{color:var(--blue)}
+code{font-family:var(--mono);font-size:.92em}
+@media (max-width:900px){
+.wrap{padding:0 16px}
+.panes{grid-template-columns:1fr}
+.pane{min-height:0}
+.score{grid-template-columns:1fr 1fr}
+.dots{margin-left:0}
+.status{flex-wrap:wrap}.timer{margin-left:0}
+}
+</style>
+</head>
+<body>
+<header><div class="wrap"><svg class="mark" viewBox="0 0 48 48" aria-hidden="true"><mask id="pm0" maskUnits="userSpaceOnUse" x="-64" y="-64" width="176" height="176"><circle cx="24.00" cy="15.41" r="9.50" fill="#fff"/><circle cx="33.04" cy="21.97" r="11.50" fill="#000"/></mask><circle cx="24.00" cy="15.41" r="9.50" fill="#DFE7F5" mask="url(#pm0)"/><mask id="pm1" maskUnits="userSpaceOnUse" x="-64" y="-64" width="176" height="176"><circle cx="33.04" cy="21.97" r="9.50" fill="#fff"/><circle cx="29.58" cy="32.59" r="11.50" fill="#000"/></mask><circle cx="33.04" cy="21.97" r="9.50" fill="#DFE7F5" mask="url(#pm1)"/><mask id="pm2" maskUnits="userSpaceOnUse" x="-64" y="-64" width="176" height="176"><circle cx="29.58" cy="32.59" r="9.50" fill="#fff"/><circle cx="18.42" cy="32.59" r="11.50" fill="#000"/></mask><circle cx="29.58" cy="32.59" r="9.50" fill="#DFE7F5" mask="url(#pm2)"/><mask id="pm3" maskUnits="userSpaceOnUse" x="-64" y="-64" width="176" height="176"><circle cx="18.42" cy="32.59" r="9.50" fill="#fff"/><circle cx="14.96" cy="21.97" r="11.50" fill="#000"/></mask><circle cx="18.42" cy="32.59" r="9.50" fill="#DFE7F5" mask="url(#pm3)"/><mask id="pm4" maskUnits="userSpaceOnUse" x="-64" y="-64" width="176" height="176"><circle cx="14.96" cy="21.97" r="9.50" fill="#fff"/><circle cx="24.00" cy="15.41" r="11.50" fill="#000"/></mask><circle cx="14.96" cy="21.97" r="9.50" fill="#3B82F6" mask="url(#pm4)"/></svg><span class="wordmark">haystack</span><span class="sep"></span><span class="label">stop-rules demo</span></div></header>
+<main class="wrap">
+<h1>Watch a stop hook send broken code back</h1>
+<p class="lede">When a coding agent ends its turn, stop-rules cuts what it changed into pieces and asks a judge <b>one yes or no question per piece and rule</b>. A score of 0.6 or more means the rule is broken, and <b>that piece goes back to the agent</b> to fix before you see it. Pick a judge to replay the same two turns with its own measured speed, cost and catch rate.</p>
+<div class="controls">
+<button id="pause" type="button">Pause</button>
+<button id="restart" type="button">Restart</button>
+<button id="speed" type="button">2x speed</button>
+<div class="dots" id="dots" aria-hidden="true"></div>
+</div>
+<div class="models" id="models"><span class="label">judge</span></div>
+<div class="panes">
+<section class="pane"><div class="phead"><span class="label">the change</span><span class="pmeta" id="turn">turn 1</span></div>
+<div class="pbody"><div class="fname" id="fname"></div><div class="code" id="code"></div></div></section>
+<section class="pane"><div class="phead"><span class="label">the rules</span><span class="pmeta">.stop-rules.md</span></div>
+<div class="pbody"><div id="rules"></div><div class="barnote" id="barnote"></div></div></section>
+<section class="pane"><div class="phead"><span class="label">back to the agent</span><span class="pmeta" id="cardmeta"></span></div>
+<div class="pbody" id="cards"></div></section>
+</div>
+<div class="status" aria-live="polite"><span class="judge" id="judge">idle</span>
+<div><div class="stext" id="stext"></div><div class="ssub" id="ssub"></div></div><span class="timer" id="timer">0.000 s</span></div>
+<div class="score">
+<div class="cell"><div class="big" id="q">0</div><span class="label">questions asked</span></div>
+<div class="cell"><div class="big" id="wait">0.000 s</div><span class="label">waiting on the judge</span></div>
+<div class="cell"><div class="big" id="cost"></div><span class="label">$ per 1,000 checks</span></div>
+<div class="cell"><div class="big" id="caught"></div><span class="label">real breaks caught</span><div class="csub" id="caughtsub"></div></div>
+</div>
+<footer id="foot"></footer>
+</main>
+<script>
+(function(){
+"use strict";
+const D = {"bar":0.6,"piece":{"file":"src/user.ts","from":1,"to":21},"rules":["Never call fetch directly, use httpGet","Do not silently swallow errors","No TODO stubs presented as finished"],"change":{"from":9,"lines":["export async function loadUser(id: string): Promise<User | null> {","  try {","    const response = await fetch(`${API}/users/${encodeURIComponent(id)}`);","    return (await response.json()) as User;","  } catch {","    return null;","  }","}","","export async function deleteUser(id: string): Promise<boolean> {","  // TODO: call the API once the delete endpoint is ready","  return true;","}"],"bad":[11,13,14,19,20]},"fix":{"from":11,"lines":["export async function loadUser(id: string): Promise<User | null> {","  try {","    return await httpGet<User>(`${API}/users/${encodeURIComponent(id)}`);","  } catch (error) {","    if (error instanceof HttpError && error.status === 404) return null;","    throw error;","  }","}","","export async function deleteUser(id: string): Promise<void> {","  await httpDelete(`${API}/users/${encodeURIComponent(id)}`);","}"],"good":[13,15,16,21]},"models":[{"key":"jev","label":"Jev","judge":"Jev","run":"hunks-240","t1":{"ms":522,"scores":[0.94,0.88,0.96]},"t2":{"ms":398.9,"scores":[0.06,0.07,0.1]},"per1000":0.03294909251101322,"caught":20,"real":32,"plainlyFalse":10,"bar":0.5},{"key":"none","label":"GPT-6 Luna, no reasoning","judge":"GPT-6 Luna","run":"luna-240-none","t1":{"ms":1665,"scores":[0.99,0.99,0.99]},"t2":null,"per1000":0.11878229426433914,"caught":23,"real":32,"plainlyFalse":10,"bar":0.5},{"key":"low","label":"GPT-6 Luna, reasoning low","judge":"GPT-6 Luna","run":"luna-240-low","t1":{"ms":2053,"scores":[0.99,0.98,0.99]},"t2":null,"per1000":0.18255124378109452,"caught":29,"real":32,"plainlyFalse":17,"bar":0.5},{"key":"medium","label":"GPT-6 Luna, reasoning medium","judge":"GPT-6 Luna","run":"luna-240-medium","t1":{"ms":2695,"scores":[0.99,0.98,0.99]},"t2":null,"per1000":0.22671853233830844,"caught":30,"real":32,"plainlyFalse":18,"bar":0.5}],"session":"2026-09-22T19:58:47.376Z","t2Session":"2026-09-22T20:10:39.749Z"};
+const $ = id => document.getElementById(id);
+const esc = s => s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+const JUDGE_MIN = 3000, HOLD = 3000;
+
+let model = D.models[0], t = 0, playing = true, speed = 1, last = null, recording = false;
+
+// Each state holds at least 2.5 s. The judge state lasts the judge's measured median plus 1.5 s.
+function timeline(m){
+  const s = [];
+  let at = 0;
+  const add = (name, dur, extra) => { s.push(Object.assign({name, start: at, end: at + dur}, extra || {})); at += dur; };
+  add("t1write", 2800);
+  add("t1judge", Math.max(JUDGE_MIN, m.t1.ms + 1500), {ms: m.t1.ms});
+  add("t1back", 3200);
+  add("t2write", 2800);
+  if (m.t2) add("t2judge", Math.max(JUDGE_MIN, m.t2.ms + 1500), {ms: m.t2.ms});
+  add(m.t2 ? "t2clean" : "t2none", 3000);
+  add("hold", HOLD);
+  return {states: s, total: at};
+}
+let TL = timeline(model);
+
+function fmtS(ms){ return (ms / 1000).toFixed(3) + " s"; }
+
+function codeHTML(block, marks, cls){
+  let h = "";
+  if (block === D.change) h += `<div class="ln gap"><span class="n"></span><span class="c">... lines 1-8, const API and interface User</span></div>`;
+  block.lines.forEach((line, i) => {
+    const n = block.from + i;
+    h += `<div class="ln${marks.includes(n) ? " " + cls : ""}"><span class="n">${n}</span><span class="c">${esc(line) || " "}</span></div>`;
+  });
+  return h;
+}
+
+function chipFor(score, shown){
+  if (!shown) return `<span class="chip">?</span>`;
+  if (score === "nm") return `<span class="chip nm">not measured</span>`;
+  if (score === null || score === undefined) return `<span class="chip hit nm">broken</span>`;
+  return `<span class="chip ${score >= D.bar ? "hit" : "low"}">${score.toFixed(2)}</span>`;
+}
+
+function render(){
+  const st = TL.states.find(x => t >= x.start && t < x.end) || TL.states[TL.states.length - 1];
+  const i = TL.states.indexOf(st);
+  const since = t - st.start;
+  const turn2 = st.name.startsWith("t2") || st.name === "hold";
+  $("dots").innerHTML = TL.states.map((_, k) => `<span class="dot${k === i ? " on" : ""}"></span>`).join("");
+  $("turn").textContent = turn2 ? "turn 2" : "turn 1";
+  $("fname").textContent = D.piece.file + (turn2 ? ", after the fix" : ", as the agent wrote it");
+  $("code").innerHTML = turn2 ? codeHTML(D.fix, D.fix.good, "good") : codeHTML(D.change, D.change.bad, "bad");
+
+  // scores: turn 1 shown once the judge has answered; turn 2 likewise
+  const t1Answered = (st.name === "t1judge" && since >= st.ms) || ["t1back"].includes(st.name);
+  const t2Answered = (st.name === "t2judge" && since >= st.ms) || ["t2clean", "hold"].includes(st.name) && !!model.t2;
+  const t2None = st.name === "t2none" || (st.name === "hold" && !model.t2);
+  let scores, shown;
+  if (!turn2) { scores = model.t1.scores || [null, null, null]; shown = t1Answered; }
+  else if (model.t2) { scores = model.t2.scores; shown = t2Answered; }
+  else { scores = ["nm", "nm", "nm"]; shown = t2None; }
+  $("rules").innerHTML = D.rules.map((r, k) => {
+    const hit = shown && typeof scores[k] === "number" ? scores[k] >= D.bar : (shown && scores[k] === null);
+    return `<div class="rule${hit ? " hit" : ""}">${chipFor(scores[k], shown)}<span class="rtext"><span class="rnum">rule ${k + 1}</span>${esc(r)}</span></div>`;
+  }).join("");
+  $("barnote").textContent = "bar " + D.bar.toFixed(1) + ": at or above it, the rule is broken";
+
+  // cards
+  let cards = "";
+  const broken = D.rules.map((r, k) => ({r, k, s: (model.t1.scores || [null, null, null])[k]}))
+    .filter(x => x.s === null || x.s >= D.bar);
+  const loc = `${D.piece.file} lines ${D.piece.from}-${D.piece.to}`;
+  if (st.name === "t1back" || st.name === "t2write") {
+    broken.forEach((x, n) => {
+      const age = st.name === "t1back" ? since - n * 250 : 9999;
+      const o = Math.max(0, Math.min(1, age / 250));
+      const dim = st.name === "t2write" ? .45 : 1;
+      cards += `<div class="card" style="opacity:${o * dim};transform:translateX(${(1 - o) * 40}px)"><div class="top"><span>${esc(loc)}</span><span>${x.s === null ? "broken" : x.s.toFixed(2)}</span></div>`
+        + `<div class="what">${esc(x.r)}</div><div class="verdict b">${st.name === "t2write" ? "the agent is fixing this" : "fix this"}</div></div>`;
+    });
+  } else if (st.name === "t2clean" || (st.name === "hold" && model.t2)) {
+    D.rules.forEach((r, k) => {
+      cards += `<div class="card clean"><div class="top"><span>${esc(loc)}</span><span>${model.t2.scores[k].toFixed(2)}</span></div><div class="what">${esc(r)}</div><div class="verdict c">clean</div></div>`;
+    });
+  } else if (t2None) {
+    D.rules.forEach(r => {
+      cards += `<div class="card nm"><div class="top"><span>${esc(loc)}</span><span>n/m</span></div><div class="what">${esc(r)}</div><div class="verdict n">turn 2 not measured for this judge</div></div>`;
+    });
+  } else {
+    cards = `<div class="empty">nothing sent back yet</div>`;
+  }
+  $("cards").innerHTML = cards;
+  const nCards = (st.name === "t1back" || st.name === "t2write") ? broken.length : 0;
+  $("cardmeta").textContent = (st.name === "t2clean" || (st.name === "hold" && model.t2)) ? "0 findings" : nCards + (nCards === 1 ? " finding" : " findings");
+
+  // status line and timer
+  const J = model.judge;
+  const judge = $("judge"), timer = $("timer");
+  judge.className = "judge"; timer.className = "timer";
+  let text = "", sub = "", tms = 0;
+  const running = (st.name === "t1judge" || st.name === "t2judge") && since < st.ms;
+  if (st.name === "t1write") { text = "Turn 1. The agent adds loadUser and deleteUser, then ends its turn."; sub = "1 changed piece, 3 rules, 1 request"; }
+  else if (st.name === "t1judge" || st.name === "t2judge") {
+    tms = Math.min(since, st.ms);
+    if (running) { text = J + " running: 3 yes or no questions"; sub = "one request, one question per rule, the timer runs at real speed"; judge.classList.add("live"); timer.classList.add("live"); }
+    else { text = J + " answered in " + fmtS(st.ms) + "."; sub = "median of 5 calls on this piece"; timer.classList.add("done"); }
+  }
+  else if (st.name === "t1back") { tms = model.t1.ms; text = broken.length + " rules broken. The piece goes back to the agent."; sub = "the agent gets the file, the lines and every rule it broke"; }
+  else if (st.name === "t2write") { text = "Turn 2. The agent fixes the piece: httpGet, rethrow, a real deleteUser."; sub = "the same 3 rules, asked again"; }
+  else if (st.name === "t2clean") { tms = model.t2.ms; text = "No rule broken. The turn ends and you see clean code."; sub = "every score under the bar"; }
+  else if (st.name === "t2none") { text = "Turn 2 was not measured with " + model.label + "."; sub = "its scores on the repaired piece are not in any recorded run"; }
+  else { tms = model.t2 ? model.t2.ms : model.t1.ms; text = model.t2 ? "Done. Replaying in a moment." : "Replaying in a moment."; sub = ""; }
+  judge.textContent = running ? J + " running" : J + " idle";
+  $("stext").textContent = text; $("ssub").textContent = sub;
+  timer.textContent = fmtS(tms);
+
+  // scoreboard: accumulates over the loop
+  const t1Done = t1Answered || !["t1write", "t1judge"].includes(st.name);
+  const t2Done = model.t2 && (t2Answered || ["t2clean", "hold"].includes(st.name));
+  const t2Part = st.name === "t2judge" ? Math.min(since, st.ms) : 0;
+  const t1Part = st.name === "t1judge" ? Math.min(since, st.ms) : (t1Done ? model.t1.ms : 0);
+  $("q").textContent = (t1Done ? 3 : 0) + (t2Done ? 3 : 0);
+  $("wait").textContent = fmtS(t1Part + (t2Done ? model.t2.ms : t2Part));
+  $("cost").textContent = "$" + model.per1000.toFixed(3);
+  $("caught").textContent = model.caught + " of " + model.real;
+  $("caughtsub").textContent = model.plainlyFalse + " plainly false, 240 labelled changes, bar " + model.bar;
+}
+
+function frame(now){
+  if (last !== null && playing) { t += (now - last) * speed; if (t >= TL.total) t = t % TL.total; }
+  last = now;
+  render();
+  requestAnimationFrame(frame);
+}
+
+D.models.forEach(m => {
+  const b = document.createElement("button");
+  b.type = "button"; b.textContent = m.label; b.dataset.key = m.key;
+  b.addEventListener("click", () => { model = m; TL = timeline(model); t = 0; syncButtons(); });
+  $("models").appendChild(b);
+});
+function syncButtons(){
+  document.querySelectorAll("#models button").forEach(b => b.classList.toggle("on", b.dataset.key === model.key));
+  $("pause").textContent = playing || recording ? "Pause" : "Play";
+  $("speed").classList.toggle("on", speed === 2);
+}
+$("pause").addEventListener("click", () => { playing = !playing; syncButtons(); });
+$("restart").addEventListener("click", () => { t = 0; playing = true; syncButtons(); });
+$("speed").addEventListener("click", () => { speed = speed === 2 ? 1 : 2; syncButtons(); });
+
+$("foot").innerHTML = "Every number here is measured. Turn 1 timings, costs and catch rates are from the Jev against GPT-6 Luna comparison of 22 September 2026 (demo turn at "
+  + D.session.slice(11, 16) + "Z, median of 5 calls; catches and false alarms on 240 blind-labelled agent-written changes with 32 real breaks). Jev reported <code>jev-1.13.0</code>. "
+  + "Jev's turn 2 timing is a median of 5 calls on the repaired piece at " + D.t2Session.slice(11, 16) + "Z. The agent's two turns are scripted. "
+  + 'Source and every run: <a href="https://github.com/haystackeditor/stop-rules">github.com/haystackeditor/stop-rules</a>.';
+
+// For recordings: window.__demo.seek(ms, modelKey) renders one exact moment, paused.
+window.__demo = {
+  seek(ms, key){ recording = true; if (key) { model = D.models.find(m => m.key === key); TL = timeline(model); } playing = false; t = ms; syncButtons(); render(); return TL.total; },
+  total(){ return TL.total; }
+};
+syncButtons();
+requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
