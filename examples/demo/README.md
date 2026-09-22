@@ -1,14 +1,16 @@
 # The stop-rules demo graphic
 
-![stop-rules in five beats: an agent writes code, the stop hook fires, three rules come back broken, Jev answered in 0.338 s against 1.039 s and 1.547 s for GPT-6 Luna, the agent repairs the code and the check is clean](stop-rules-demo.svg)
+![stop-rules in five beats: an agent writes code, the stop hook fires, three rules come back broken, Jev answers in 0.522 s against 1.665 s to 2.695 s for GPT-6 Luna, a table of quality and cost per model type, the agent repairs the code and the check is clean](stop-rules-demo.svg)
 
 The graphic shows one agent turn in a small TypeScript project: the agent adds `src/user.ts`
 with a direct `fetch`, a catch that drops the error and a TODO stub, and ends its turn. The
 stop hook cuts the change into pieces, asks Jev about each of the project's three rules, and
 hands back three findings with their scores. The agent rewrites the code with the project's
 `httpGet` helper, and the same check comes back clean. In between, beat 4 times how long
-each type of model takes to answer the same three questions: Jev, a small model built for yes
-or no questions, and GPT-6 Luna with and without reasoning.
+each type of model takes to answer the same three questions (Jev, a small model built for yes
+or no questions, and GPT-6 Luna with no, low and medium reasoning), then shows how many real
+breaks each one caught, how many false alarms it raised and what it costs, on 240 labelled
+agent-written changes.
 
 A still version for places that do not play animation is
 [`stop-rules-demo.png`](stop-rules-demo.png), the five beats stacked.
@@ -18,7 +20,8 @@ A still version for places that do not play animation is
 - **Real:** the project, the rules, the findings and scores in beat 3, the clean result in
   beat 5, and the timings in beat 4. The scores came from the live Jev service on 22 September
   2026, which reported its version as `jev-1.13.0`, using stop-rules 0.1.0 from this
-  repository. The timings in beat 4 came from Jev and from GPT-6 Luna on the same day.
+  repository. The timings, catches, false alarms and costs in beat 4 came from Jev and from GPT-6 Luna on
+  the same day; the sections below name the run each number came from.
 - **Scripted:** the agent's two turns. The broken change is
   [`agent-change.diff`](agent-change.diff) and the repair is [`agent-fix.diff`](agent-fix.diff),
   both written by hand and applied with `git apply`. We gave the same task to Claude Code
@@ -62,27 +65,60 @@ and beat 5 the lines that changed. The whole files are the two diffs.
 ## The latency
 
 Beat 4 races the model types on the same piece of `src/user.ts` and the same three rules,
-each asked the three yes or no questions at once. All of it was measured on 22 September 2026
-within the same hour: 5 timed runs per row, after one warm-up run that was not counted.
+each asked the three yes or no questions at once: 5 timed runs per row, after one warm-up
+run that was not counted. The graphic uses the second session, so every number in it comes
+from one sitting. Both sessions are here because latency moves by the hour: 47 minutes
+apart, every call median was higher in the second session and the end-to-end median lower.
 
-| Model type | Run 1 | Run 2 | Run 3 | Run 4 | Run 5 | Median |
-|---|---|---|---|---|---|---|
-| Jev `jev-1.13.0`, the call alone | 0.338 | 0.429 | 0.400 | 0.332 | 0.329 | **0.338 s** |
-| GPT-6 Luna, reasoning effort none | 1.135 | 1.039 | 1.363 | 1.010 | 0.923 | **1.039 s** |
-| GPT-6 Luna, reasoning effort low | 1.427 | 2.682 | 1.547 | 1.514 | 1.728 | **1.547 s** |
-| Jev, `stop-rules check` end to end | 0.855 | 0.764 | 0.671 | 0.812 | 0.783 | **0.783 s** |
+| Model type | Session (22 Sep 2026) | Run 1 | Run 2 | Run 3 | Run 4 | Run 5 | Median |
+|---|---|---|---|---|---|---|---|
+| Jev `jev-1.13.0`, the call alone | 19:11Z | 0.338 | 0.429 | 0.400 | 0.332 | 0.329 | **0.338 s** |
+| Jev `jev-1.13.0`, the call alone | 19:58Z | 0.407 | 0.579 | 0.482 | 0.564 | 0.522 | **0.522 s** |
+| GPT-6 Luna, reasoning none | 19:11Z | 1.135 | 1.039 | 1.363 | 1.010 | 0.923 | **1.039 s** |
+| GPT-6 Luna, reasoning none | 19:58Z | 1.665 | 1.352 | 2.565 | 2.769 | 1.571 | **1.665 s** |
+| GPT-6 Luna, reasoning low | 19:11Z | 1.427 | 2.682 | 1.547 | 1.514 | 1.728 | **1.547 s** |
+| GPT-6 Luna, reasoning low | 19:58Z | 1.904 | 4.729 | 1.917 | 3.621 | 2.053 | **2.053 s** |
+| GPT-6 Luna, reasoning medium | 19:11Z | not measured | | | | | not measured |
+| GPT-6 Luna, reasoning medium | 19:58Z | 2.695 | 2.008 | 2.339 | 4.134 | 3.684 | **2.695 s** |
+| Jev, `stop-rules check` end to end | 19:11Z | 0.855 | 0.764 | 0.671 | 0.812 | 0.783 | **0.783 s** |
+| Jev, `stop-rules check` end to end | 19:58Z | 0.564 | 0.668 | 0.610 | 0.634 | 0.752 | **0.634 s** |
 
 - "The call alone" is the time from sending the request to the last byte of the answer.
 - The GPT-6 Luna rows are one Responses API call each, with strict JSON output, asking the
-  same three questions about the same piece. It scored all three rules as broken on every
-  run, 0.98 or 0.99 each. No medium reasoning effort row was measured.
-- The end-to-end row is the wall time of the whole check process, answer cache deleted first:
-  git, Node startup, cutting the change, the Jev call and printing the report. It is the
-  number the graphic gives as "as a stop hook, including git and startup: 0.78 s".
+  same three questions about the same piece.
+- The end-to-end rows are the wall time of the whole check process, answer cache deleted
+  first: git, Node startup, cutting the change, the Jev call and printing the report. The
+  graphic's "as a stop hook, including git and startup" line is the second session's median.
 - The bars in the graphic grow at real speed from a shared start and stop at each median.
+- This does not include the time Claude Code takes to wake the agent with the report, which
+  was not measured.
 
-This does not include the time Claude Code takes to wake the agent with the report, which
-was not measured.
+## Quality and cost
+
+The second half of beat 4. Every value is read from the comparison's `summary.json`
+(`reports/2026-09-22-jev-vs-luna/` in the workbench), one run per row, named below. Each run
+judged the same 240 agent-written changes against the same six rules, blind labelled, at the
+bar the file states.
+
+| Model type | Run | Demo turn median | Caught | Plainly false | Arguable | Not ruled | $ per 1,000 checks | Context sent |
+|---|---|---|---|---|---|---|---|---|
+| Jev `jev-1.13.0` | `hunks-240` | 0.522 s | 20 of 32 | 10 | 5 | 11 | $0.033 | hunks |
+| GPT-6 Luna, reasoning none | `luna-240-none` | 1.665 s | 23 of 32 | 10 | 5 | 28 | $0.119 | piece |
+| GPT-6 Luna, reasoning low | `luna-240-low` | 2.053 s | 29 of 32 | 17 | 9 | 52 | $0.183 | piece |
+| GPT-6 Luna, reasoning medium | `luna-240-medium` | 2.695 s | 30 of 32 | 18 | 11 | 62 | $0.227 | piece |
+| GPT-6 Luna, reasoning low, 25 lines of context | `luna-240-window-low` | not measured | 29 of 32 | 14 | 9 | 28 | $0.225 | window |
+
+- The bar for every row is 0.5, and there are 32 real breaks. The file's own note: the current labels and
+  adjudications hold 32 real breaks for the six rules; the 20 September report said 31, before 16
+  more disputes were adjudicated.
+- "Not ruled" counts flags that no reviewer has ruled on yet. They are neither confirmed
+  breaks nor confirmed false alarms, and GPT-6 Luna raises far more of them than Jev.
+- Context sent, as the file names it: `hunks` is stop-rules' default cut, one diff hunk per
+  piece. `piece` is the diff piece alone. `window` is the piece with 25 lines around it, the
+  context the shipped tool sends, which is why that row is in the table.
+- The window row has no demo turn timing, because the demo turn was not timed in that mode.
+- Jev's run is on `jev-latest`, which reported `jev-1.13.0`; the GPT-6 Luna runs report
+  `gpt-6-luna`.
 
 ## Run it yourself
 
@@ -122,7 +158,7 @@ Scores move a little between runs and between Jev versions, so yours will not be
 
 | File | What it is |
 |---|---|
-| `stop-rules-demo.svg` | the animated graphic, five beats in an 18.5 second loop, in Haystack's dark palette |
+| `stop-rules-demo.svg` | the animated graphic, five beats in a 21.7 second loop, in Haystack's dark palette |
 | `stop-rules-demo.png` | the same five beats stacked, as a still image |
 | `stop-rules-demo-static.svg` | the source of that PNG |
 | `project/` | the small TypeScript project: `src/http.ts` holds `httpGet` and `httpDelete`, `src/team.ts` uses them |

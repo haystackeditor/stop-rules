@@ -6,7 +6,7 @@ each, and asks [Jev](https://typesafe.ai) one yes or no question per piece and p
 lines of the surrounding file so the question can be answered. If a rule is likely broken, it
 hands that piece of code back to the agent so it fixes it before you see it.
 
-![An agent writes code, the stop hook fires, three rules come back broken, Jev answers in 0.338 s against 1.039 s for GPT-6 Luna, and the agent repairs the code](examples/demo/stop-rules-demo.svg)
+![An agent writes code, the stop hook fires, three rules come back broken, Jev answers in 0.522 s against 1.665 s for GPT-6 Luna with no reasoning, and the agent repairs the code](examples/demo/stop-rules-demo.svg)
 
 [examples/demo/README.md](examples/demo/README.md) says what the graphic shows, which parts are
 real Jev output and which are scripted, and the commands that reproduce it.
