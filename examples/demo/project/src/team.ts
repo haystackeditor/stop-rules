@@ -1,6 +1,5 @@
+import { apiBase } from "./config.js";
 import { HttpError, httpGet } from "./http.js";
-
-const API = "https://api.example.com";
 
 export interface Team {
   id: string;
@@ -9,7 +8,7 @@ export interface Team {
 }
 
 export async function loadTeam(id: string): Promise<Team> {
-  return httpGet<Team>(`${API}/teams/${encodeURIComponent(id)}`);
+  return httpGet<Team>(`${apiBase}/teams/${encodeURIComponent(id)}`);
 }
 
 export async function findTeam(id: string): Promise<Team | null> {

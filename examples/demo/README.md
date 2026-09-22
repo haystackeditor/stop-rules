@@ -26,6 +26,12 @@ folder next to it, which is not in this repository, so a clone shows the system 
 [`stop-rules-demo.png`](stop-rules-demo.png) is four stills of the page: Jev done while GPT-6
 Luna is still running, both judged, both handed back, and turn 2.
 
+> **Being rebuilt.** The GIF, the stills, `page/index.html` and the timing and turn scores in
+> "Where each number on the page comes from" and "The latency" below were made from the previous
+> version of the two turns, which hardcoded a placeholder address. The findings and verification
+> runs in "The findings" are for the current turns. The page and its numbers will be rebuilt from
+> new timings on the current turns.
+
 ## Where each number on the page comes from
 
 Every number is written into the page when it is built, read from these files, not typed in:
@@ -49,6 +55,28 @@ Every number is written into the page when it is built, read from these files, n
 - **Not ruled.** These are flags no reviewer has ruled on yet. They are neither confirmed breaks
   nor confirmed false alarms.
 
+## The project
+
+[`project/`](project) is a small TypeScript service, written for this demo:
+
+- `src/config.ts` reads `API_BASE` from the environment and stops with `API_BASE is not set` if
+  it is missing or empty. There is no default address.
+- `src/http.ts` is the one place that talks HTTP: `httpGet` and `httpDelete` add the auth header,
+  a 5 second timeout and a retry on network errors and 5xx answers.
+- `src/team.ts` loads teams through `httpGet` and the configured `apiBase`.
+- `.stop-rules.md` holds the three rules.
+
+`tsc --noEmit` passes on the project as it stands after each of the two turns.
+
+The agent's broken turn, [`agent-change.diff`](agent-change.diff), adds `src/user.ts` and breaks
+exactly the three rules: `loadUser` calls `fetch` directly, its `catch` returns `null` and drops
+the error, and `deleteUser` is a TODO that returns `true`. The repair,
+[`agent-fix.diff`](agent-fix.diff), calls `httpGet` and `httpDelete`, returns `null` only for a
+404 and rethrows everything else, and implements `deleteUser`. Neither turn has a hardcoded
+address: both build their URLs from `apiBase`. An earlier version of this demo hardcoded a
+placeholder address in the repaired code, which is itself a break of the third rule; it was
+replaced by the configuration above.
+
 ## What is real and what is scripted
 
 - **Real:** the project, the rules, every score, every timing, every cost and every catch
@@ -64,20 +92,57 @@ Every number is written into the page when it is built, read from these files, n
 
 ## The findings
 
-All three are on the one piece the change was cut into, `src/user.ts` lines 1-21. The bar is
-the default, 0.6.
+The pieces were checked with the build of stop-rules that has both judges (branch `luna-judge`,
+commit 1538d42, `--judge jev` and `--judge openai --effort low` or `medium`), from real, cold runs:
+the answer cache in the scratch repository's `.git` was deleted before every run, so each run
+made one real request. Each run is `stop-rules check --base HEAD --json` (the exit code is what
+the hook acts on), then `stop-rules score --base HEAD --json`, which read the same answers back
+from the cache with no new request so that every rule's score is recorded, not only the ones over
+the bar. The bar is the default, 0.6. Jev reported its version as `jev-1.13.0`; GPT-6 Luna ran as
+`gpt-6-luna`. All runs on 22 September 2026.
 
-| Rule | Score on the page | Range over 5 check runs | After the repair |
-|---|---|---|---|
-| No stubs, placeholders or TODO implementations | 0.96 | 0.96 to 0.96 | 0.10 |
-| Never call `fetch` directly, use `httpGet` or `httpDelete` | 0.94 | 0.93 to 0.94 | 0.06 |
-| Do not silently swallow errors | 0.88 | 0.84 to 0.88 | 0.07 |
+- Broken turn, Jev: 5 cold runs, exit 2 every time, 3 findings.
+- Broken turn, GPT-6 Luna, reasoning low: 5 cold runs, exit 2 every time, 3 findings.
+- Repaired turn, Jev: 5 cold runs, exit 0 every time, 0 findings.
+- Repaired turn, GPT-6 Luna, reasoning low: 8 cold runs, exit 0 every time, 0 findings.
+- Repaired turn, GPT-6 Luna, reasoning medium: 5 cold runs, exit 0 every time, 0 findings.
 
-The page names each rule in a few words so it reads at a glance. The full wording is in
-[`project/.stop-rules.md`](project/.stop-rules.md), and this is the report the check printed
-on the third of 5 cold-cache check runs, the one the page takes its turn 1 Jev scores from,
-which is what the agent is handed. The diff of the piece follows it
-in the real output and is left off here.
+Every run, every rule. All scores are on the one piece the change was cut into, `src/user.ts`
+lines 1-21.
+
+| Turn | Judge | Run | Exit | Findings | fetch rule | errors rule | stub rule |
+|---|---|---|---|---|---|---|---|
+| Broken turn | Jev | 1 | 2 | 3 | 0.94 | 0.85 | 0.95 |
+| Broken turn | Jev | 2 | 2 | 3 | 0.94 | 0.88 | 0.95 |
+| Broken turn | Jev | 3 | 2 | 3 | 0.93 | 0.86 | 0.95 |
+| Broken turn | Jev | 4 | 2 | 3 | 0.94 | 0.86 | 0.95 |
+| Broken turn | Jev | 5 | 2 | 3 | 0.94 | 0.86 | 0.95 |
+| Broken turn | GPT-6 Luna, reasoning low | 1 | 2 | 3 | 0.99 | 0.96 | 0.99 |
+| Broken turn | GPT-6 Luna, reasoning low | 2 | 2 | 3 | 0.99 | 0.99 | 0.99 |
+| Broken turn | GPT-6 Luna, reasoning low | 3 | 2 | 3 | 0.99 | 0.99 | 0.99 |
+| Broken turn | GPT-6 Luna, reasoning low | 4 | 2 | 3 | 0.99 | 0.99 | 0.99 |
+| Broken turn | GPT-6 Luna, reasoning low | 5 | 2 | 3 | 0.99 | 0.99 | 0.99 |
+| Repaired turn | Jev | 1 | 0 | 0 | 0.06 | 0.07 | 0.04 |
+| Repaired turn | Jev | 2 | 0 | 0 | 0.06 | 0.07 | 0.04 |
+| Repaired turn | Jev | 3 | 0 | 0 | 0.05 | 0.06 | 0.04 |
+| Repaired turn | Jev | 4 | 0 | 0 | 0.06 | 0.07 | 0.04 |
+| Repaired turn | Jev | 5 | 0 | 0 | 0.06 | 0.07 | 0.04 |
+| Repaired turn | GPT-6 Luna, reasoning low | 1 | 0 | 0 | 0.05 | 0.05 | 0.05 |
+| Repaired turn | GPT-6 Luna, reasoning low | 2 | 0 | 0 | 0.05 | 0.05 | 0.05 |
+| Repaired turn | GPT-6 Luna, reasoning low | 3 | 0 | 0 | 0.05 | 0.05 | 0.05 |
+| Repaired turn | GPT-6 Luna, reasoning low | 4 | 0 | 0 | 0.05 | 0.05 | 0.05 |
+| Repaired turn | GPT-6 Luna, reasoning low | 5 | 0 | 0 | 0.05 | 0.05 | 0.05 |
+| Repaired turn | GPT-6 Luna, reasoning low | 6 | 0 | 0 | 0.02 | 0.03 | 0.01 |
+| Repaired turn | GPT-6 Luna, reasoning low | 7 | 0 | 0 | 0.05 | 0.05 | 0.05 |
+| Repaired turn | GPT-6 Luna, reasoning low | 8 | 0 | 0 | 0.05 | 0.05 | 0.05 |
+| Repaired turn | GPT-6 Luna, reasoning medium | 1 | 0 | 0 | 0.05 | 0.05 | 0.05 |
+| Repaired turn | GPT-6 Luna, reasoning medium | 2 | 0 | 0 | 0.05 | 0.05 | 0.05 |
+| Repaired turn | GPT-6 Luna, reasoning medium | 3 | 0 | 0 | 0.05 | 0.05 | 0.05 |
+| Repaired turn | GPT-6 Luna, reasoning medium | 4 | 0 | 0 | 0.01 | 0.02 | 0.01 |
+| Repaired turn | GPT-6 Luna, reasoning medium | 5 | 0 | 0 | 0.05 | 0.05 | 0.05 |
+
+This is the report Jev's check printed on the broken turn, which is what the agent is handed.
+The diff of the piece follows it in the real output and is left off here.
 
 ```
 stop-rules: 3 rule violations in 1 place in your latest changes. Jev saw 25 lines around it.
@@ -87,13 +152,10 @@ Fix each one. If a rule truly should not apply here, leave the code and tell the
    Rule: Do not leave stubs, placeholders, TODO implementations or fake data in code that is presented as finished. The break is a function that returns a canned value or throws "not implemented", a TODO where the real code should be, or sample data wired in as if it were real. A test double inside a test file is not covered, and an interface or type with no body is not a stub.
    Confidence: 0.96
    Rule: Never call `fetch` directly. Use `httpGet` or `httpDelete` from `src/http.ts`, which add the auth header, the timeout and the retry. The only file allowed to call `fetch` is `src/http.ts` itself. A test may call `fetch` against a server the test starts.
-   Confidence: 0.94
+   Confidence: 0.93
    Rule: Do not silently swallow errors. When code catches or receives an error it must rethrow it, return it to the caller, log it with enough context to debug, or store it on a result or record the caller can read. The break is a catch that drops the error and carries on as if nothing happened: an empty catch block, a catch that only says "ignore", or a top-level catch that exits without saying what failed. A test that catches an error it expects, to assert on it, is not covered.
-   Confidence: 0.88
+   Confidence: 0.86
 ```
-
-The page shows lines 9 to 21 of the broken file and 11 to 22 of the repaired one. The whole
-files are the two diffs.
 
 ## The latency
 

@@ -1,10 +1,10 @@
 diff --git a/src/user.ts b/src/user.ts
 new file mode 100644
-index 0000000..f65640c
+index 0000000..67fa246
 --- /dev/null
 +++ b/src/user.ts
 @@ -0,0 +1,21 @@
-+const API = "https://api.example.com";
++import { apiBase } from "./config.js";
 +
 +export interface User {
 +  id: string;
@@ -14,7 +14,7 @@ index 0000000..f65640c
 +
 +export async function loadUser(id: string): Promise<User | null> {
 +  try {
-+    const response = await fetch(`${API}/users/${encodeURIComponent(id)}`);
++    const response = await fetch(`${apiBase}/users/${encodeURIComponent(id)}`);
 +    return (await response.json()) as User;
 +  } catch {
 +    return null;
