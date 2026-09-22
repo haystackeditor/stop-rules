@@ -1,53 +1,53 @@
 # The stop-rules demo
 
-![Three panes: the change the agent wrote, the three rules with the judge's scores, and the findings sent back to the agent; the agent's second turn comes back clean](stop-rules-demo.gif)
+![The change the agent wrote across the top, then two columns, Jev and GPT-6 Luna with reasoning low, each scoring the same three rules and sending the same findings back; Jev answers first](stop-rules-demo.gif)
 
-The demo is one page with three panes that stay put while the data moves through them. On the
-left is the code the agent wrote, in the middle the team's three rules, and on the right what
-the stop hook hands back to the agent. In turn 1 the agent adds `src/user.ts` with a direct
-`fetch`, a catch that drops the error and a TODO stub; the judge scores all three rules at or
-above the 0.6 bar, and three findings go back. In turn 2 the agent rewrites the piece with the
-project's `httpGet` helper, and the same three questions come back clean.
+The demo is one page that compares two judges running the same stop hook check at the same
+moment: Jev, and GPT-6 Luna with low reasoning. The change the agent wrote runs across the top.
+Under it, each judge has its own column: the three rules, which fill with score chips when that
+judge answers, the findings it sends back to the agent, a status line with a timer, and four
+numbers.
 
-A status line under the panes says what the judge is doing, with a timer that runs at real
-speed and stops at the judge's measured median. A scoreboard under it adds up the questions
-asked and the seconds spent waiting, and shows the judge's cost per 1,000 checks and how many
-real breaks it caught on 240 labelled agent-written changes. Buttons switch the judge between
-Jev and GPT-6 Luna at three reasoning settings, and replay the same two turns with that judge's
-own numbers.
+In turn 1 the agent adds `src/user.ts` with a direct `fetch`, a catch that drops the error and a
+TODO stub. Both judges start at the same instant. Jev answers in 0.522 s and GPT-6 Luna in
+2.053 s, and both score all three rules at or above the 0.6 bar, so three findings go back.
+In turn 2 the agent rewrites the piece with the project's `httpGet` helper. Jev answers in
+0.399 s and scores it clean. GPT-6 Luna was never asked about the repaired piece in any recorded
+run, so its column says "not measured" for turn 2 instead of showing a verdict.
 
-The GIF above is one loop at 1x with Jev selected (20.8 s). The page itself is
-[`page/index.html`](page/index.html); open it in a browser. It loads Haystack's fonts from a
-`fonts/` folder next to it, which is not in this repository, so a clone shows the system fonts
-instead. [`stop-rules-demo.png`](stop-rules-demo.png) is four stills of the page: turn 1
-judged, turn 1 handed back, turn 2 clean, and turn 1 judged by GPT-6 Luna with medium
-reasoning.
+The four numbers under each column are the time spent waiting on the judge, its cost per 1,000
+checks, and how many of 32 real breaks it caught and how many plainly false alarms it raised on
+240 blind-labelled agent-written changes. The better of the two in each is blue. Jev is faster
+and cheaper and raises fewer false alarms; GPT-6 Luna catches more real breaks.
+
+The GIF above is one loop at 1x (21.4 s). The page itself is [`page/index.html`](page/index.html);
+open it in a browser for Pause, Restart and 2x speed. It loads Haystack's fonts from a `fonts/`
+folder next to it, which is not in this repository, so a clone shows the system fonts instead.
+[`stop-rules-demo.png`](stop-rules-demo.png) is four stills of the page: Jev done while GPT-6
+Luna is still running, both judged, both handed back, and turn 2.
 
 ## Where each number on the page comes from
 
 Every number is written into the page when it is built, read from these files, not typed in:
 
-| On the page | Source |
-|---|---|
-| Jev's turn 1 scores, 0.94 / 0.88 / 0.96 by rule | the `stop-rules check` report on the broken change, quoted under "The findings" below |
-| Jev's turn 2 scores, 0.06 / 0.07 / 0.10 | Jev's answers to `stop-rules score` on the repaired piece, 22 September 2026 |
-| GPT-6 Luna's turn 1 scores | the comparison's `demo-latency.json`, the call whose time is the median for that setting |
-| turn 1 timer, every judge | `demoTurn` in the comparison's `summary.json`, median of 5 calls, the call alone |
-| Jev's turn 2 timer, 0.399 s | 5 timed calls to Jev on the repaired piece at 20:10Z (357.0, 570.1, 398.9, 357.7, 424.8 ms, after one warm-up), timed the same way |
-| $ per 1,000 checks, real breaks caught, plainly false | the judge's run in `summary.json` (`hunks-240`, `luna-240-none`, `luna-240-low`, `luna-240-medium`), bar 0.5, 32 real breaks |
+| On the page | Jev | GPT-6 Luna, reasoning low | Source |
+|---|---|---|---|
+| turn 1 scores, by rule (fetch, errors, stub) | 0.94, 0.88, 0.96 | 0.99, 0.98, 0.99 | Jev: the `stop-rules check` report quoted under "The findings" below. Luna: the comparison's `demo-latency.json`, the call whose time is the median |
+| turn 1 time | 0.522 s | 2.053 s | `demoTurn` in the comparison's `summary.json`, median of 5 calls on this piece, the call alone |
+| turn 2 scores | 0.06, 0.07, 0.10 | not measured | Jev's answers to `stop-rules score` on the repaired piece; no file holds Luna's |
+| turn 2 time | 0.399 s | not measured | 5 timed calls to Jev on the repaired piece at 20:10Z: 357.0, 570.1, 398.9, 357.7 and 424.8 ms, after one warm-up |
+| $ per 1,000 checks | $0.033 | $0.183 | the judge's run in `summary.json`: `hunks-240` and `luna-240-low` |
+| real breaks caught, of 32 | 20 | 29 | same runs, bar 0.5 |
+| plainly false, and not ruled | 10, +11 | 17, +52 | same runs |
 
-Not measured, and the page says so rather than filling it in:
-
-- **GPT-6 Luna's turn 2.** No recorded run asked GPT-6 Luna about the repaired piece, so with a
-  Luna judge selected, turn 2 shows "not measured" instead of scores, and the timer and
-  scoreboard stop after turn 1.
-- **The judge's rule-by-rule answer ids.** Jev and GPT-6 Luna answer `q0_0`, `q0_1`, `q0_2` in
-  the order the rules appear in `.stop-rules.md`; the page maps them in that order. Jev's
-  turn 2 answers confirm it: its `score` output printed the stub rule at 0.10, the error rule at
-  0.07 and the `fetch` rule at 0.06, which are `q0_2`, `q0_1` and `q0_0`.
-
-The scoreboard's catch rate is at the comparison's bar of 0.5, while the demo runs at the
-tool's default of 0.6. The scoreboard says "bar 0.5" next to it.
+- **Rule order.** Both judges answer `q0_0`, `q0_1` and `q0_2` in the order the rules appear in
+  `.stop-rules.md`, and the page maps them in that order. Jev's turn 2 answers confirm it: its
+  `score` output printed the stub rule at 0.10, the error rule at 0.07 and the `fetch` rule at
+  0.06, which are `q0_2`, `q0_1` and `q0_0`.
+- **The bar.** The catches and false alarms are at the comparison's bar of 0.5. The demo runs
+  at the tool's default of 0.6, and the source line under the columns says so.
+- **Not ruled.** These are flags no reviewer has ruled on yet. They are neither confirmed breaks
+  nor confirmed false alarms.
 
 ## What is real and what is scripted
 
@@ -190,7 +190,7 @@ Scores move a little between runs and between Jev versions, so yours will not be
 
 | File | What it is |
 |---|---|
-| `stop-rules-demo.gif` | one loop of the page at 1x with Jev selected, 20.8 s |
+| `stop-rules-demo.gif` | one loop of the page at 1x, 21.4 s |
 | `stop-rules-demo.png` | four stills of the page, stacked |
 | `page/index.html` | the page, one self-contained file with every number built in; fonts not included |
 | `project/` | the small TypeScript project: `src/http.ts` holds `httpGet` and `httpDelete`, `src/team.ts` uses them |

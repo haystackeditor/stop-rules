@@ -6,7 +6,7 @@ each, and asks [Jev](https://typesafe.ai) one yes or no question per piece and p
 lines of the surrounding file so the question can be answered. If a rule is likely broken, it
 hands that piece of code back to the agent so it fixes it before you see it.
 
-![The stop-rules demo: the change the agent wrote, the three rules with Jev's scores, and the findings sent back to the agent, then the repaired code coming back clean](examples/demo/stop-rules-demo.gif)
+![The stop-rules demo: the change the agent wrote, then Jev and GPT-6 Luna scoring the same three rules side by side and sending the findings back; the repaired code comes back clean](examples/demo/stop-rules-demo.gif)
 
 [examples/demo/README.md](examples/demo/README.md) explains the demo, where every number on it
 comes from, and the commands that reproduce the checks.
