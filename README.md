@@ -7,6 +7,11 @@ lines of the surrounding file so the question can be answered. If a rule is like
 hands that piece of code back to the agent so it fixes it before you see it. Jev is the default
 judge; OpenAI's `gpt-6-luna` is the other one, see [Which judge](#which-judge).
 
+![The stop-rules demo: a Claude Code window where the agent ends its turn, the Stop hook fires, and Jev and GPT-6 Luna check the same change side by side; Jev answers in 0.20 s, Luna in 2.64 s, the code goes back, the agent fixes it, and the second check is clean](examples/demo/stop-rules-demo.gif)
+
+[examples/demo/README.md](examples/demo/README.md) explains the demo, where every number on it
+comes from, and the commands that reproduce the checks.
+
 Cutting by git diff hunk is the default, and it needs nothing installed. A team that would
 rather have one whole function per piece switches to tree-sitter with
 `init --cut functions`, which is 10 languages and a few megabytes of grammar files. Both are
