@@ -9,11 +9,10 @@ judge answers, the findings it sends back to the agent, a status line with a tim
 numbers.
 
 In turn 1 the agent adds `src/user.ts` with a direct `fetch`, a catch that drops the error and a
-TODO stub. Both judges start at the same instant. Jev answers in 0.522 s and GPT-6 Luna in
-2.053 s, and both score all three rules at or above the 0.6 bar, so three findings go back.
+TODO stub. Both judges start at the same instant. Jev answers in 0.362 s and GPT-6 Luna in
+1.881 s, and both score all three rules at or above the 0.6 bar, so three findings go back.
 In turn 2 the agent rewrites the piece with the project's `httpGet` helper. Jev answers in
-0.399 s and scores it clean. GPT-6 Luna was never asked about the repaired piece in any recorded
-run, so its column says "not measured" for turn 2 instead of showing a verdict.
+0.400 s and GPT-6 Luna in 1.695 s, and both score it clean.
 
 The four numbers under each column are the time spent waiting on the judge, its cost per 1,000
 checks, and how many of 32 real breaks it caught and how many plainly false alarms it raised on
@@ -24,34 +23,32 @@ The GIF above is one loop at 1x (21.4 s). The page itself is [`page/index.html`]
 open it in a browser for Pause, Restart and 2x speed. It loads Haystack's fonts from a `fonts/`
 folder next to it, which is not in this repository, so a clone shows the system fonts instead.
 [`stop-rules-demo.png`](stop-rules-demo.png) is four stills of the page: Jev done while GPT-6
-Luna is still running, both judged, both handed back, and turn 2.
-
-> **Being rebuilt.** The GIF, the stills, `page/index.html` and the timing and turn scores in
-> "Where each number on the page comes from" and "The latency" below were made from the previous
-> version of the two turns, which hardcoded a placeholder address. The findings and verification
-> runs in "The findings" are for the current turns. The page and its numbers will be rebuilt from
-> new timings on the current turns.
+Luna is still running, both judged, both handed back, and turn 2 clean.
 
 ## Where each number on the page comes from
 
-Every number is written into the page when it is built, read from these files, not typed in:
+Every number is written into the page when it is built, read from the comparison's
+`summary.json` (`reports/2026-09-22-jev-vs-luna/` in the workbench), not typed in. The two turns
+were timed and scored in one sitting at 20:46Z and 20:47Z on 22 September 2026, on this demo at
+commit a7ba284, 5 calls per judge per turn after one warm-up.
 
-| On the page | Jev | GPT-6 Luna, reasoning low | Source |
+| On the page | Jev | GPT-6 Luna, reasoning low | Source in `summary.json` |
 |---|---|---|---|
-| turn 1 scores, by rule (fetch, errors, stub) | 0.94, 0.88, 0.96 | 0.99, 0.98, 0.99 | Jev: the `stop-rules check` report quoted under "The findings" below. Luna: the comparison's `demo-latency.json`, the call whose time is the median |
-| turn 1 time | 0.522 s | 2.053 s | `demoTurn` in the comparison's `summary.json`, median of 5 calls on this piece, the call alone |
-| turn 2 scores | 0.06, 0.07, 0.10 | not measured | Jev's answers to `stop-rules score` on the repaired piece; no file holds Luna's |
-| turn 2 time | 0.399 s | not measured | 5 timed calls to Jev on the repaired piece at 20:10Z: 357.0, 570.1, 398.9, 357.7 and 424.8 ms, after one warm-up |
-| $ per 1,000 checks | $0.033 | $0.183 | the judge's run in `summary.json`: `hunks-240` and `luna-240-low` |
+| turn 1 scores (fetch, errors, stub) | 0.94, 0.87, 0.95 | 0.99, 0.99, 0.99 | `demoTurn`, the per-rule median of the 5 `broken` runs |
+| turn 1 time | 0.362 s | 1.881 s | `demoTurn`, `broken.callMedianMs`, the call alone |
+| turn 2 scores | 0.06, 0.07, 0.04 | 0.05, 0.05, 0.05 | `demoTurn`, the per-rule median of the 5 `repaired` runs |
+| turn 2 time | 0.400 s | 1.695 s | `demoTurn`, `repaired.callMedianMs` |
+| $ per 1,000 checks | $0.033 | $0.183 | runs `hunks-240` and `luna-240-low` |
 | real breaks caught, of 32 | 20 | 29 | same runs, bar 0.5 |
 | plainly false, and not ruled | 10, +11 | 17, +52 | same runs |
 
-- **Rule order.** Both judges answer `q0_0`, `q0_1` and `q0_2` in the order the rules appear in
-  `.stop-rules.md`, and the page maps them in that order. Jev's turn 2 answers confirm it: its
-  `score` output printed the stub rule at 0.10, the error rule at 0.07 and the `fetch` rule at
-  0.06, which are `q0_2`, `q0_1` and `q0_0`.
-- **The bar.** The catches and false alarms are at the comparison's bar of 0.5. The demo runs
-  at the tool's default of 0.6, and the source line under the columns says so.
+- **Rule order.** Both judges answer `q0_0`, `q0_1` and `q0_2`, which `summary.json` maps to the
+  rules in the order they appear in `.stop-rules.md`: the `fetch` rule, the errors rule, the stub
+  rule. The page checks that mapping against the rule text when it is built.
+- **Question form.** GPT-6 Luna is asked the same question as Jev, a probability per rule. The
+  comparison also measured a review form (findings with the quoted line); the page does not show it.
+- **The bar.** The catches and false alarms are at the comparison's bar of 0.5. The demo runs at
+  the tool's default of 0.6, and the source line under the columns says so.
 - **Not ruled.** These are flags no reviewer has ruled on yet. They are neither confirmed breaks
   nor confirmed false alarms.
 
@@ -159,33 +156,29 @@ Fix each one. If a rule truly should not apply here, leave the code and tell the
 
 ## The latency
 
-The turn 1 timer races the judges on the same piece of `src/user.ts` and the same three rules,
-each asked the three yes or no questions at once: 5 timed runs per row, after one warm-up
-run that was not counted. The page uses the second session, so every turn 1 time on it comes
-from one sitting. Both sessions are here because latency moves by the hour: 47 minutes
-apart, every call median was higher in the second session and the end-to-end median lower.
+Every row is 5 timed runs after one warm-up, both turns in one sitting (20:46Z and 20:47Z,
+22 September 2026). "The call alone" is the time from sending the request to the last byte of
+the answer. The GPT-6 Luna rows are one Responses API call each, with strict JSON output, asking
+the same three questions about the same piece. The end-to-end row is the wall time of the
+whole `stop-rules check` process with the answer cache deleted first: git, Node startup,
+cutting the change, the Jev call and printing the report. The page shows the call alone.
 
-| Model type | Session (22 Sep 2026) | Run 1 | Run 2 | Run 3 | Run 4 | Run 5 | Median |
-|---|---|---|---|---|---|---|---|
-| Jev `jev-1.13.0`, the call alone | 19:11Z | 0.338 | 0.429 | 0.400 | 0.332 | 0.329 | **0.338 s** |
-| Jev `jev-1.13.0`, the call alone | 19:58Z | 0.407 | 0.579 | 0.482 | 0.564 | 0.522 | **0.522 s** |
-| GPT-6 Luna, reasoning none | 19:11Z | 1.135 | 1.039 | 1.363 | 1.010 | 0.923 | **1.039 s** |
-| GPT-6 Luna, reasoning none | 19:58Z | 1.665 | 1.352 | 2.565 | 2.769 | 1.571 | **1.665 s** |
-| GPT-6 Luna, reasoning low | 19:11Z | 1.427 | 2.682 | 1.547 | 1.514 | 1.728 | **1.547 s** |
-| GPT-6 Luna, reasoning low | 19:58Z | 1.904 | 4.729 | 1.917 | 3.621 | 2.053 | **2.053 s** |
-| GPT-6 Luna, reasoning medium | 19:11Z | not measured | | | | | not measured |
-| GPT-6 Luna, reasoning medium | 19:58Z | 2.695 | 2.008 | 2.339 | 4.134 | 3.684 | **2.695 s** |
-| Jev, `stop-rules check` end to end | 19:11Z | 0.855 | 0.764 | 0.671 | 0.812 | 0.783 | **0.783 s** |
-| Jev, `stop-rules check` end to end | 19:58Z | 0.564 | 0.668 | 0.610 | 0.634 | 0.752 | **0.634 s** |
+| Judge, turn | Run 1 | Run 2 | Run 3 | Run 4 | Run 5 | Median |
+|---|---|---|---|---|---|---|
+| Jev `jev-1.13.0`, broken turn, the call alone | 0.406 | 0.356 | 0.320 | 0.576 | 0.362 | **0.362 s** |
+| Jev `jev-1.13.0`, repaired turn, the call alone | 0.425 | 0.348 | 0.375 | 0.431 | 0.400 | **0.400 s** |
+| GPT-6 Luna, reasoning none, broken turn, the call alone | 2.098 | 1.120 | 1.668 | 2.281 | 1.397 | **1.668 s** |
+| GPT-6 Luna, reasoning none, repaired turn, the call alone | 1.283 | 1.379 | 1.154 | 1.147 | 1.492 | **1.283 s** |
+| GPT-6 Luna, reasoning low, broken turn, the call alone | 1.602 | 1.922 | 1.857 | 1.881 | 1.887 | **1.881 s** |
+| GPT-6 Luna, reasoning low, repaired turn, the call alone | 1.759 | 1.371 | 2.455 | 1.695 | 1.539 | **1.695 s** |
+| GPT-6 Luna, reasoning medium, broken turn, the call alone | 2.184 | 2.154 | 2.995 | 4.824 | 2.047 | **2.184 s** |
+| GPT-6 Luna, reasoning medium, repaired turn, the call alone | 1.654 | 2.216 | 1.882 | 3.257 | 1.954 | **1.954 s** |
+| Jev, broken turn, `stop-rules check` end to end | 0.671 | 0.612 | 0.635 | 0.580 | 0.663 | **0.635 s** |
+| Jev, repaired turn, `stop-rules check` end to end | 0.686 | 0.542 | 0.705 | 0.834 | 0.653 | **0.686 s** |
 
-- "The call alone" is the time from sending the request to the last byte of the answer.
-- The GPT-6 Luna rows are one Responses API call each, with strict JSON output, asking the
-  same three questions about the same piece.
-- The end-to-end rows are the wall time of the whole check process, answer cache deleted
-  first: git, Node startup, cutting the change, the Jev call and printing the report. The
-  page does not show it; it is here for what a whole stop hook takes on this piece.
-- This does not include the time Claude Code takes to wake the agent with the report, which
-  was not measured.
+Earlier sessions the same day, on the previous version of the two turns, gave different
+medians (Jev 0.338 s and 0.522 s, GPT-6 Luna low 1.547 s and 2.053 s on the broken turn); latency
+moves by the hour, which is why the page takes both turns from one sitting.
 
 ## Quality and cost
 
@@ -194,12 +187,12 @@ The scoreboard's last two cells. Every value is read from the comparison's `summ
 judged the same 240 agent-written changes against the same six rules, blind labelled, at the
 bar the file states.
 
-| Model type | Run | Demo turn median | Caught | Plainly false | Arguable | Not ruled | $ per 1,000 checks | Context sent |
+| Model type | Run | Demo turn median (broken turn) | Caught | Plainly false | Arguable | Not ruled | $ per 1,000 checks | Context sent |
 |---|---|---|---|---|---|---|---|---|
-| Jev `jev-1.13.0` | `hunks-240` | 0.522 s | 20 of 32 | 10 | 5 | 11 | $0.033 | hunks |
-| GPT-6 Luna, reasoning none | `luna-240-none` | 1.665 s | 23 of 32 | 10 | 5 | 28 | $0.119 | piece |
-| GPT-6 Luna, reasoning low | `luna-240-low` | 2.053 s | 29 of 32 | 17 | 9 | 52 | $0.183 | piece |
-| GPT-6 Luna, reasoning medium | `luna-240-medium` | 2.695 s | 30 of 32 | 18 | 11 | 62 | $0.227 | piece |
+| Jev `jev-1.13.0` | `hunks-240` | 0.362 s | 20 of 32 | 10 | 5 | 11 | $0.033 | hunks |
+| GPT-6 Luna, reasoning none | `luna-240-none` | 1.668 s | 23 of 32 | 10 | 5 | 28 | $0.119 | piece |
+| GPT-6 Luna, reasoning low | `luna-240-low` | 1.881 s | 29 of 32 | 17 | 9 | 52 | $0.183 | piece |
+| GPT-6 Luna, reasoning medium | `luna-240-medium` | 2.184 s | 30 of 32 | 18 | 11 | 62 | $0.227 | piece |
 | GPT-6 Luna, reasoning low, 25 lines of context | `luna-240-window-low` | not measured | 29 of 32 | 14 | 9 | 28 | $0.225 | window |
 
 - The bar for every row is 0.5, and there are 32 real breaks. The file's own note: the current labels and
