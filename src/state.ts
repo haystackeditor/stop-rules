@@ -3,6 +3,7 @@ import { promises as fs } from "node:fs";
 import * as path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import type { JudgeInfo } from "./judge.js";
+import type { FindingDetail } from "./review.js";
 
 export const MAX_CACHE_ENTRIES = 5000;
 export const MAX_REPORTED_ENTRIES = 5000;
@@ -27,6 +28,8 @@ export interface StopRulesState {
 export interface CacheEntry {
   noul: number;
   at: number;
+  /** Review form only: the verdict, the quoted line and the reason behind the score. */
+  finding?: FindingDetail;
 }
 
 export interface Cache {
@@ -243,6 +246,7 @@ export interface RunLogLine {
   cacheHits: number;
   violations: number;
   notChecked: number;
+  rejectedFindings: number;
   inputTokens: number;
   outputTokens: number;
   cachedInputTokens?: number;

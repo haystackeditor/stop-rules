@@ -7,6 +7,7 @@ import type {
   NotChecked,
   PieceFinding,
   PieceScore,
+  RejectedFindingEntry,
   RunStats,
   ScoreReport,
 } from "./types.js";
@@ -62,7 +63,23 @@ function pieceDiff(piece: PieceFinding): string[] {
 }
 
 function ruleLines(rule: BrokenRule): string[] {
-  return [`   Rule: ${rule.rule}`, `   Confidence: ${confidence(rule.confidence)}`];
+  const lines = [
+    `   Rule: ${rule.rule}`,
+    `   Confidence: ${confidence(rule.confidence)}${rule.verdict === undefined ? "" : ` (${rule.verdict})`}`,
+  ];
+  // The review form says where: the added line it quoted, and why that line breaks the rule.
+  if (rule.line !== undefined) lines.push(`   Line: ${rule.line}`);
+  if (rule.reason !== undefined) lines.push(`   Why: ${rule.reason}`);
+  return lines;
+}
+
+/** Review form findings the tool refused. One line each; they never fail the run. */
+function rejectedSections(rejected: readonly RejectedFindingEntry[]): string[] {
+  if (rejected.length === 0) return [];
+  return [
+    `Findings rejected (${rejected.length}), not counted:\n` +
+      rejected.map((entry) => `  ${entry.why}`).join("\n"),
+  ];
 }
 
 /** One entry: the piece that failed, once, with every rule it broke. */
@@ -185,6 +202,7 @@ export function renderReport(report: CheckReport): string {
   }
 
   sections.push(...notCheckedSections(notChecked));
+  sections.push(...rejectedSections(report.rejected));
   return sections.join("\n\n");
 }
 
@@ -211,7 +229,11 @@ function jevSawLines(saw: JevView, judge: string): string[] {
 function scoreBlock(piece: PieceScore, index: number, judge: string): string {
   const unit = piece.unit === null ? "" : ` in ${piece.unit}`;
   const lines = [`${index}. ${piece.file} ${where(piece.fromLine, piece.toLine)}${unit}`];
-  for (const rule of piece.rules) lines.push(`   ${confidence(rule.score)}  ${rule.rule}`);
+  for (const rule of piece.rules) {
+    lines.push(`   ${confidence(rule.score)}  ${rule.rule}`);
+    if (rule.line !== undefined) lines.push(`         Line: ${rule.line}`);
+    if (rule.reason !== undefined) lines.push(`         Why: ${rule.reason}`);
+  }
   if (piece.jevSaw !== undefined) lines.push(...jevSawLines(piece.jevSaw, judge));
   return lines.join("\n");
 }
@@ -238,5 +260,6 @@ export function renderScores(report: ScoreReport): string {
   }
 
   sections.push(...notCheckedSections(notChecked));
+  sections.push(...rejectedSections(report.rejected));
   return sections.join("\n\n");
 }

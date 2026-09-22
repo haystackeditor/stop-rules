@@ -22,11 +22,23 @@ import { cacheModel, judgeName, type Judge } from "./judge.js";
 import {
   OpenAiClient,
   promptCacheKey,
+  readVerdict,
   requestBody,
   userInput,
   type OpenAiNode,
   type OpenAiQuestion,
 } from "./openai.js";
+import {
+  addedLines,
+  quoteInPiece,
+  readReview,
+  reviewBody,
+  reviewInput,
+  VERDICT_SCORE,
+  type FindingDetail,
+  type RejectedFinding,
+  type ReviewFinding,
+} from "./review.js";
 import {
   NO_CONTEXT,
   type BrokenRule,
@@ -65,9 +77,12 @@ export const DEFAULT_MAX_CALLS = 60;
  */
 export const DEFAULT_MAX_CALLS_OPENAI = 240;
 
-/** The call ceiling a judge gets when neither the file nor a flag sets one. */
-export function defaultMaxCalls(judge: { kind: "jev" | "openai" }): number {
-  return judge.kind === "jev" ? DEFAULT_MAX_CALLS : DEFAULT_MAX_CALLS_OPENAI;
+/**
+ * The call ceiling a judge gets when neither the file nor a flag sets one. The review form puts
+ * a whole change in one call, so Jev's 60 is already more than it needs.
+ */
+export function defaultMaxCalls(judge: { kind: "jev" | "openai"; form?: "review" | "scores" }): number {
+  return judge.kind === "openai" && judge.form === "scores" ? DEFAULT_MAX_CALLS_OPENAI : DEFAULT_MAX_CALLS;
 }
 
 /** Measured: four pieces per call moved scores by 0.03 on average, eight was worse. */
@@ -83,10 +98,13 @@ const CACHE_KEY_VERSION = "v1";
  */
 const CACHE_PIECE_KEY = "p0";
 
-/** Minimal cache seam: the caller owns storage and eviction. */
+/**
+ * Minimal cache seam: the caller owns storage and eviction. A review form answer also keeps
+ * what the finding said, so a cached finding still shows the agent the line and the reason.
+ */
 export interface CacheLike {
-  get(key: string): number | undefined;
-  set(key: string, noul: number): void;
+  get(key: string): { noul: number; detail?: FindingDetail } | undefined;
+  set(key: string, noul: number, detail?: FindingDetail): void;
 }
 
 export interface EngineInput {
@@ -152,6 +170,8 @@ export interface EngineResult {
   usage: JudgeUsage;
   /** (rule, piece) pairs whose violations are in this result. */
   findings: { ruleId: string; pieceText: string }[];
+  /** Review form findings the tool refused: an unknown rule, or a line the change did not add. */
+  rejected: RejectedFinding[];
 }
 
 /**
@@ -221,6 +241,8 @@ interface Hit {
   context: PieceContext;
   rule: Rule;
   score: number;
+  /** Review form only: the line the model quoted and why, for the report. */
+  detail?: FindingDetail;
 }
 
 function reasonFor(failure: string, message: string): string {
@@ -322,42 +344,183 @@ function openAiBytes(judge: OpenAiJudge, work: Work): number {
 }
 
 /** One piece, every rule it still needs, one call. The halves keep the same rules and key. */
-function makeOpenAiNode(work: Work, cacheKeyText: string): OpenAiNode<PackPayload> {
+function makeOpenAiNode(
+  judge: OpenAiJudge,
+  work: Work,
+  cacheKeyText: string,
+): OpenAiNode<PackPayload, Record<string, number>> {
   const byQuestion: Record<string, { piece: Piece; rule: Rule }> = {};
   const ids = work.rules.map((rule, index) => {
     const id = `q0_${index}`;
     byQuestion[id] = { piece: work.piece, rule };
     return id;
   });
+  const question: OpenAiQuestion = {
+    input: userInput(pieceState(work.piece, work.context), openAiRules(work.rules)),
+    promptCacheKey: cacheKeyText,
+    ids,
+  };
   return {
     payload: { work: [work], byQuestion },
-    question: {
-      input: userInput(pieceState(work.piece, work.context), openAiRules(work.rules)),
-      promptCacheKey: cacheKeyText,
-      ids,
+    request: {
+      body: requestBody(judge.model, judge.effort, question),
+      read: (parsed) => readVerdict(parsed, ids),
     },
     halve: () => {
       const halves = halvePiece(work.piece);
       if (halves === null) return null;
       return [
-        makeOpenAiNode({ piece: halves[0], context: halves[0].context, rules: work.rules }, cacheKeyText),
-        makeOpenAiNode({ piece: halves[1], context: halves[1].context, rules: work.rules }, cacheKeyText),
+        makeOpenAiNode(judge, { piece: halves[0], context: halves[0].context, rules: work.rules }, cacheKeyText),
+        makeOpenAiNode(judge, { piece: halves[1], context: halves[1].context, rules: work.rules }, cacheKeyText),
       ];
     },
   };
 }
 
+/** One change's pieces, grouped by file in line order, as the review form sends them. */
+function reviewFiles(work: readonly Work[]): { file: string; views: ReturnType<typeof pieceState>[] }[] {
+  const byFile = new Map<string, Work[]>();
+  for (const item of work) byFile.set(item.piece.file, [...(byFile.get(item.piece.file) ?? []), item]);
+  return [...byFile.entries()]
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([file, items]) => ({
+      file,
+      views: [...items]
+        .sort((a, b) => a.piece.fromLine - b.piece.fromLine)
+        .map((item) => pieceState(item.piece, item.context)),
+    }));
+}
+
+/** Every rule of the repository goes into a review call, whatever the pieces still need. */
+function reviewCallInput(work: readonly Work[], rules: readonly Rule[]): string {
+  return reviewInput(reviewFiles(work), openAiRules(rules));
+}
+
+function reviewBytes(judge: OpenAiJudge, work: readonly Work[], rules: readonly Rule[]): number {
+  return utf8Bytes(reviewBody(judge.model, judge.effort, reviewCallInput(work, rules)));
+}
+
+/**
+ * One review call: a group of pieces from one change and every rule. Too long for the model,
+ * it splits the group in two, then a lone piece in two.
+ */
+function makeReviewNode(
+  judge: OpenAiJudge,
+  work: Work[],
+  rules: readonly Rule[],
+): OpenAiNode<PackPayload, ReviewFinding[]> {
+  const byQuestion: Record<string, { piece: Piece; rule: Rule }> = {};
+  work.forEach((item, index) => {
+    rules.forEach((rule, ruleIndex) => {
+      byQuestion[`q${index}_${ruleIndex}`] = { piece: item.piece, rule };
+    });
+  });
+  return {
+    payload: { work, byQuestion },
+    request: {
+      body: reviewBody(judge.model, judge.effort, reviewCallInput(work, rules)),
+      read: readReview,
+    },
+    halve: () => {
+      if (work.length > 1) {
+        const mid = Math.ceil(work.length / 2);
+        return [makeReviewNode(judge, work.slice(0, mid), rules), makeReviewNode(judge, work.slice(mid), rules)];
+      }
+      const only = work[0];
+      if (only === undefined) return null;
+      const halves = halvePiece(only.piece);
+      if (halves === null) return null;
+      return [
+        makeReviewNode(judge, [{ piece: halves[0], context: halves[0].context, rules: only.rules }], rules),
+        makeReviewNode(judge, [{ piece: halves[1], context: halves[1].context, rules: only.rules }], rules),
+      ];
+    },
+  };
+}
+
+/** Groups a change's pieces into as few review calls as fit under the byte cap. */
+function packReview(judge: OpenAiJudge, work: readonly Work[], rules: readonly Rule[]): Work[][] {
+  const ordered = reviewFiles(work).flatMap((entry) =>
+    work
+      .filter((item) => item.piece.file === entry.file)
+      .sort((a, b) => a.piece.fromLine - b.piece.fromLine),
+  );
+  const packs: Work[][] = [];
+  let current: Work[] = [];
+  for (const item of ordered) {
+    const candidate = [...current, item];
+    if (current.length > 0 && reviewBytes(judge, candidate, rules) > PACK_MAX_BYTES) {
+      packs.push(current);
+      current = [item];
+      continue;
+    }
+    current = candidate;
+  }
+  if (current.length > 0) packs.push(current);
+  return packs;
+}
+
+/**
+ * Turns one review answer into a score per (piece, rule). A finding lands on every piece of
+ * the call that has the quoted line among its added lines, and the strongest finding for a
+ * rule wins. A finding for a rule that is not in the repository, or quoting a line no piece
+ * added, is refused on its own: the rest of the answer still counts.
+ */
+function scoreReview(
+  payload: PackPayload,
+  findings: readonly ReviewFinding[],
+  rules: readonly Rule[],
+  judgeLabel: string,
+): { answers: Record<string, number>; details: Record<string, FindingDetail>; rejected: RejectedFinding[] } {
+  const answers: Record<string, number> = {};
+  const details: Record<string, FindingDetail> = {};
+  const rejected: RejectedFinding[] = [];
+  const ruleIndex = new Map(rules.map((rule, index) => [rule.id, index]));
+  const added = payload.work.map((item) => addedLines(chunkText(item.piece)));
+  for (const id of Object.keys(payload.byQuestion)) answers[id] = 0;
+  for (const finding of findings) {
+    const index = ruleIndex.get(finding.ruleId);
+    if (index === undefined) {
+      rejected.push({
+        ruleId: finding.ruleId,
+        line: finding.line,
+        why: `${judgeLabel} reported the rule ${JSON.stringify(finding.ruleId)}, which is not one of this repository's rules`,
+      });
+      continue;
+    }
+    const hits = payload.work.map((_, piece) => piece).filter((piece) => quoteInPiece(finding.line, added[piece] ?? []));
+    if (hits.length === 0) {
+      rejected.push({
+        ruleId: finding.ruleId,
+        line: finding.line,
+        why: `${judgeLabel} quoted a line for rule ${finding.ruleId} that is not an added line of this change: ${JSON.stringify(finding.line.trim().slice(0, 160))}`,
+      });
+      continue;
+    }
+    const score = VERDICT_SCORE[finding.confidence];
+    for (const piece of hits) {
+      const id = `q${piece}_${index}`;
+      if ((answers[id] ?? 0) >= score && details[id] !== undefined) continue;
+      answers[id] = score;
+      details[id] = { verdict: finding.confidence, line: finding.line.trim(), reason: finding.reason.trim() };
+    }
+  }
+  return { answers, details, rejected };
+}
+
 /** The bytes a call carrying only this piece would weigh, for the judge that will be asked. */
-function soloBytes(judge: Judge, work: Work): number {
-  return judge.kind === "jev" ? packBytes(judge.model, [work]) : openAiBytes(judge, work);
+function soloBytes(judge: Judge, work: Work, rules: readonly Rule[]): number {
+  if (judge.kind === "jev") return packBytes(judge.model, [work]);
+  return judge.form === "scores" ? openAiBytes(judge, work) : reviewBytes(judge, [work], rules);
 }
 
 /** What the engine needs back from either judge for one call. */
 interface CallResult {
   payload: PackPayload;
   outcome:
-    | { ok: true; answers: Record<string, number> }
+    | { ok: true; answers: Record<string, number>; details?: Record<string, FindingDetail> }
     | { ok: false; failure: FailureClass; message: string };
+  rejected?: RejectedFinding[];
 }
 
 interface Asked {
@@ -404,8 +567,22 @@ async function askJudge(
     ...(input.sleep ? { sleep: input.sleep } : {}),
     ...(input.slot ? { slot: input.slot } : {}),
   });
+  if (judge.form === "review") {
+    const nodes = packReview(judge, work, input.rules).map((pack) => makeReviewNode(judge, pack, input.rules));
+    const results = (await client.askAll(nodes)).map((result): CallResult => {
+      if (!result.outcome.ok) return { payload: result.node.payload, outcome: result.outcome };
+      const scored = scoreReview(result.node.payload, result.outcome.answer, input.rules, judge.model);
+      return {
+        payload: result.node.payload,
+        outcome: { ok: true, answers: scored.answers, details: scored.details },
+        rejected: scored.rejected,
+      };
+    });
+    return { results, calls: client.calls, usage: { ...client.usage } };
+  }
+
   const keys = new Map<string, string>();
-  const nodes: OpenAiNode<PackPayload>[] = [];
+  const nodes: OpenAiNode<PackPayload, Record<string, number>>[] = [];
   for (const item of work) {
     const rulesKey = item.rules.map((rule) => rule.id).join(",");
     let key = keys.get(rulesKey);
@@ -413,12 +590,14 @@ async function askJudge(
       key = await promptCacheKey(openAiRules(item.rules));
       keys.set(rulesKey, key);
     }
-    nodes.push(makeOpenAiNode(item, key));
+    nodes.push(makeOpenAiNode(judge, item, key));
   }
-  const results = (await client.askAll(nodes)).map((result) => ({
-    payload: result.node.payload,
-    outcome: result.outcome,
-  }));
+  const results = (await client.askAll(nodes)).map(
+    (result): CallResult => ({
+      payload: result.node.payload,
+      outcome: result.outcome.ok ? { ok: true, answers: result.outcome.answer } : result.outcome,
+    }),
+  );
   return { results, calls: client.calls, usage: { ...client.usage } };
 }
 
@@ -436,7 +615,7 @@ function contextThatFits(
 ): PieceContext {
   const context = piece.context;
   if (context.kind === "none") return context;
-  const bytes = soloBytes(judge, { piece, context, rules: [...rules] });
+  const bytes = soloBytes(judge, { piece, context, rules: [...rules] }, rules);
   if (bytes <= PACK_MAX_BYTES) return context;
   refused.push({ file: piece.file, fromLine: piece.fromLine, toLine: piece.toLine, bytes });
   note(
@@ -477,22 +656,41 @@ export async function runEngine(input: EngineInput): Promise<EngineResult> {
   };
 
   // Stage 1. A piece whose every rule is already answered costs nothing and rides in no call.
+  const reviewForm = judge.kind === "openai" && judge.form === "review";
+  const rejected: RejectedFinding[] = [];
   const work: Work[] = [];
   for (const piece of input.pieces) {
     const context = contextThatFits(judge, piece, input.rules, tooBigToWiden, note);
     if (context.kind === "wide") widened += 1;
     if (context.kind === "function") withFunction += 1;
     const state = soloState(piece, context);
-    const uncached: Rule[] = [];
+    let uncached: Rule[] = [];
+    const hitsHere: Hit[] = [];
     for (const rule of input.rules) {
       const cached = cache.get(await cacheKey(model, stage1Claim(rule, CACHE_PIECE_KEY), state));
       if (cached === undefined) {
         uncached.push(rule);
         continue;
       }
-      cacheHits += 1;
-      answered += 1;
-      scored.push({ piece, context, rule, score: cached });
+      hitsHere.push({
+        piece,
+        context,
+        rule,
+        score: cached.noul,
+        ...(cached.detail !== undefined ? { detail: cached.detail } : {}),
+      });
+    }
+    // A review reads every rule at once, so a piece with any rule unanswered is asked whole and
+    // its cached answers for the other rules are not used this time.
+    if (reviewForm && uncached.length > 0) uncached = [...input.rules];
+    else {
+      cacheHits += hitsHere.length;
+      answered += hitsHere.length;
+      scored.push(...hitsHere);
+    }
+    if (reviewForm) {
+      if (uncached.length > 0) work.push({ piece, context, rules: uncached });
+      continue;
     }
     for (let i = 0; i < uncached.length; i += MAX_RULES_PER_CALL) {
       work.push({ piece, context, rules: uncached.slice(i, i + MAX_RULES_PER_CALL) });
@@ -504,6 +702,10 @@ export async function runEngine(input: EngineInput): Promise<EngineResult> {
   for (const result of asked.results) {
     const { work: sent, byQuestion } = result.payload;
     piecesPerCall.push(sent.length);
+    for (const refused of result.rejected ?? []) {
+      rejected.push(refused);
+      note(`finding rejected: ${refused.why}`);
+    }
     if (!result.outcome.ok) {
       const failure = result.outcome.failure;
       if (holdsBaseline(failure)) holdBaseline = true;
@@ -529,6 +731,7 @@ export async function runEngine(input: EngineInput): Promise<EngineResult> {
       if (item === undefined) {
         throw new Error("internal error: an answer for a piece that was not in the pack");
       }
+      const detail = result.outcome.details?.[id];
       cache.set(
         await cacheKey(
           model,
@@ -536,8 +739,15 @@ export async function runEngine(input: EngineInput): Promise<EngineResult> {
           soloState(target.piece, item.context),
         ),
         noul,
+        detail,
       );
-      scored.push({ piece: target.piece, context: item.context, rule: target.rule, score: noul });
+      scored.push({
+        piece: target.piece,
+        context: item.context,
+        rule: target.rule,
+        score: noul,
+        ...(detail !== undefined ? { detail } : {}),
+      });
     }
   }
 
@@ -574,6 +784,7 @@ export async function runEngine(input: EngineInput): Promise<EngineResult> {
     blockedMessage,
     usage: asked.usage,
     findings,
+    rejected,
   };
 }
 
@@ -589,6 +800,9 @@ function groupByPiece(fresh: readonly Hit[]): PieceFinding[] {
       ruleId: hit.rule.id,
       rule: hit.rule.text,
       confidence: hit.score,
+      ...(hit.detail !== undefined
+        ? { verdict: hit.detail.verdict, line: hit.detail.line, reason: hit.detail.reason }
+        : {}),
     };
     const existing = byPiece.get(text);
     if (existing !== undefined) {
@@ -625,6 +839,9 @@ function groupScores(scored: readonly Hit[], showContext: boolean): PieceScore[]
       ruleId: hit.rule.id,
       rule: hit.rule.text,
       score: hit.score,
+      ...(hit.detail !== undefined
+        ? { verdict: hit.detail.verdict, line: hit.detail.line, reason: hit.detail.reason }
+        : {}),
     };
     const existing = byPiece.get(text);
     if (existing !== undefined) {

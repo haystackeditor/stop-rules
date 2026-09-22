@@ -90,11 +90,11 @@ measured totals behind each one, so read it before you answer questions about it
 
 | Knob | Default | What turning it does |
 |---|---|---|
-| `cut` | `hunks` | `hunks` uses no parser, is one file of 380 KB, covers every language, and hands the agent the git diff hunk the fault sits in. `functions` uses tree-sitter, hands the agent the one function at fault instead, and copies a few megabytes of grammar files into `.stop-rules/`. `chunks` installs the same one file as the default and uses bigger pieces, up to 12,000 bytes, which is the quietest of the three and hands over the most code. |
+| `cut` | `hunks` | `hunks` uses no parser, is one file of 394 KB, covers every language, and hands the agent the git diff hunk the fault sits in. `functions` uses tree-sitter, hands the agent the one function at fault instead, and copies a few megabytes of grammar files into `.stop-rules/`. `chunks` installs the same one file as the default and uses bigger pieces, up to 12,000 bytes, which is the quietest of the three and hands over the most code. |
 | `threshold` | `0.6` | The bar a score must reach to count. Lower catches more and flags more. Measured on 96 agent sessions with well-worded rules: 0.5 caught 59 of 62 real breaks with 13 wrong flags, 0.6 caught 56 with 5, 0.7 caught 46 with 2. There is no single right number: it is how much the team minds a wrong flag against a missed break. Tell them that, show them those three rows, and say that `stop-rules score` on their own recent changes is how to see where their real problems and their noise land before settling on one. |
 | `maxCalls` | `60` | Requests to Jev in one run. When it runs out, the rest of the change is reported as not checked and picked up on the next run. |
 | `endpoint` | none, so each person uses their own Jev key | Team mode: questions go to your team's server, which holds the one key. |
-| `judge` | `{"kind": "jev"}` | Which service scores the pieces. The one-line switch is `node .stop-rules/stop-rules.mjs init --judge openai`, which writes `{"kind": "openai", "model": "gpt-6-luna", "effort": "low"}`. Measured at bar 0.5 on 240 changes: Jev caught 20 of 32 real breaks with 10 plainly false flags at $0.0329 per 1,000 checks and 194 ms per call; gpt-6-luna at effort low caught 29 with 17 at $0.1826 and 2,405 ms. The README's "Which judge" has the whole table. |
+| `judge` | `{"kind": "jev"}` | Which service scores the pieces. The one-line switch is `node .stop-rules/stop-rules.mjs init --judge openai`, which writes `{"kind": "openai", "form": "review", "model": "gpt-6-luna", "effort": "low"}`: one call per change, and each finding hands the agent the offending line and a reason. Measured at bar 0.5 on 240 changes: Jev caught 20 of 32 real breaks with 10 plainly false flags, $0.027 for all 240 and 193 ms a change; gpt-6-luna in the review form at effort low caught 31 with 10, $0.059 and 2,643 ms a change. `"form": "scores"` is the older per-piece probability form. The README's "Which judge" has the whole table. |
 
 Say this about the cut, in plain words, because it is the one the human is most likely to want
 changed: the default is git diff hunks, and nothing is installed for it. Tree-sitter would buy
@@ -362,7 +362,7 @@ Commit:
 
 - `.stop-rules.md`, the rules.
 - `.stop-rules/`, so teammates and cloud agents get the check with nothing to install. On a
-  default install that is one file of 380 KB. In `functions` mode it also holds the parser and
+  default install that is one file of 394 KB. In `functions` mode it also holds the parser and
   the grammars, a few megabytes of wasm; if the team would rather not keep binaries in their
   history, commit only `.stop-rules/stop-rules.mjs` and tell them that each person runs `init`
   again once on their own machine; until they do, files in that language are reported as not

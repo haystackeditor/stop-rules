@@ -5,14 +5,17 @@
  *
  * Keys: `endpoint` (the team server), `cut` (hunks, functions or chunks), `threshold` (0 to 1),
  * `maxCalls` (whole number of requests to the judge per run) and `judge` (which service scores
- * the pieces: `{"kind": "jev"}`, the default, or `{"kind": "openai", "model": "gpt-6-luna",
- * "effort": "low", "inFlight": 4}`). Anything else in the file, a value of the wrong type, and a
+ * the pieces: `{"kind": "jev"}`, the default, or `{"kind": "openai", "form": "review",
+ * "model": "gpt-6-luna", "effort": "low", "inFlight": 4}`, where form is review or scores). Anything else in the file, a value of the wrong type, and a
  * value out of range are all errors that name the key.
  */
 
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
 import {
+  DEFAULT_FORM,
+  FORMS,
+  type Form,
   DEFAULT_EFFORT,
   DEFAULT_IN_FLIGHT,
   DEFAULT_OPENAI_MODEL,
@@ -42,7 +45,7 @@ export const DEFAULT_CUT: CutMode = "hunks";
  */
 export type JudgeSetting =
   | { kind: "jev" }
-  | { kind: "openai"; model?: string; effort?: Effort; inFlight?: number };
+  | { kind: "openai"; model?: string; effort?: Effort; inFlight?: number; form?: Form };
 
 export interface Settings {
   /** The team server every developer's hook sends questions to. */
@@ -55,7 +58,7 @@ export interface Settings {
 
 const KNOWN_KEYS = ["endpoint", "cut", "threshold", "maxCalls", "judge"] as const;
 const JEV_JUDGE_KEYS = ["kind"];
-const OPENAI_JUDGE_KEYS = ["kind", "model", "effort", "inFlight"];
+const OPENAI_JUDGE_KEYS = ["kind", "form", "model", "effort", "inFlight"];
 
 /** What the --judge, --model and --effort flags asked for. Absent when not given. */
 export interface JudgeFlags {
@@ -67,7 +70,7 @@ export interface JudgeFlags {
 /** The judge a run uses, before the Jev model is read from the environment. */
 export type JudgeChoice =
   | { kind: "jev" }
-  | { kind: "openai"; model: string; effort: Effort; inFlight: number };
+  | { kind: "openai"; model: string; effort: Effort; inFlight: number; form: Form };
 
 /**
  * A flag beats the file, which beats the default. A model or an effort asked for while the
@@ -98,6 +101,7 @@ export function chooseJudge(
       model: flags.model ?? base?.model ?? DEFAULT_OPENAI_MODEL,
       effort: flags.effort ?? base?.effort ?? DEFAULT_EFFORT,
       inFlight: base?.inFlight ?? DEFAULT_IN_FLIGHT,
+      form: base?.form ?? DEFAULT_FORM,
     },
   };
 }
@@ -145,6 +149,16 @@ export function parseJudge(file: string, raw: unknown): JudgeParse {
       };
     }
     judge.effort = effort as Effort;
+  }
+  const form = record["form"];
+  if (form !== undefined) {
+    if (!(FORMS as readonly unknown[]).includes(form)) {
+      return {
+        ok: false,
+        reason: `"judge.form" in ${file} must be one of ${FORMS.join(", ")}, not ${JSON.stringify(form)}.`,
+      };
+    }
+    judge.form = form as Form;
   }
   const inFlight = record["inFlight"];
   if (inFlight !== undefined) {

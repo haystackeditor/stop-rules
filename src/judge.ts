@@ -29,10 +29,19 @@ export const MAX_IN_FLIGHT = 8;
 
 export type JudgeKind = "jev" | "openai";
 
+/**
+ * How the OpenAI judge is asked. `review`, the default: one call per change, and the model
+ * reports each rule the added lines break, with the line quoted. `scores`: one call per piece,
+ * and the model gives a probability per rule, which is the form the tool shipped first.
+ */
+export const FORMS = ["review", "scores"] as const;
+export type Form = (typeof FORMS)[number];
+export const DEFAULT_FORM: Form = "review";
+
 /** A judge with every value filled in. */
 export type Judge =
   | { kind: "jev"; model: string }
-  | { kind: "openai"; model: string; effort: Effort; inFlight: number };
+  | { kind: "openai"; model: string; effort: Effort; inFlight: number; form: Form };
 
 /** What a judge is called in a sentence the user reads: "Jev", or the model name. */
 export function judgeName(judge: Judge | JudgeInfo): string {
@@ -45,7 +54,9 @@ export function judgeName(judge: Judge | JudgeInfo): string {
  * kind, model and effort, so answers from the two judges, or from two efforts, never mix.
  */
 export function cacheModel(judge: Judge): string {
-  return judge.kind === "jev" ? judge.model : `openai:${judge.model}:${judge.effort}`;
+  if (judge.kind === "jev") return judge.model;
+  const base = `openai:${judge.model}:${judge.effort}`;
+  return judge.form === "scores" ? base : `${base}:review`;
 }
 
 /** The judge as `check --json` and `score --json` print it. */
@@ -53,17 +64,21 @@ export interface JudgeInfo {
   kind: JudgeKind;
   model: string;
   effort?: Effort;
+  form?: Form;
 }
 
 export function judgeInfo(judge: Judge): JudgeInfo {
   return judge.kind === "jev"
     ? { kind: "jev", model: judge.model }
-    : { kind: "openai", model: judge.model, effort: judge.effort };
+    : { kind: "openai", model: judge.model, effort: judge.effort, form: judge.form };
 }
 
-/** One line for a human: "jev, model jev-latest" or "openai, model gpt-6-luna at effort low". */
+/**
+ * One line for a human: "jev, model jev-latest" or
+ * "openai, model gpt-6-luna at effort low, review form".
+ */
 export function describeJudge(judge: JudgeInfo): string {
-  return judge.effort === undefined
-    ? `${judge.kind}, model ${judge.model}`
-    : `${judge.kind}, model ${judge.model} at effort ${judge.effort}`;
+  if (judge.effort === undefined) return `${judge.kind}, model ${judge.model}`;
+  const form = judge.form === undefined ? "" : `, ${judge.form} form`;
+  return `${judge.kind}, model ${judge.model} at effort ${judge.effort}${form}`;
 }

@@ -64,6 +64,19 @@ export interface BrokenRule {
   /** The rule in full. Never shortened. */
   rule: string;
   confidence: number;
+  /** OpenAI review form only: the model's verdict, which the confidence stands for. */
+  verdict?: "sure" | "likely" | "unsure";
+  /** OpenAI review form only: the added line the model quoted. */
+  line?: string;
+  /** OpenAI review form only: the model's one-sentence reason. */
+  reason?: string;
+}
+
+/** A review form finding the tool refused, and why. Counted, never a run failure. */
+export interface RejectedFindingEntry {
+  ruleId: string;
+  line: string;
+  why: string;
 }
 
 /** One piece and every rule it broke. This is one entry of the report. */
@@ -132,6 +145,8 @@ export interface RunStats {
    * over the 60,000 byte call cap. A recorded fact, never a silent fallback.
    */
   tooBigToWiden: WidenRefused[];
+  /** OpenAI review form: findings refused for an unknown rule or a line the change did not add. */
+  rejectedFindings: number;
   inputTokens: number;
   outputTokens: number;
   /** OpenAI judge only: input tokens served from OpenAI's prompt cache, a part of inputTokens. */
@@ -162,6 +177,10 @@ export interface RuleScore {
   /** The rule in full. Never shortened. */
   rule: string;
   score: number;
+  /** OpenAI review form only: the verdict, the quoted added line and the reason. */
+  verdict?: "sure" | "likely" | "unsure";
+  line?: string;
+  reason?: string;
 }
 
 /** One piece and every rule's score for it, highest first. One entry of a score report. */
@@ -182,6 +201,8 @@ export interface ScoreReport {
   judge: JudgeInfo;
   pieces: PieceScore[];
   notChecked: NotChecked[];
+  /** Review form findings the tool refused, each with the reason. */
+  rejected: RejectedFindingEntry[];
   skipped: SkippedFile[];
   stats: RunStats;
   /** What was scored: the working tree, or a diff file. */
@@ -199,6 +220,8 @@ export interface CheckReport {
    */
   against: string;
   notChecked: NotChecked[];
+  /** Review form findings the tool refused, each with the reason. */
+  rejected: RejectedFindingEntry[];
   skipped: SkippedFile[];
   stats: RunStats;
 }

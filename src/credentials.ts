@@ -15,6 +15,7 @@ import { DEFAULT_ENDPOINT, DEFAULT_MODEL, JevClient, type FetchLike } from "./je
 import { describeJudge, judgeInfo, type Judge } from "./judge.js";
 import { JEV_KEY_SOURCE, keySourceSet, OPENAI_KEY_SOURCE, resolveApiKey } from "./key.js";
 import { OPENAI_ENDPOINT, OpenAiClient, promptCacheKey, userInput } from "./openai.js";
+import { readReview, reviewBody, reviewInput } from "./review.js";
 import {
   chooseJudge,
   loadSettings,
@@ -371,6 +372,35 @@ export async function loginCheck(
   // Room for the transport's own three attempts, so a network failure reports itself as one
   // rather than as an exhausted budget.
   const maxCalls = 4;
+
+  if (judge.kind === "openai" && judge.form === "review") {
+    const client = new OpenAiClient({
+      endpoint,
+      model: judge.model,
+      effort: judge.effort,
+      apiKey: bearer,
+      maxCalls,
+      fetchImpl,
+      concurrency: 1,
+      note,
+    });
+    const outcome = await client.request({
+      body: reviewBody(judge.model, judge.effort, reviewInput([{ file: PROBE_VIEW.file, views: [PROBE_VIEW] }], [PROBE_RULE])),
+      read: readReview,
+    });
+    if (outcome.ok) {
+      const count = outcome.answer.length;
+      lines.push(
+        `openai: pass (${judge.model} at effort ${judge.effort}, review form, answered with ${count === 1 ? "1 finding" : `${count} findings`}, ${outcome.usage.inputTokens} input and ${outcome.usage.outputTokens} output tokens)`,
+      );
+    } else {
+      const message =
+        outcome.failure === "auth" && mode === "team" ? TOKEN_REJECTED : outcome.message;
+      lines.push(`openai: fail (${message})`);
+      ok = false;
+    }
+    return { ok, lines };
+  }
 
   if (judge.kind === "openai") {
     const client = new OpenAiClient({

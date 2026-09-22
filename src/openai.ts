@@ -128,20 +128,33 @@ export interface OpenAiUsage {
   reasoningTokens: number;
 }
 
+export type OpenAiOutcome<A> =
+  | { ok: true; answer: A; usage: OpenAiUsage }
+  | { ok: false; failure: FailureClass; message: string };
+
 export type OpenAiSendOutcome =
   | { ok: true; answers: Record<string, number>; usage: OpenAiUsage }
   | { ok: false; failure: FailureClass; message: string };
 
-/** One request that can shrink itself if the model says it is too long. */
-export interface OpenAiNode<T> {
-  payload: T;
-  question: OpenAiQuestion;
-  halve: () => [OpenAiNode<T>, OpenAiNode<T>] | null;
+/**
+ * One request body and how to read its answer. `read` returns what was wrong with the answer
+ * as a string, which the client retries and then reports as a failure.
+ */
+export interface OpenAiRequest<A> {
+  body: string;
+  read: (body: ResponsesBody) => A | string;
 }
 
-export interface OpenAiNodeOutcome<T> {
-  node: OpenAiNode<T>;
-  outcome: OpenAiSendOutcome;
+/** One request that can shrink itself if the model says it is too long. */
+export interface OpenAiNode<T, A> {
+  payload: T;
+  request: OpenAiRequest<A>;
+  halve: () => [OpenAiNode<T, A>, OpenAiNode<T, A>] | null;
+}
+
+export interface OpenAiNodeOutcome<T, A> {
+  node: OpenAiNode<T, A>;
+  outcome: OpenAiOutcome<A>;
 }
 
 export interface OpenAiClientOptions {
@@ -160,7 +173,7 @@ export interface OpenAiClientOptions {
 }
 
 /** The pieces of a Responses API body this client reads. */
-interface ResponsesBody {
+export interface ResponsesBody {
   status?: unknown;
   incomplete_details?: unknown;
   output?: unknown;
@@ -229,10 +242,10 @@ function notConfigured(text: string): string | null {
 }
 
 /**
- * Reads the verdict out of a completed answer. A string is what was wrong with it: every
- * shape problem is a plain failure, never a zero and never a partial answer.
+ * The one JSON text part of a completed answer, parsed. A string is what was wrong with it:
+ * every shape problem is a plain failure, never a zero and never a partial answer.
  */
-export function readVerdict(body: ResponsesBody, ids: readonly string[]): Record<string, number> | string {
+export function readOutputJson(body: ResponsesBody): { json: unknown } | string {
   if (body.status !== "completed") {
     return `the answer has status ${JSON.stringify(body.status ?? null)}, not completed (${JSON.stringify(body.incomplete_details ?? null)})`;
   }
@@ -249,12 +262,18 @@ export function readVerdict(body: ResponsesBody, ids: readonly string[]): Record
   if (texts.length !== 1) return `the answer has ${texts.length} text parts, not 1`;
   const text = texts[0]?.text;
   if (typeof text !== "string") return "the answer's text is not a string";
-  let verdict: unknown;
   try {
-    verdict = JSON.parse(text);
+    return { json: JSON.parse(text) as unknown };
   } catch {
     return `the answer is not JSON: ${text.slice(0, 120)}`;
   }
+}
+
+/** Reads the probability form's verdict: one number from 0 to 1 per rule, in rule order. */
+export function readVerdict(body: ResponsesBody, ids: readonly string[]): Record<string, number> | string {
+  const read = readOutputJson(body);
+  if (typeof read === "string") return read;
+  const verdict = read.json;
   if (typeof verdict !== "object" || verdict === null || Array.isArray(verdict)) {
     return "the answer is not a JSON object";
   }
@@ -368,10 +387,20 @@ export class OpenAiClient {
     }
   }
 
-  /** One logical request, including retries. Every attempt costs one unit of budget. */
+  /** The probability form: one piece, one number per rule. */
   async send(question: OpenAiQuestion): Promise<OpenAiSendOutcome> {
     const { model, effort } = this.options;
-    const body = requestBody(model, effort, question);
+    const outcome = await this.request({
+      body: requestBody(model, effort, question),
+      read: (parsed) => readVerdict(parsed, question.ids),
+    });
+    return outcome.ok ? { ok: true, answers: outcome.answer, usage: outcome.usage } : outcome;
+  }
+
+  /** One logical request, including retries. Every attempt costs one unit of budget. */
+  async request<A>(req: OpenAiRequest<A>): Promise<OpenAiOutcome<A>> {
+    const { model, effort } = this.options;
+    const body = req.body;
     let attempt = 0;
     let backoff = BACKOFF_START_MS;
 
@@ -421,9 +450,9 @@ export class OpenAiClient {
         this.usage.cachedInputTokens += usage.cachedInputTokens;
         this.usage.outputTokens += usage.outputTokens;
         this.usage.reasoningTokens += usage.reasoningTokens;
-        const answers = readVerdict(parsed, question.ids);
-        if (typeof answers === "string") {
-          const message = this.redact(`${model}: ${answers}`);
+        const answer = req.read(parsed);
+        if (typeof answer === "string") {
+          const message = this.redact(`${model}: ${answer}`);
           if (attempt < MAX_ATTEMPTS) {
             this.options.note(`${message}, retrying`);
             await this.sleep(backoff);
@@ -433,7 +462,7 @@ export class OpenAiClient {
           return { ok: false, failure: "server", message };
         }
         this.speedUp();
-        return { ok: true, answers, usage };
+        return { ok: true, answer, usage };
       }
 
       const fields = errorFields(text);
@@ -509,13 +538,13 @@ export class OpenAiClient {
    * Runs nodes with bounded concurrency, the same way JevClient.askAll does. A node the model
    * calls too long is halved and both halves are queued.
    */
-  async askAll<T>(nodes: readonly OpenAiNode<T>[]): Promise<OpenAiNodeOutcome<T>[]> {
-    const queue: OpenAiNode<T>[] = [...nodes];
-    const results: OpenAiNodeOutcome<T>[] = [];
+  async askAll<T, A>(nodes: readonly OpenAiNode<T, A>[]): Promise<OpenAiNodeOutcome<T, A>[]> {
+    const queue: OpenAiNode<T, A>[] = [...nodes];
+    const results: OpenAiNodeOutcome<T, A>[] = [];
     let active = 0;
     let settled = false;
 
-    return new Promise<OpenAiNodeOutcome<T>[]>((resolve) => {
+    return new Promise<OpenAiNodeOutcome<T, A>[]>((resolve) => {
       const pump = (): void => {
         if (settled) return;
         if (queue.length === 0 && active === 0) {
@@ -527,7 +556,7 @@ export class OpenAiClient {
           const node = queue.shift();
           if (node === undefined) break;
           active += 1;
-          this.send(node.question)
+          this.request(node.request)
             .then((outcome) => {
               if (!outcome.ok && outcome.failure === "too_large") {
                 const halves = node.halve();

@@ -44,8 +44,8 @@ Options:
   --rules <path>       rules file (default <repo root>/.stop-rules.md)
   --cut <mode>         hunks or chunks (no parser), functions (tree-sitter) (default ${DEFAULT_CUT})
   --threshold <0..1>   score at or above which a rule counts as violated (default ${DEFAULT_THRESHOLD})
-  --max-calls <n>      hard ceiling on requests to the judge in one run
-                       (default ${DEFAULT_MAX_CALLS} for jev, ${DEFAULT_MAX_CALLS_OPENAI} for openai: 240 pieces either way)
+  --max-calls <n>      hard ceiling on requests to the judge in one run (default ${DEFAULT_MAX_CALLS},
+                       ${DEFAULT_MAX_CALLS_OPENAI} for the openai judge's scores form, one piece per call)
   --judge <kind>       jev or openai: which service scores the pieces (default jev)
   --model <name>       openai judge only: the model to ask (default ${DEFAULT_OPENAI_MODEL})
   --effort <level>     openai judge only: ${EFFORTS.join(", ")} (default ${DEFAULT_EFFORT})
@@ -64,9 +64,11 @@ Agents: ${agentNames().join(", ")}
 Settings: ${SETTINGS_FILE} in the repository root holds endpoint, cut, threshold, maxCalls
 and judge. It is committed and holds no secret. A flag above beats the file. The judge is
 {"kind": "jev"}, the default, or
-  {"kind": "openai", "model": "${DEFAULT_OPENAI_MODEL}", "effort": "${DEFAULT_EFFORT}", "inFlight": ${DEFAULT_IN_FLIGHT}}
-where inFlight, 1 to ${MAX_IN_FLIGHT}, is how many OpenAI calls one run keeps open. init --judge
-openai writes it. What each knob costs is in docs/TUNING.md.
+  {"kind": "openai", "form": "review", "model": "${DEFAULT_OPENAI_MODEL}", "effort": "${DEFAULT_EFFORT}", "inFlight": ${DEFAULT_IN_FLIGHT}}
+where form is review (one call per change, each finding quotes its line, the default) or
+scores (one call per piece, a probability per rule), and inFlight, 1 to ${MAX_IN_FLIGHT}, is how many
+OpenAI calls one run keeps open. init --judge openai writes it. What each knob costs is in
+docs/TUNING.md.
 
 Environment, client:
   STOP_RULES_ENDPOINT      your team's stop-rules server, beats .stop-rules.json

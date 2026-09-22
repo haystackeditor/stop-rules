@@ -24,13 +24,14 @@ Every key is optional.
 | Where questions go | `endpoint` | `--team <url>` on `init` | your own key |
 | How a change is cut into pieces | `cut` | `--cut hunks\|functions\|chunks` | `hunks` |
 | The bar a score must reach | `threshold` | `--threshold <0..1>` | `0.6` |
-| Requests to the judge in one run | `maxCalls` | `--max-calls <n>` | `60` for Jev, `240` for OpenAI |
+| Requests to the judge in one run | `maxCalls` | `--max-calls <n>` | `60`, and `240` for the OpenAI scores form |
 | Which service scores the pieces | `judge.kind` | `--judge jev\|openai` | `jev` |
+| How the OpenAI judge is asked | `judge.form` | none | `review` |
 | The OpenAI model | `judge.model` | `--model <name>` | `gpt-6-luna` |
 | How long the OpenAI model reasons | `judge.effort` | `--effort none\|low\|medium\|high` | `low` |
 | OpenAI calls one run keeps open | `judge.inFlight` | none | `4` |
 
-The four judge knobs are in [section 8](#8-the-judge-judge).
+The five judge knobs are in [section 8](#8-the-judge-judge).
 
 Every default in that table was measured, and none of them is a recommendation. The two this
 file spends the most words on are the cut, which is `hunks` because it parses nothing and
@@ -470,7 +471,7 @@ score. The pieces, calls and token rows were re-run on 20 September 2026.
 
 | | `hunks`, the default | `functions` | `chunks` |
 |---|---|---|---|
-| Install size, a TypeScript and Python repo | 1 file, 380,463 bytes | 4 files, 3,386,524 bytes (`stop-rules.mjs`, `tree-sitter.wasm` 205,488, `grammars/typescript.wasm` 2,342,690, `grammars/python.wasm` 457,883) | 1 file, 380,463 bytes |
+| Install size, a TypeScript and Python repo | 1 file, 394,286 bytes | 4 files, 3,400,347 bytes (`stop-rules.mjs`, `tree-sitter.wasm` 205,488, `grammars/typescript.wasm` 2,342,690, `grammars/python.wasm` 457,883) | 1 file, 394,286 bytes |
 | Languages | every language | 10 have a parser: TypeScript, TSX, JavaScript, Python, Go, Rust, Ruby, Java, Kotlin, Swift. Any other file is cut into hunks | every language |
 | What the agent is handed | the hunk the fault sits in | the one function at fault | up to 12,000 bytes of diff |
 | Pieces, 172 changes | 532 | 643 | 172 |
@@ -860,7 +861,8 @@ range we would stay in, for noise rather than for money.
 One run sends at most this many requests to the judge, counted across retries and splits. `60`
 is the default for Jev, which is far more than a normal turn needs: four pieces ride in one
 request, so a change that touches forty hunks is ten requests. The OpenAI judge takes one piece
-per request, so its default is `240`, the same number of pieces; see section 8.
+per request in its scores form, so there the default is `240`, the same number of pieces; the
+review form puts a whole change in one request and keeps `60`. See section 8.
 
 When the budget runs out, the work left over is reported and nothing pretends it was checked.
 Ten new files, one hunk each, in the default mode, with a budget of one request:
@@ -990,17 +992,33 @@ other is OpenAI's `gpt-6-luna` through the Responses API:
 
 ```json
 {
-  "judge": {"kind": "openai", "model": "gpt-6-luna", "effort": "low", "inFlight": 4}
+  "judge": {"kind": "openai", "form": "review", "model": "gpt-6-luna", "effort": "low", "inFlight": 4}
 }
 ```
 
 `init --judge openai` writes that, without `inFlight`. `--judge`, `--model` and `--effort` beat
 the file for one run, the same as every other flag. `--model` or `--effort` with the Jev judge is
-an error, not a flag that is quietly dropped.
+an error, not a flag that is quietly dropped. `form` is set in the file only.
 
 How each is asked. Jev gets its claim sentence per (piece, rule), up to four pieces per call.
-gpt-6-luna gets one call per piece: a fixed system instruction, then your rules, one `id: text`
-line each, then the piece last (the file path and the diff with its 25 lines around it, or the
+
+gpt-6-luna in the **review form**, the default, gets one call per change: a fixed system
+instruction to review the change against the team's rules and report every rule the added lines
+break, then each changed file under its own `File:` line with its pieces' diffs and 25 lines
+around each, then your rules, one `id: text` line each. It answers
+`{"findings": [{"ruleId", "line", "reason", "confidence"}]}` under a strict JSON schema, where
+`line` is the offending added line quoted verbatim and `confidence` is `sure`, `likely` or
+`unsure`. A finding lands on the piece whose added lines hold the quoted line, compared after
+trimming whitespace and a leading `+`, and is scored sure 1.0, likely 0.75, unsure 0.5; a rule
+not reported scores 0 on every piece of the call. That is a verdict written as a number, not a
+probability, so at the default bar of 0.6 sure and likely count and unsure does not. A finding
+for a rule the repository does not have, or quoting a line no piece added, is refused on its own,
+listed under "Findings rejected" in the report and counted in `stats.rejectedFindings`; it never
+fails the run. A change too big for one call, over the 60,000 byte cap, is split into as few
+calls as fit, whole files kept together where they can be.
+
+gpt-6-luna in the **scores form**, `"form": "scores"`, gets one call per piece: a fixed system
+instruction, then your rules, one `id: text` line each, then the piece last (the file path and the diff with its 25 lines around it, or the
 whole function in `functions` mode), and it must answer `{"scores": [...]}` with one number from
 0 to 1 per rule, in rule order, under a strict JSON schema. The part every call shares comes
 first, and a `prompt_cache_key` that is a hash of it goes with each call, so OpenAI can reuse
@@ -1013,36 +1031,67 @@ the hook baseline holds. It is never read as a zero.
 Measured on 22 September 2026 on the 240 real agent written changes (804 pieces, the six starter
 rules, 32 real breaks after the latest adjudication; the 20 September tables above say 31, from
 before 16 more disputes were ruled on). At a bar of 0.5, the bar the comparison was run at, not
-the default 0.6. Each piece shown alone unless the row says otherwise. A check is one piece
-asked about all six rules.
+the default 0.6.
+
+Per change, which is what a stop hook sees on one turn. Time is the median over changes of the
+calls one change needed; money is what all 240 changes cost:
+
+| Judge | Real breaks caught, of 32 | Plainly false flags | Arguable flags | Flags nobody has ruled on | AUC | Median time per change | Slowest 5% of review calls took over | Dollars, 240 changes |
+|---|---|---|---|---|---|---|---|---|
+| Jev | 20 | 10 | 5 | 11 | 0.977 | 193 ms | | $0.027 |
+| gpt-6-luna, review form, effort low | 31 | 10 | 13 | 38 | 0.974 | 2,643 ms | 6,599 ms | $0.059 |
+| gpt-6-luna, review form, effort low, 25 lines around each piece | 31 | 12 | 13 | 31 | 0.975 | 3,243 ms | 7,169 ms | $0.095 |
+| gpt-6-luna, review form, effort medium | 31 | 16 | 13 | 42 | 0.974 | 3,283 ms | 12,110 ms | $0.086 |
+| gpt-6-luna, scores form, effort low | 29 | 17 | 9 | 52 | 0.950 | 6,406 ms one call after another, 3,081 ms with a change's calls at once | | $0.147 |
+
+What only the review form can say is where. Of the 31 real breaks it caught at effort low, the
+line it quoted was the reviewer's evidence line, by text or by line number, for 27; 25 of 31 with
+the 25 lines around each piece; 24 of 31 at effort medium. It quoted a line that was not in the
+diff it was shown once in 198 findings at effort low, and 4 times in 190 with the 25 lines around
+each piece.
+
+The tool sends the 25 lines around each piece, the third row. The first review row was shown each
+change's whole diff instead. Review effort `high` was never measured.
+
+The scores form, per piece and per call. Each piece shown alone unless the row says otherwise. A
+check is one piece asked about all six rules:
 
 | Judge | Median time per call | Slowest 5% of calls took over | Real breaks caught, of 32 | Plainly false flags | Arguable flags | Flags nobody has ruled on | Dollars per 1,000 checks |
 |---|---|---|---|---|---|---|---|
 | Jev, 4 pieces per call | 194 ms | 268 ms | 20 | 10 | 5 | 11 | $0.0329 |
-| gpt-6-luna, effort none | 1,380 ms | 2,546 ms | 23 | 10 | 5 | 28 | $0.1188 |
-| gpt-6-luna, effort low | 2,405 ms | 4,769 ms | 29 | 17 | 9 | 52 | $0.1826 |
-| gpt-6-luna, effort low, rules first and one number per rule | 2,564 ms | 5,082 ms | 29 | 17 | 12 | 66 | $0.1568 |
-| gpt-6-luna, effort low, 25 lines around the piece | 2,902 ms | 6,325 ms | 29 | 14 | 9 | 28 | $0.2255 |
-| gpt-6-luna, effort medium | 3,328 ms | 8,753 ms | 30 | 18 | 11 | 62 | $0.2267 |
+| gpt-6-luna, scores form, effort none | 1,380 ms | 2,546 ms | 23 | 10 | 5 | 28 | $0.1188 |
+| gpt-6-luna, scores form, effort low | 2,405 ms | 4,769 ms | 29 | 17 | 9 | 52 | $0.1826 |
+| gpt-6-luna, scores form, effort low, rules first and one number per rule | 2,564 ms | 5,082 ms | 29 | 17 | 12 | 66 | $0.1568 |
+| gpt-6-luna, scores form, effort low, 25 lines around the piece | 2,902 ms | 6,325 ms | 29 | 14 | 9 | 28 | $0.2255 |
+| gpt-6-luna, scores form, effort medium | 3,328 ms | 8,753 ms | 30 | 18 | 11 | 62 | $0.2267 |
 
-The tool sends the shape of the two middle rows together: rules first, one number per rule, and
+In the scores form the tool sends the shape of the two middle rows together: rules first, one number per rule, and
 the 25 lines around the piece. Each half was measured on its own and no run measured both at
 once, so read those two rows as the bounds of what to expect, not as this build's score.
 
 On one demo turn, one piece and three rules, one warm-up and then five timed runs each: the whole
 Jev `check` took a median 0.63 s; a single gpt-6-luna call took a median 1.67 s at effort none,
-2.05 s at low and 2.70 s at medium.
+2.05 s at low and 2.70 s at medium in the scores form, and 3.62 s on the broken turn and 1.01 s on
+the repaired turn in the review form at low.
 
-The same demo with this build, five runs each with the answer cache deleted first, wall time
-of the whole `check` process on this machine:
+The demo with this build, on 22 September 2026, five runs each with the answer cache deleted
+first, wall time of the whole `check` process on this machine. The broken turn is the agent's
+new file with three rules broken; the repaired turn is `agent-fix.diff` checked on its own, the
+way the hook sees it once the broken turn is behind the baseline:
 
-| Judge | The agent's change, 3 rules broken | The fixed code |
+| Judge | The broken turn | The repaired turn |
 |---|---|---|
-| Jev | median 1.02 s, exit 2 every time | median 0.59 s, exit 0 every time |
-| gpt-6-luna, effort low | median 2.89 s, exit 2 every time | median 2.79 s, exit 0 three times and exit 2 twice |
+| Jev | median 0.57 s, exit 2 every time | median 0.55 s, exit 0 every time |
+| gpt-6-luna, review form, effort low | median 3.61 s, exit 2 every time, each of the three rules quoting one of its offending lines | median 1.17 s, exit 0 every time |
 
-The two exit 2 runs on the fixed code are the stubs rule. The fixed file's only doubtful line is
-a placeholder `https://api.example.com` URL. Asked eight more times, cache deleted each time,
+Checked against the start of the repository instead, so that the repaired file is one new file,
+the review form flagged `if (error instanceof HttpError && error.status === 404) return null;` as
+likely swallowing an error in 2 of 5 runs, and passed the other 3.
+
+On an earlier version of the demo, the scores form at effort low took a median 2.89 s on the
+broken turn, exit 2 every time, and 2.79 s on the fixed code, exit 0 three times and exit 2 twice.
+The two exit 2 runs were the stubs rule: that version's fixed file had a placeholder
+`https://api.example.com` URL. Asked eight more times, cache deleted each time,
 gpt-6-luna at effort low scored the stubs rule 0.95 four times and 0.05 or less four times; at
 effort medium it scored it 0.88 to 0.95 six times in six. Jev scored it 0.18. A borderline piece
 moves more with this judge, and more effort made it more sure of the flag.
@@ -1067,9 +1116,10 @@ stop-rules: OpenAI will not run gpt-6-nonexistent at effort low for this key (40
 
 ### `inFlight`
 
-How many calls one run keeps open at once, 1 to 8, default 4. Each call carries one piece, so a
-big change is many calls. Measured on 22 September 2026, a 52 piece diff scored at effort low,
-cache deleted first, one run each:
+How many calls one run keeps open at once, 1 to 8, default 4. In the review form a change is
+usually one call, so it only matters for a change split over several. In the scores form each
+call carries one piece, so a big change is many calls. Measured on 22 September 2026, a 52 piece
+diff in the scores form at effort low, cache deleted first, one run each:
 
 | `inFlight` | Wall time | Calls |
 |---|---|---|
@@ -1082,15 +1132,29 @@ Past 8 nothing changes, because every stop-rules process on a machine shares 8 s
 which is why 8 is the most the file accepts. The same diff on Jev took 1.05 s in 13 calls. On a
 429 the ceiling halves and climbs back one step after four answers in a row, the same as Jev.
 
+### `form`
+
+`review`, the default, or `scores`. From the tables, both at effort low: the review form caught
+31 of 32 against 29, with 10 plainly false flags against 17 (12 with the 25 lines around each
+piece), and ranked better (AUC 0.974, 0.975 with the lines around each piece, against 0.950). Per
+change it took about as long as the scores form does with a change's calls at once, which is how
+the tool runs them (3,243 ms against 3,081 ms), and cost less ($0.095 against $0.147 for the 240
+changes). It also
+says which line breaks the rule, and the agent is handed that line and the reason. What it gives
+up: its number is one of four values, not a probability, so `score` can only sort pieces into
+those four, and a bar between two of them moves nothing until it crosses one.
+
 ### `maxCalls` on the OpenAI judge
 
-The default is 240 instead of 60. Jev answers four pieces per call and gpt-6-luna one, so 240
-calls cover the same 240 pieces either way, and switching judge never leaves a change half
-checked. A `maxCalls` you set yourself applies to either judge as it is.
+In the scores form the default is 240 instead of 60. Jev answers four pieces per call and the
+scores form one, so 240 calls cover the same 240 pieces either way, and switching judge never
+leaves a change half checked. The review form sends a whole change in one call, or a few for a
+change over 60,000 bytes, and keeps 60. A `maxCalls` you set yourself applies to either judge as it is.
 
 ### Money
 
 Nothing in the tool knows OpenAI's price either. `check --json` and `run.log` carry
 `inputTokens`, `cachedInputTokens` (served from OpenAI's prompt cache, a part of the input),
-`outputTokens` and `reasoningTokens` (a part of the output). On the demo change at effort low,
-two pieces took 1,158 input tokens and 115 output tokens, 67 of them reasoning.
+`outputTokens` and `reasoningTokens` (a part of the output). On the demo's broken turn at effort
+low the review form took one call, 785 input tokens and 191 output tokens; the scores form took
+two calls, 1,158 input tokens and 115 output tokens, 67 of them reasoning.

@@ -26,7 +26,7 @@ No `npm install`, no build: `bin/stop-rules.mjs` is committed and ready to run.
 
 `init` finds which coding agents your repo already uses, copies itself into
 `.stop-rules/stop-rules.mjs` there, writes a starter `.stop-rules.md`, and wires the hook into
-each agent's own config file. That is one file of 380 KB and no grammar files at all, because
+each agent's own config file. That is one file of 394 KB and no grammar files at all, because
 cutting by git diff hunk parses nothing. It says so:
 
 ```
@@ -84,12 +84,36 @@ the team token. A repo on the OpenAI judge needs an OpenAI key instead, in the s
 
 ## Which judge
 
-Two services can score the pieces. **Jev** is the default: TypeSafe's scoring service, asked up
-to four pieces per call. The other is **OpenAI's `gpt-6-luna`**, asked through the Responses
-API with strict JSON output: one call per piece, the system instruction and your rules first,
-the piece last, and one number per rule back. Everything else is the same with either judge:
-the cutting, the 25 lines around each change, the bar, the cache, the report, the hooks and
-team mode.
+Two services can score the pieces. **Jev** is the default: TypeSafe's scoring service, asked for
+a probability per piece and per rule, up to four pieces per call. The other is **OpenAI's
+`gpt-6-luna`** through the Responses API with strict JSON output. Everything else is the same
+with either judge: the cutting, the 25 lines around each change, the bar, the cache, the report,
+the hooks and team mode.
+
+The OpenAI judge has two forms. The default is the **review form**: one call per change, with
+every piece of the change in it, each piece's diff and its 25 lines around it grouped under its
+file, then your rules. The model reviews the change and reports every rule the added lines break,
+as `{"findings": [{"ruleId", "line", "reason", "confidence"}]}`, where `line` is the offending
+added line quoted verbatim and `confidence` is `sure`, `likely` or `unsure`. The tool turns that
+into a score per piece and rule, sure 1.0, likely 0.75, unsure 0.5, not reported 0, so at the
+default bar of 0.6 a sure or likely finding counts and an unsure one does not. The agent is handed the quoted line and the model's one
+sentence reason under each rule, so it sees where:
+
+```
+   Rule: Do not silently swallow errors. ...
+   Confidence: 1.00 (sure)
+   Line: } catch {
+   Why: The empty catch discards the error and returns `null` as though no failure information needs to be preserved.
+```
+
+A finding that names a rule your repo does not have, or quotes a line the change did not add
+(compared after trimming whitespace and a leading `+`), is refused on its own. It gets one line
+under "Findings rejected" in the report, is counted in `check --json` as
+`stats.rejectedFindings`, and the rest of the answer still counts. It never fails the run.
+
+The other is the **scores form**, `"form": "scores"`: one call per piece, one probability per
+rule, the same question Jev is asked. It is what the tool shipped first and it stays for anyone
+who wants it.
 
 To switch a repo to OpenAI, run this and commit the `.stop-rules.json` it writes:
 
@@ -99,45 +123,48 @@ printf %s "$OPENAI_API_KEY" | node .stop-rules/stop-rules.mjs login --openai-key
 node .stop-rules/stop-rules.mjs login --check
 ```
 
-That puts `"judge": {"kind": "openai", "model": "gpt-6-luna", "effort": "low"}` in
-`.stop-rules.json`. `{"kind": "jev"}`, or no `judge` key at all, is Jev. `effort` is how long the
-model reasons before it answers: `none`, `low`, `medium` or `high`, and `low` is the default.
-`--judge`, `--model` and `--effort` on any command beat the file for that run. The key comes
-from `OPENAI_API_KEY`, from `OPENAI_API_KEY_FILE`, or from the file `login --openai-key-stdin`
-writes next to the Jev key, mode 0600. In team mode the server holds it instead, as
-`OPENAI_API_KEY` (see [DEPLOY.md](DEPLOY.md)).
+That puts `"judge": {"kind": "openai", "form": "review", "model": "gpt-6-luna", "effort": "low"}`
+in `.stop-rules.json`. `{"kind": "jev"}`, or no `judge` key at all, is Jev. `effort` is how long
+the model reasons before it answers: `none`, `low`, `medium` or `high`, and `low` is the default.
+`--judge`, `--model` and `--effort` on any command beat the file for that run. The key comes from
+`OPENAI_API_KEY`, from `OPENAI_API_KEY_FILE`, or from the file `login --openai-key-stdin` writes
+next to the Jev key, mode 0600. In team mode the server holds it instead, as `OPENAI_API_KEY`
+(see [DEPLOY.md](DEPLOY.md)).
 
-The two judges never mix. The cache key holds the judge, the model and the effort, so an
-answer from one is never read as an answer from the other. Nothing switches judge on its own: a
+The judges never mix. The cache key holds the judge, the model, the effort and the form, so an
+answer from one is never read as an answer from another. Nothing switches judge on its own: a
 missing key, a rejected key, a model your key cannot use, or an answer that breaks the schema
 stops the run with one line, and the baseline stays where it was.
 
 What the trade looks like. Measured on 22 September 2026 on the same 240 real agent written
-changes (804 pieces, the six starter rules, 32 real breaks after the latest adjudication), at a
-bar of 0.5, not the tool's default of 0.6, because 0.5 is the bar the comparison was run at.
-Each piece was shown alone unless the row says otherwise. A check is one piece asked about all
-six rules.
+changes (the six starter rules, 32 real breaks after the latest adjudication), at a bar of 0.5,
+the bar the comparison was run at, not the tool's default of 0.6. Time and money are per change,
+the way a stop hook sees one turn: the time is the median of the calls one change needed, and the
+money is what all 240 changes cost.
 
-| Judge | Median time per call | Real breaks caught, of 32 | Plainly false flags | Arguable flags | Flags nobody has ruled on | Dollars per 1,000 checks |
-|---|---|---|---|---|---|---|
-| Jev, 4 pieces per call | 194 ms | 20 | 10 | 5 | 11 | $0.0329 |
-| gpt-6-luna, effort none | 1,380 ms | 23 | 10 | 5 | 28 | $0.1188 |
-| gpt-6-luna, effort low | 2,405 ms | 29 | 17 | 9 | 52 | $0.1826 |
-| gpt-6-luna, effort low, rules first and one number per rule | 2,564 ms | 29 | 17 | 12 | 66 | $0.1568 |
-| gpt-6-luna, effort low, 25 lines around the piece | 2,902 ms | 29 | 14 | 9 | 28 | $0.2255 |
-| gpt-6-luna, effort medium | 3,328 ms | 30 | 18 | 11 | 62 | $0.2267 |
+| Judge | Real breaks caught, of 32 | Plainly false flags | Arguable flags | Flags nobody has ruled on | AUC | Median time per change | Dollars, 240 changes |
+|---|---|---|---|---|---|---|---|
+| Jev | 20 | 10 | 5 | 11 | 0.977 | 193 ms | $0.027 |
+| gpt-6-luna, review form, effort low | 31 | 10 | 13 | 38 | 0.974 | 2,643 ms | $0.059 |
+| gpt-6-luna, review form, effort low, 25 lines around each piece | 31 | 12 | 13 | 31 | 0.975 | 3,243 ms | $0.095 |
+| gpt-6-luna, scores form, effort low | 29 | 17 | 9 | 52 | 0.950 | 6,406 ms one call after another, 3,081 ms with a change's calls at once | $0.147 |
 
-How to read it. At effort low, gpt-6-luna caught 29 of 32 where Jev caught 20, and it also raised
-more flags the reviewers did not agree with: 17 plainly false against 10, and many more nobody
-has ruled on yet, which a round of review could still turn either way. Each call took about 12
-times as long as a Jev call, which carries four pieces, and a check cost about 5.5 times as
-much, which is still under 25 cents per 1,000 checks. Effort `high` was not measured.
+How to read it. The review form at effort low caught 31 of 32 where Jev caught 20, with the same
+10 plainly false flags; more of its flags nobody has ruled on yet. It ranks about as well as Jev
+(AUC 0.974 against 0.977). Of the 31 real breaks it caught, the line it quoted was the line the
+reviewer had pointed at for 27. It invented a quote once in 198 findings. It is slower than Jev,
+about 2.6 seconds a change against 0.2, and costs about twice as much, 6 cents for all 240
+changes. The scores form caught fewer, flagged more wrongly and cost more, because it asks once
+per piece.
 
-What the tool sends is the two middle rows put together: the rules first with one number per
-rule back, and the 25 lines around the piece. Each was measured on its own; no run measured the
-two at once. On one demo turn, one piece and three rules, the whole Jev `check` took a median
-0.63 s, and a single gpt-6-luna call took a median 1.67 s at effort none, 2.05 s at low and
-2.70 s at medium. The knobs and what each one costs are in
+The first review row was shown each change's whole diff; the second, the diff with 25 lines around
+each piece, which is what the tool sends. The review form at effort medium caught the same 31 with
+16 plainly false flags, for $0.086 and 3,283 ms a change. Effort high was never measured.
+
+On the demo turn in this repo's examples, measured with this build, five runs each with the
+answer cache deleted first, the whole `check` took a median 3.61 s on the broken turn with the
+review form, exit 2 all five times with the three right lines quoted, and 1.17 s on the repaired
+turn, exit 0 all five times. Jev took 0.57 s and 0.55 s. The knobs and what each one costs are in
 [docs/TUNING.md](docs/TUNING.md#8-the-judge-judge).
 
 ## Which agents are supported
@@ -502,9 +529,11 @@ whole function the change sits in), and the text of your rules. Nothing else: no
 history, no file the diff does not touch. In team mode the same request goes to your own server, which adds the Jev key
 and forwards it.
 
-Sent to OpenAI, when the judge is openai, per request: the same things for one piece, plus
-the fixed instruction, a `prompt_cache_key` that is a hash of that instruction and your rules,
-and `"store": false`, which asks OpenAI not to keep the response. In team mode it goes to your
+Sent to OpenAI, when the judge is openai, per request: in the review form, every piece of the
+change with the same lines around it and the path of each file, your rules and the fixed
+instruction; in the scores form, the same things for one piece, plus a `prompt_cache_key` that
+is a hash of the instruction and your rules. Both send `"store": false`, which asks OpenAI not
+to keep the response. In team mode it goes to your
 server first, which forwards only those fields with its own key.
 
 Kept on your machine and never committed, in `<git dir>/stop-rules/`: `state.json` (the
@@ -554,8 +583,8 @@ stop-rules baseline --reset [--dir <repo>]
 
 Shared flags: `--dir <path>` (the repository to work on), `--rules <path>` (default
 `<repo root>/.stop-rules.md`), `--cut <mode>` (default hunks), `--threshold <0..1>`
-(default 0.6), `--max-calls <n>` (default 60 for Jev, 240 for OpenAI, which is 240 pieces
-either way), `--judge jev|openai`, `--model <name>` and `--effort <level>` (the OpenAI judge
+(default 0.6), `--max-calls <n>` (default 60, and 240 for the OpenAI scores form, which asks
+once per piece), `--judge jev|openai`, `--model <name>` and `--effort <level>` (the OpenAI judge
 only), `--help`, `--version`.
 
 Which repository a command works on is one rule: `--dir` when you give it, and otherwise the
@@ -580,8 +609,9 @@ committed and holds no secret. Every key is optional, and a flag beats the file.
 ```
 
 Those are the defaults for the knobs that have one, so a file like that changes nothing.
-`judge` is `{"kind": "jev"}` or `{"kind": "openai", "model": "gpt-6-luna", "effort": "low",
-"inFlight": 4}`; see [Which judge](#which-judge).
+`judge` is `{"kind": "jev"}` or `{"kind": "openai", "form": "review", "model": "gpt-6-luna",
+"effort": "low", "inFlight": 4}`, where `form` is `review` or `scores`; see
+[Which judge](#which-judge).
 `cut` is `hunks` (one diff hunk per piece, no parser, the default), `functions` (tree-sitter,
 one whole function per piece) or `chunks` (a file's hunks grouped into pieces of up to 12,000
 bytes, no parser). A key stop-rules does not know, a value of the wrong type or a value out of
@@ -601,7 +631,8 @@ that is set but empty is an error, not a shrug.
 ## Limits, honestly
 
 - You need a Jev API key from TypeSafe, or an OpenAI key for the OpenAI judge.
-- The OpenAI judge's answers move more between runs on a borderline piece. Asked eight times,
+- The OpenAI judge's answers can move between runs on a borderline piece. In the scores form,
+  measured on an earlier version of the demo, asked eight times,
   cache cleared each time, about the fixed file in the demo, whose only doubtful line is a
   placeholder `https://api.example.com` URL, gpt-6-luna at effort low scored the stubs rule 0.95
   four times and 0.05 or less four times. At effort medium it scored it 0.88 to 0.95 six times
@@ -639,7 +670,8 @@ that is set but empty is an error, not a shrug.
 ## Changelog
 
 - **22 September 2026, a second judge.** `"judge": {"kind": "openai"}` in `.stop-rules.json`
-  scores the pieces with OpenAI's `gpt-6-luna` instead of Jev. Jev stays the default, and a
+  scores the pieces with OpenAI's `gpt-6-luna` instead of Jev, by default in the review form:
+  one call per change, each finding quoting its line. Jev stays the default, and a
   repo that sets nothing sees no change: its cached answers are still valid. The team server
   has a second route, `POST /v1/responses`, and an optional `OPENAI_API_KEY`. See "Which judge"
   above.

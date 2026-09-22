@@ -96,9 +96,13 @@ function cannotRun(reason: string): RunOutcome {
 
 function fileCache(cache: Cache): CacheLike {
   return {
-    get: (key) => cache.entries[key]?.noul,
-    set: (key, noul) => {
-      cache.entries[key] = { noul, at: Date.now() };
+    get: (key) => {
+      const entry = cache.entries[key];
+      if (entry === undefined) return undefined;
+      return entry.finding === undefined ? { noul: entry.noul } : { noul: entry.noul, detail: entry.finding };
+    },
+    set: (key, noul, detail) => {
+      cache.entries[key] = detail === undefined ? { noul, at: Date.now() } : { noul, at: Date.now(), finding: detail };
     },
   };
 }
@@ -424,6 +428,7 @@ async function runLocked(args: LockedArgs): Promise<RunOutcome> {
     widened: engineResult.widened,
     withFunction: engineResult.withFunction,
     tooBigToWiden: engineResult.tooBigToWiden,
+    rejectedFindings: engineResult.rejected.length,
     inputTokens: engineResult.usage.inputTokens,
     outputTokens: engineResult.usage.outputTokens,
     ...(engineResult.usage.cachedInputTokens !== undefined
@@ -441,6 +446,7 @@ async function runLocked(args: LockedArgs): Promise<RunOutcome> {
       judge: judgeInfo(judge),
       pieces: engineResult.scores,
       notChecked,
+      rejected: engineResult.rejected,
       skipped: work.skipped,
       stats,
       source: work.source,
@@ -452,6 +458,7 @@ async function runLocked(args: LockedArgs): Promise<RunOutcome> {
       pieces: engineResult.pieces,
       against: work.against,
       notChecked,
+      rejected: engineResult.rejected,
       skipped: work.skipped,
       stats,
     };
@@ -489,6 +496,7 @@ async function runLocked(args: LockedArgs): Promise<RunOutcome> {
     cacheHits: stats.cacheHits,
     violations: stats.violations,
     notChecked: stats.notChecked,
+    rejectedFindings: stats.rejectedFindings,
     inputTokens: stats.inputTokens,
     outputTokens: stats.outputTokens,
     ...(stats.cachedInputTokens !== undefined ? { cachedInputTokens: stats.cachedInputTokens } : {}),

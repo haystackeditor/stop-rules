@@ -185,7 +185,7 @@ export async function init(options: InitOptions): Promise<InitReport> {
   const judge: JudgeInfo =
     choice.kind === "jev"
       ? { kind: "jev", model: "jev-latest" }
-      : { kind: "openai", model: choice.model, effort: choice.effort };
+      : { kind: "openai", model: choice.model, effort: choice.effort, form: choice.form };
 
   const report: InitReport = {
     ok: true,
@@ -237,6 +237,7 @@ export async function init(options: InitOptions): Promise<InitReport> {
         ? { kind: "jev" }
         : {
             kind: "openai",
+            form: choice.form,
             model: choice.model,
             effort: choice.effort,
             ...(existingJudge?.kind === "openai" && existingJudge.inFlight !== undefined
