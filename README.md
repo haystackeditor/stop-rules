@@ -147,16 +147,16 @@ the bar the comparison was run at, not the tool's default of 0.6. Time and money
 the way a stop hook sees one turn: the time is the median of the calls one change needed, and the
 money is what all 240 changes cost.
 
-| Judge | Real breaks caught, of 32 | Plainly false flags | Arguable flags | Flags nobody has ruled on | AUC | Median time per change | Dollars, 240 changes |
+| Judge | Real breaks caught, of 32 | Plainly false flags | Arguable flags | Flags not yet ruled on | AUC | Median time per change | Dollars, 240 changes |
 |---|---|---|---|---|---|---|---|
-| Jev | 20 | 10 | 5 | 11 | 0.977 | 193 ms | $0.027 |
-| gpt-6-luna, review form, effort low | 31 | 10 | 13 | 38 | 0.974 | 2,643 ms | $0.059 |
-| gpt-6-luna, review form, effort low, 25 lines around each piece | 31 | 12 | 13 | 31 | 0.975 | 3,243 ms | $0.095 |
-| gpt-6-luna, scores form, effort low | 29 | 17 | 9 | 52 | 0.950 | 6,406 ms one call after another, 3,081 ms with a change's calls at once | $0.147 |
+| Jev | 20 | 20 | 6 | 0 | 0.978 | 193 ms | $0.027 |
+| gpt-6-luna, review form, effort low | 31 | 40 | 21 | 0 | 0.976 | 2,643 ms | $0.059 |
+| gpt-6-luna, review form, effort low, 25 lines around each piece | 31 | 39 | 17 | 0 | 0.977 | 3,243 ms | $0.095 |
+| gpt-6-luna, scores form, effort low | 29 | 62 | 16 | 0 | 0.952 | 6,406 ms one call after another, 3,081 ms with a change's calls at once | $0.147 |
 
-How to read it. The review form at effort low caught 31 of 32 where Jev caught 20, with the same
-10 plainly false flags; more of its flags nobody has ruled on yet. It ranks about as well as Jev
-(AUC 0.974 against 0.977). Of the 31 real breaks it caught, the line it quoted was the line the
+How to read it. The review form at effort low caught 31 of 32 where Jev caught 20, and raised 40 plainly
+false flags against Jev's 20, twice as many, now that a second reviewer has ruled on every
+flag. It ranks about as well as Jev (AUC 0.976 against 0.978). Of the 31 real breaks it caught, the line it quoted was the line the
 reviewer had pointed at for 27. It invented a quote once in 198 findings. It is slower than Jev,
 about 2.6 seconds a change against 0.2, and costs about twice as much, 6 cents for all 240
 changes. The scores form caught fewer, flagged more wrongly and cost more, because it asks once
@@ -164,7 +164,7 @@ per piece.
 
 The first review row was shown each change's whole diff; the second, the diff with 25 lines around
 each piece, which is what the tool sends. The review form at effort medium caught the same 31 with
-16 plainly false flags, for $0.086 and 3,283 ms a change. Effort high was never measured.
+42 plainly false flags, for $0.086 and 3,283 ms a change. Effort high was never measured.
 
 On the demo turn in this repo's examples, measured with this build, five runs each with the
 answer cache deleted first, the whole `check` took a median 3.61 s on the broken turn with the

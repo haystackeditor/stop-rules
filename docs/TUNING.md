@@ -115,7 +115,7 @@ On our measurement harness, on 20 September 2026, over the same 240 real agent w
 labelled with an adjudicator on every disagreement, which hold 31 real breaks, at the default
 bar of 0.5, cut one hunk per piece:
 
-| What Jev was shown | Real breaks caught, of 31 | Plainly false flags | Flags nobody has ruled on |
+| What Jev was shown | Real breaks caught, of 31 | Plainly false flags | Flags not yet ruled on |
 |---|---|---|---|
 | the piece alone, which is what it sent before | 23 | 10 | 23 |
 | the piece with 25 lines around it, no parser | 21 | 7 | 13 |
@@ -1034,15 +1034,18 @@ before 16 more disputes were ruled on). At a bar of 0.5, the bar the comparison 
 the default 0.6.
 
 Per change, which is what a stop hook sees on one turn. Time is the median over changes of the
-calls one change needed; money is what all 240 changes cost:
+calls one change needed; money is what all 240 changes cost. Every flag of the Jev row, of the two
+review-form rows at effort low, and of the scores-form rows at effort low and medium was ruled on
+by a second reviewer on 22 and 23 September 2026 (111 flags: 0 real, 98 not a break, 13 arguable),
+so their plainly false counts are settled; a row with flags not yet ruled on is a floor:
 
-| Judge | Real breaks caught, of 32 | Plainly false flags | Arguable flags | Flags nobody has ruled on | AUC | Median time per change | Slowest 5% of review calls took over | Dollars, 240 changes |
+| Judge | Real breaks caught, of 32 | Plainly false flags | Arguable flags | Flags not yet ruled on | AUC | Median time per change | Slowest 5% of review calls took over | Dollars, 240 changes |
 |---|---|---|---|---|---|---|---|---|
-| Jev | 20 | 10 | 5 | 11 | 0.977 | 193 ms | | $0.027 |
-| gpt-6-luna, review form, effort low | 31 | 10 | 13 | 38 | 0.974 | 2,643 ms | 6,599 ms | $0.059 |
-| gpt-6-luna, review form, effort low, 25 lines around each piece | 31 | 12 | 13 | 31 | 0.975 | 3,243 ms | 7,169 ms | $0.095 |
-| gpt-6-luna, review form, effort medium | 31 | 16 | 13 | 42 | 0.974 | 3,283 ms | 12,110 ms | $0.086 |
-| gpt-6-luna, scores form, effort low | 29 | 17 | 9 | 52 | 0.950 | 6,406 ms one call after another, 3,081 ms with a change's calls at once | | $0.147 |
+| Jev | 20 | 20 | 6 | 0 | 0.978 | 193 ms |  | $0.027 |
+| gpt-6-luna, review form, effort low | 31 | 40 | 21 | 0 | 0.976 | 2,643 ms | 6,599 ms | $0.059 |
+| gpt-6-luna, review form, effort low, 25 lines around each piece | 31 | 39 | 17 | 0 | 0.977 | 3,243 ms | 7,169 ms | $0.095 |
+| gpt-6-luna, review form, effort medium | 31 | 42 | 19 | 10 | 0.974 | 3,283 ms | 12,110 ms | $0.086 |
+| gpt-6-luna, scores form, effort low | 29 | 62 | 16 | 0 | 0.952 | 6,406 ms one call after another, 3,081 ms with a change's calls at once |  | $0.147 |
 
 What only the review form can say is where. Of the 31 real breaks it caught at effort low, the
 line it quoted was the reviewer's evidence line, by text or by line number, for 27; 25 of 31 with
@@ -1056,14 +1059,14 @@ change's whole diff instead. Review effort `high` was never measured.
 The scores form, per piece and per call. Each piece shown alone unless the row says otherwise. A
 check is one piece asked about all six rules:
 
-| Judge | Median time per call | Slowest 5% of calls took over | Real breaks caught, of 32 | Plainly false flags | Arguable flags | Flags nobody has ruled on | Dollars per 1,000 checks |
+| Judge | Median time per call | Slowest 5% of calls took over | Real breaks caught, of 32 | Plainly false flags | Arguable flags | Flags not yet ruled on | Dollars per 1,000 checks |
 |---|---|---|---|---|---|---|---|
-| Jev, 4 pieces per call | 194 ms | 268 ms | 20 | 10 | 5 | 11 | $0.0329 |
-| gpt-6-luna, scores form, effort none | 1,380 ms | 2,546 ms | 23 | 10 | 5 | 28 | $0.1188 |
-| gpt-6-luna, scores form, effort low | 2,405 ms | 4,769 ms | 29 | 17 | 9 | 52 | $0.1826 |
-| gpt-6-luna, scores form, effort low, rules first and one number per rule | 2,564 ms | 5,082 ms | 29 | 17 | 12 | 66 | $0.1568 |
-| gpt-6-luna, scores form, effort low, 25 lines around the piece | 2,902 ms | 6,325 ms | 29 | 14 | 9 | 28 | $0.2255 |
-| gpt-6-luna, scores form, effort medium | 3,328 ms | 8,753 ms | 30 | 18 | 11 | 62 | $0.2267 |
+| Jev, 4 pieces per call | 194 ms | 268 ms | 20 | 20 | 6 | 0 | $0.0329 |
+| gpt-6-luna, scores form, effort none | 1,380 ms | 2,546 ms | 23 | 25 | 7 | 11 | $0.1188 |
+| gpt-6-luna, scores form, effort low | 2,405 ms | 4,769 ms | 29 | 62 | 16 | 0 | $0.1826 |
+| gpt-6-luna, scores form, effort low, rules first and one number per rule | 2,564 ms | 5,082 ms | 29 | 62 | 18 | 15 | $0.1568 |
+| gpt-6-luna, scores form, effort low, 25 lines around the piece | 2,902 ms | 6,325 ms | 29 | 35 | 15 | 1 | $0.2255 |
+| gpt-6-luna, scores form, effort medium | 3,328 ms | 8,753 ms | 30 | 72 | 19 | 0 | $0.2267 |
 
 In the scores form the tool sends the shape of the two middle rows together: rules first, one number per rule, and
 the 25 lines around the piece. Each half was measured on its own and no run measured both at
@@ -1100,9 +1103,9 @@ moves more with this judge, and more effort made it more sure of the flag.
 
 How long the model reasons before it answers: `none`, `low`, `medium` or `high`. `low` is the
 default: the owner's ruling is that the model reasons, and `low` is the cheapest effort that
-does. From the table: going from `none` to `low` caught 6 more of 32 and cost 7 more plainly
+does. From the table: going from `none` to `low` caught 6 more of 32 and cost 37 more plainly
 false flags, 1,025 ms more per call and $0.064 more per 1,000 checks. Going from `low` to
-`medium` caught 1 more, cost 1 more plainly false flag, 923 ms more per call and $0.044 more per
+`medium` caught 1 more, cost 10 more plainly false flags, 923 ms more per call and $0.044 more per
 1,000 checks. `high` is accepted and was never measured, so there is no number for it here.
 
 ### `model`
@@ -1135,8 +1138,8 @@ which is why 8 is the most the file accepts. The same diff on Jev took 1.05 s in
 ### `form`
 
 `review`, the default, or `scores`. From the tables, both at effort low: the review form caught
-31 of 32 against 29, with 10 plainly false flags against 17 (12 with the 25 lines around each
-piece), and ranked better (AUC 0.974, 0.975 with the lines around each piece, against 0.950). Per
+31 of 32 against 29, with 40 plainly false flags against 62 (39 with the 25 lines around each
+piece), and ranked better (AUC 0.976, 0.977 with the lines around each piece, against 0.952). Per
 change it took about as long as the scores form does with a change's calls at once, which is how
 the tool runs them (3,243 ms against 3,081 ms), and cost less ($0.095 against $0.147 for the 240
 changes). It also
