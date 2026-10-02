@@ -20,7 +20,7 @@ import {
   snapshotWorkingTree,
   type RepoPaths,
 } from "./git.js";
-import { AUTH_REJECTED, BILLING_EXHAUSTED, type FetchLike } from "./jev.js";
+import { AUTH_REJECTED, BILLING_EXHAUSTED, type FetchLike } from "./clef.js";
 import { judgeInfo, judgeName, type Effort, type JudgeKind } from "./judge.js";
 import { OPENAI_AUTH_REJECTED, OPENAI_BILLING_EXHAUSTED } from "./openai.js";
 import { coverage, cutWords, noneCheckedReason, renderReport, renderScores } from "./report.js";
@@ -71,7 +71,7 @@ export interface RunOptions {
   base?: string;
   /** score mode only: score this unified diff file instead of the working tree. */
   diffFile?: string;
-  /** score mode only: put exactly what Jev saw for each piece in the output. */
+  /** score mode only: put exactly what the judge saw for each piece in the output. */
   showContext?: boolean;
   sessionId?: string;
   stopHookActive?: boolean;
@@ -391,7 +391,7 @@ async function runLocked(args: LockedArgs): Promise<RunOutcome> {
   if (engineResult.blocked !== null) {
     await saveCache(stateDir, cache);
     if (engineResult.blocked === "billing") {
-      return cannotRun(judge.kind === "jev" ? BILLING_EXHAUSTED : OPENAI_BILLING_EXHAUSTED);
+      return cannotRun(judge.kind === "clef" ? BILLING_EXHAUSTED : OPENAI_BILLING_EXHAUSTED);
     }
     if (engineResult.blocked === "busy") return cannotRun(machineBusy(name));
     if (engineResult.blocked === "model") {
@@ -399,7 +399,7 @@ async function runLocked(args: LockedArgs): Promise<RunOutcome> {
       return cannotRun(`${said.replace(/\.+$/, "")}.`);
     }
     if (credentials.mode === "team") return cannotRun(TOKEN_REJECTED);
-    return cannotRun(`${judge.kind === "jev" ? AUTH_REJECTED : OPENAI_AUTH_REJECTED}.`);
+    return cannotRun(`${judge.kind === "clef" ? AUTH_REJECTED : OPENAI_AUTH_REJECTED}.`);
   }
 
   if (pieces.length > 0 && engineResult.answered === 0 && engineResult.transportFailed) {

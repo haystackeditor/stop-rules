@@ -8,14 +8,18 @@ export interface KeySource {
   direct: string;
   /** The variable naming a file that holds the key. */
   file: string;
-  /** How the key is named in a message, such as "Jev API key". */
+  /** How the key is named in a message, such as "Cloudflare API token". */
   label: string;
 }
 
-export const JEV_KEY_SOURCE: KeySource = {
-  direct: "TYPESAFE_API_KEY",
-  file: "TYPESAFE_API_KEY_FILE",
-  label: "Jev API key",
+/**
+ * Clef's token. CLOUDFLARE_API_TOKEN is the name wrangler reads too, so a machine already set
+ * up for wrangler has it, though the token also needs the Workers AI permission.
+ */
+export const CLOUDFLARE_TOKEN_SOURCE: KeySource = {
+  direct: "CLOUDFLARE_API_TOKEN",
+  file: "CLOUDFLARE_API_TOKEN_FILE",
+  label: "Cloudflare API token",
 };
 
 export const OPENAI_KEY_SOURCE: KeySource = {
@@ -35,7 +39,7 @@ export function keySourceSet(env: NodeJS.ProcessEnv, source: KeySource): boolean
  */
 export async function resolveApiKey(
   env: NodeJS.ProcessEnv,
-  source: KeySource = JEV_KEY_SOURCE,
+  source: KeySource,
 ): Promise<KeyLookup> {
   // A variable that is set has to hold something. Moving on to the next source would hide
   // the mistake and then fail somewhere further away.

@@ -3,7 +3,7 @@ import type {
   BrokenRule,
   CheckReport,
   CutMode,
-  JevView,
+  JudgeView,
   NotChecked,
   PieceFinding,
   PieceScore,
@@ -159,9 +159,9 @@ function headline(report: CheckReport): string {
  * What the judge was shown beside each piece, in one sentence, read off the run's own counts.
  * It goes in the header line because the piece printed below is the narrower one: the report
  * hands the agent the piece's own diff, whatever the judge saw. `judge` is the judge's name
- * as the user knows it: Jev, or the OpenAI model.
+ * as the user knows it: Clef, or the OpenAI model.
  */
-export function whatJevSaw(stats: RunStats, judge = "Jev"): string | null {
+export function whatJudgeSaw(stats: RunStats, judge: string): string | null {
   const parts: string[] = [];
   const lines = stats.contextLines;
   if (stats.withFunction > 0 && stats.widened > 0) {
@@ -186,7 +186,7 @@ export function whatJevSaw(stats: RunStats, judge = "Jev"): string | null {
 export function renderReport(report: CheckReport): string {
   const { pieces, notChecked } = report;
   const sections: string[] = [];
-  const saw = whatJevSaw(report.stats, judgeName(report.judge));
+  const saw = whatJudgeSaw(report.stats, judgeName(report.judge));
 
   if (pieces.length === 0) {
     sections.push(saw === null ? headline(report) : `${headline(report)} ${saw}`);
@@ -214,7 +214,7 @@ export function cutWords(cut: CutMode): string {
 }
 
 /** `--show-context`: exactly what the judge was sent for this piece, printed in full. */
-function jevSawLines(saw: JevView, judge: string): string[] {
+function judgeSawLines(saw: JudgeView, judge: string): string[] {
   const lines = [`   What ${judge} saw:`, `     file: ${saw.file}`, "     diff:"];
   for (const line of saw.diff.split("\n")) {
     if (line.length > 0) lines.push(`       ${line}`);
@@ -234,7 +234,7 @@ function scoreBlock(piece: PieceScore, index: number, judge: string): string {
     if (rule.line !== undefined) lines.push(`         Line: ${rule.line}`);
     if (rule.reason !== undefined) lines.push(`         Why: ${rule.reason}`);
   }
-  if (piece.jevSaw !== undefined) lines.push(...jevSawLines(piece.jevSaw, judge));
+  if (piece.judgeSaw !== undefined) lines.push(...judgeSawLines(piece.judgeSaw, judge));
   return lines.join("\n");
 }
 

@@ -13,7 +13,9 @@ spec:
       health_check:
         http_path: /health
       envs:
-        - key: TYPESAFE_API_KEY
+        - key: STOP_RULES_CLOUDFLARE_ACCOUNT_ID
+          scope: RUN_TIME
+        - key: STOP_RULES_CLOUDFLARE_API_TOKEN
           scope: RUN_TIME
           type: SECRET
         - key: STOP_RULES_TOKEN

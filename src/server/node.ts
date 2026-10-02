@@ -132,11 +132,11 @@ export function startupLines(port: number, env: NodeJS.ProcessEnv): string[] {
   if (missing.length > 0) {
     lines.push(`not configured yet: set ${missing.join(" and ")} and restart`);
   }
-  const judge = (name: string, route: "jev" | "openai"): string => {
+  const judge = (name: string, route: "clef" | "openai"): string => {
     const needs = missingFor(serverEnv, route);
     return needs.length === 0 ? `${name} ready` : `${name} needs ${needs.join(" and ")}`;
   };
-  lines.push(`judges: ${judge("jev", "jev")}, ${judge("openai", "openai")}`);
+  lines.push(`judges: ${judge("clef", "clef")}, ${judge("openai", "openai")}`);
   return lines;
 }
 

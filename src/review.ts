@@ -14,7 +14,7 @@
 
 import { MAX_OUTPUT_TOKENS, readOutputJson, rulesBlock, type OpenAiRule, type ResponsesBody } from "./openai.js";
 import type { Effort } from "./judge.js";
-import type { JevView } from "./types.js";
+import type { JudgeView } from "./types.js";
 
 /** The system instruction, word for word as it was measured. */
 export const REVIEW_INSTRUCTION =
@@ -118,7 +118,7 @@ function isHeaderLine(line: string): boolean {
  * One file's pieces as one diff: the first piece's git header, then every piece's hunks in
  * line order. Each piece keeps the 25 lines around it that it has in the probability form.
  */
-export function fileDiff(views: readonly JevView[]): string {
+export function fileDiff(views: readonly JudgeView[]): string {
   const blocks: string[] = [];
   views.forEach((view, index) => {
     const lines = view.diff.replace(/\n$/, "").split("\n");
@@ -140,7 +140,7 @@ export function fileDiff(views: readonly JevView[]): string {
  * The user message, in the measured order: each file's diff under its own "File:" line, one
  * file after another, then the rules.
  */
-export function reviewInput(files: readonly { file: string; views: readonly JevView[] }[], rules: readonly OpenAiRule[]): string {
+export function reviewInput(files: readonly { file: string; views: readonly JudgeView[] }[], rules: readonly OpenAiRule[]): string {
   const blocks = files.map((entry) => `File: ${entry.file}\n\nDiff:\n${fileDiff(entry.views)}`);
   return `${blocks.join("\n")}\n${rulesBlock(rules)}`;
 }

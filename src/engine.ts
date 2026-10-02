@@ -1,23 +1,27 @@
 /**
  * The check engine. Stage 1 asks, for every piece and rule, whether the added lines break
- * the rule. The judge is a seam: Jev takes up to four pieces in one call, the OpenAI judge one
- * piece per call with several calls in flight, and everything around the asking (the cache,
- * the cutoff, the grouping) is the same for both. Plain inputs, plain outputs, no Node-only
- * imports and no environment reads, so the same code runs in a CLI, a worker or an edge
- * function. Parsing happens above this file; here a piece is just text.
+ * the rule. The judge is a seam: Clef takes one piece per call with every rule as a question,
+ * the OpenAI judge one piece per call or a whole change per call, both with several calls in
+ * flight, and everything around the asking (the cache, the cutoff, the grouping) is the same
+ * for both. Plain inputs, plain outputs, no Node-only imports and no environment reads, so the
+ * same code runs in a CLI, a worker or an edge function. Parsing happens above this file; here
+ * a piece is just text.
  */
 
 import { chunkText, halvePiece, utf8Bytes, type Piece } from "./diff.js";
 import { CONTEXT_LINES } from "./context.js";
 import {
-  JevClient,
+  ClefClient,
   holdsBaseline,
+  MAX_QUESTIONS,
+  stateBytes,
+  SURE_STATE_BYTES,
   type AskNode,
+  type ClefQuestion,
   type FailureClass,
   type FetchLike,
-  type JevQuestion,
   type SlotGate,
-} from "./jev.js";
+} from "./clef.js";
 import { cacheModel, judgeName, type Judge } from "./judge.js";
 import {
   OpenAiClient,
@@ -42,7 +46,7 @@ import {
 import {
   NO_CONTEXT,
   type BrokenRule,
-  type JevView,
+  type JudgeView,
   type NotChecked,
   type PieceContext,
   type PieceFinding,
@@ -68,28 +72,28 @@ export const DEFAULT_THRESHOLD = 0.6;
 
 /**
  * The one ceiling on requests to the judge in one run. Raise it with `maxCalls` or
- * `--max-calls`. Jev takes up to four pieces per call, so 60 calls cover up to 240 pieces.
+ * `--max-calls`. Clef and the OpenAI judge's scores form take one piece per call, so 240 calls
+ * cover 240 pieces. Clef also spends a call, once per run, measuring what its questions cost
+ * when a call comes near the 2,048 tokens of state it reads (clef.ts).
  */
-export const DEFAULT_MAX_CALLS = 60;
-/**
- * The same ceiling for the OpenAI judge, which takes one piece per call. 240 calls cover the
- * same 240 pieces Jev's 60 do, so switching judge never leaves a change half checked.
- */
-export const DEFAULT_MAX_CALLS_OPENAI = 240;
+export const DEFAULT_MAX_CALLS = 240;
+/** The review form puts a whole change in one call, so 60 is already more than it needs. */
+export const DEFAULT_MAX_CALLS_REVIEW = 60;
 
-/**
- * The call ceiling a judge gets when neither the file nor a flag sets one. The review form puts
- * a whole change in one call, so Jev's 60 is already more than it needs.
- */
-export function defaultMaxCalls(judge: { kind: "jev" | "openai"; form?: "review" | "scores" }): number {
-  return judge.kind === "openai" && judge.form === "scores" ? DEFAULT_MAX_CALLS_OPENAI : DEFAULT_MAX_CALLS;
+/** The call ceiling a judge gets when neither the file nor a flag sets one. */
+export function defaultMaxCalls(judge: { kind: "clef" | "openai"; form?: "review" | "scores" }): number {
+  return judge.kind === "openai" && judge.form === "review" ? DEFAULT_MAX_CALLS_REVIEW : DEFAULT_MAX_CALLS;
 }
 
-/** Measured: four pieces per call moved scores by 0.03 on average, eight was worse. */
-export const PIECES_PER_CALL = 4;
-/** And a call is bounded by its body size, whatever the piece count. */
+/**
+ * Pieces in one Clef call. One: Clef was measured one piece per call (2 October 2026), and it
+ * reads only 2,048 tokens of state, which a second piece would have to share.
+ */
+export const PIECES_PER_CALL = 1;
+/** An OpenAI call is bounded by its body size, whatever the piece count. */
 export const PACK_MAX_BYTES = 60_000;
 
+/** Rules in one OpenAI scores call. A Clef call carries at most MAX_QUESTIONS. */
 const MAX_RULES_PER_CALL = 200;
 const CACHE_KEY_VERSION = "v1";
 /**
@@ -121,7 +125,7 @@ export interface EngineInput {
   note: (message: string) => void;
   /** True for a (rule, piece) pair the caller has already delivered once. */
   skipFinding?: (ruleId: string, pieceText: string) => boolean;
-  /** `score --show-context`: put exactly what Jev saw on every score. */
+  /** `score --show-context`: put exactly what the judge saw on every score. */
   showContext?: boolean;
   sleep?: (ms: number) => Promise<void>;
   concurrency?: number;
@@ -145,13 +149,13 @@ export interface EngineResult {
   notChecked: NotChecked[];
   calls: number;
   cacheHits: number;
-  /** Questions that got an answer, from the cache or from Jev. */
+  /** Questions that got an answer, from the cache or from the judge. */
   answered: number;
   /** Pieces that rode in each call, in call order, for the run log. */
   piecesPerCall: number[];
-  /** Pieces Jev saw with their diff widened. */
+  /** Pieces the judge saw with their diff widened. */
   widened: number;
-  /** Pieces Jev saw with the whole function after the change. */
+  /** Pieces the judge saw with the whole function after the change. */
   withFunction: number;
   /** Pieces whose wide form would not fit a call of its own. */
   tooBigToWiden: WidenRefused[];
@@ -204,10 +208,10 @@ export function cacheKey(model: string, claim: string, state: unknown): Promise<
 }
 
 /**
- * Exactly what Jev is shown for one piece: the file, the diff, and the code around it. The
- * report hands the agent the piece's own diff instead, whatever is here.
+ * Exactly what the judge is shown for one piece: the file, the diff, and the code around it.
+ * The report hands the agent the piece's own diff instead, whatever is here.
  */
-export function pieceState(piece: Piece, context: PieceContext): JevView {
+export function pieceState(piece: Piece, context: PieceContext): JudgeView {
   switch (context.kind) {
     case "none":
       return { file: piece.file, diff: chunkText(piece) };
@@ -255,11 +259,11 @@ function notCheckedFor(piece: Piece, reason: string): NotChecked {
 
 function packQuestions(work: readonly Work[]): {
   state: unknown;
-  questions: Record<string, JevQuestion>;
+  questions: Record<string, ClefQuestion>;
   byQuestion: Record<string, { piece: Piece; rule: Rule }>;
 } {
-  const pieces: Record<string, JevView> = {};
-  const questions: Record<string, JevQuestion> = {};
+  const pieces: Record<string, JudgeView> = {};
+  const questions: Record<string, ClefQuestion> = {};
   const byQuestion: Record<string, { piece: Piece; rule: Rule }> = {};
   work.forEach((item, index) => {
     const key = `p${index}`;
@@ -273,38 +277,45 @@ function packQuestions(work: readonly Work[]): {
   return { state: { pieces }, questions, byQuestion };
 }
 
-/** The bytes a call would weigh, so a pack can be bounded by body size. */
-function packBytes(model: string, work: readonly Work[]): number {
-  const { state, questions } = packQuestions(work);
-  return utf8Bytes(JSON.stringify({ state, model, questions }));
+/**
+ * The bytes of state a Clef call would carry. Clef's limit is on the state alone: the
+ * questions are read in full whatever their length.
+ */
+function packStateBytes(work: readonly Work[]): number {
+  return stateBytes(packQuestions(work).state);
 }
 
-function makePackNode(model: string, work: Work[]): AskNode<PackPayload> {
+function makePackNode(work: Work[]): AskNode<PackPayload> {
   const { state, questions, byQuestion } = packQuestions(work);
   return {
     payload: { work, byQuestion },
     state,
     questions,
     halve: () => {
-      // Too long for Jev: halve the pack first, then the one piece that is still too long.
+      // More than Clef reads: halve the pack first, then the one piece that is still too long.
       if (work.length > 1) {
         const mid = Math.ceil(work.length / 2);
-        return [makePackNode(model, work.slice(0, mid)), makePackNode(model, work.slice(mid))];
+        return [makePackNode(work.slice(0, mid)), makePackNode(work.slice(mid))];
       }
       const only = work[0];
       if (only === undefined) return null;
       const halves = halvePiece(only.piece);
       if (halves === null) return null;
       return [
-        makePackNode(model, [{ piece: halves[0], context: halves[0].context, rules: only.rules }]),
-        makePackNode(model, [{ piece: halves[1], context: halves[1].context, rules: only.rules }]),
+        makePackNode([{ piece: halves[0], context: halves[0].context, rules: only.rules }]),
+        makePackNode([{ piece: halves[1], context: halves[1].context, rules: only.rules }]),
       ];
     },
   };
 }
 
-/** Groups pieces into calls of at most four, and at most 60,000 bytes of body. */
-export function packWork(model: string, work: readonly Work[]): Work[][] {
+/**
+ * Groups pieces into Clef calls of at most PIECES_PER_CALL pieces and MAX_QUESTIONS questions,
+ * with no more state than Clef is sure to read whole. A piece over that rides alone.
+ */
+export function packWork(work: readonly Work[]): Work[][] {
+  const questionsIn = (pack: readonly Work[]): number =>
+    pack.reduce((total, item) => total + item.rules.length, 0);
   const packs: Work[][] = [];
   let current: Work[] = [];
   for (const item of work) {
@@ -313,7 +324,11 @@ export function packWork(model: string, work: readonly Work[]): Work[][] {
       continue;
     }
     const candidate = [...current, item];
-    if (candidate.length > PIECES_PER_CALL || packBytes(model, candidate) > PACK_MAX_BYTES) {
+    if (
+      candidate.length > PIECES_PER_CALL ||
+      questionsIn(candidate) > MAX_QUESTIONS ||
+      packStateBytes(candidate) > SURE_STATE_BYTES
+    ) {
       packs.push(current);
       current = [item];
       continue;
@@ -508,10 +523,17 @@ function scoreReview(
   return { answers, details, rejected };
 }
 
-/** The bytes a call carrying only this piece would weigh, for the judge that will be asked. */
-function soloBytes(judge: Judge, work: Work, rules: readonly Rule[]): number {
-  if (judge.kind === "jev") return packBytes(judge.model, [work]);
-  return judge.form === "scores" ? openAiBytes(judge, work) : reviewBytes(judge, [work], rules);
+/**
+ * What a call carrying only this piece would weigh for the judge that will be asked, and the
+ * most it may weigh: for Clef the bytes of state it is sure to read whole, for OpenAI the bytes
+ * of body.
+ */
+function soloWeight(judge: Judge, work: Work, rules: readonly Rule[]): { bytes: number; cap: number; what: string } {
+  if (judge.kind === "clef") {
+    return { bytes: packStateBytes([work]), cap: SURE_STATE_BYTES, what: `bytes of state ${judgeName(judge)} is sure to read whole` };
+  }
+  const bytes = judge.form === "scores" ? openAiBytes(judge, work) : reviewBytes(judge, [work], rules);
+  return { bytes, cap: PACK_MAX_BYTES, what: "byte cap" };
 }
 
 /** What the engine needs back from either judge for one call. */
@@ -535,8 +557,8 @@ async function askJudge(
   work: readonly Work[],
 ): Promise<Asked> {
   const { judge, note } = input;
-  if (judge.kind === "jev") {
-    const client = new JevClient({
+  if (judge.kind === "clef") {
+    const client = new ClefClient({
       endpoint: input.endpoint,
       model: judge.model,
       apiKey: input.apiKey,
@@ -547,7 +569,7 @@ async function askJudge(
       ...(input.concurrency !== undefined ? { concurrency: input.concurrency } : {}),
       ...(input.slot ? { slot: input.slot } : {}),
     });
-    const nodes = packWork(judge.model, work).map((pack) => makePackNode(judge.model, pack));
+    const nodes = packWork(work).map((pack) => makePackNode(pack));
     const results = (await client.askAll(nodes)).map((result) => ({
       payload: result.node.payload,
       outcome: result.outcome,
@@ -602,9 +624,10 @@ async function askJudge(
 }
 
 /**
- * The code around a piece, unless sending it would put a call carrying only this piece over
- * the 60,000 byte cap. In that case the piece goes with its diff alone and the run says so,
- * once in the run log and once in the stats: it is a recorded fact, not a quiet retreat.
+ * The code around a piece, unless sending it would put a call carrying only this piece over its
+ * judge's cap: for Clef, the 5,120 bytes of state it is sure to read whole; for OpenAI, 60,000
+ * bytes of body. In that case the piece goes with its diff alone and the run says so, once in
+ * the run log and once in the stats: it is a recorded fact, not a quiet retreat.
  */
 function contextThatFits(
   judge: Judge,
@@ -615,20 +638,20 @@ function contextThatFits(
 ): PieceContext {
   const context = piece.context;
   if (context.kind === "none") return context;
-  const bytes = soloBytes(judge, { piece, context, rules: [...rules] }, rules);
-  if (bytes <= PACK_MAX_BYTES) return context;
-  refused.push({ file: piece.file, fromLine: piece.fromLine, toLine: piece.toLine, bytes });
+  const weight = soloWeight(judge, { piece, context, rules: [...rules] }, rules);
+  if (weight.bytes <= weight.cap) return context;
+  refused.push({ file: piece.file, fromLine: piece.fromLine, toLine: piece.toLine, bytes: weight.bytes });
   note(
     `${piece.file} lines ${piece.fromLine}-${piece.toLine}: too big to widen, ` +
-      `a call with the ${CONTEXT_LINES} lines around it would be ${bytes} bytes, over the ` +
-      `${PACK_MAX_BYTES} byte cap, so ${judgeName(judge)} saw the diff alone`,
+      `a call with the ${CONTEXT_LINES} lines around it would be ${weight.bytes} bytes, over the ` +
+      `${weight.cap} ${weight.what}, so ${judgeName(judge)} saw the diff alone`,
   );
   return NO_CONTEXT;
 }
 
 export async function runEngine(input: EngineInput): Promise<EngineResult> {
   const { cache, note, threshold, judge } = input;
-  // The model string the cache is keyed on. For Jev it is the bare model name it always was.
+  // The model string the cache is keyed on.
   const model = cacheModel(judge);
   const name = judgeName(judge);
 
@@ -692,8 +715,9 @@ export async function runEngine(input: EngineInput): Promise<EngineResult> {
       if (uncached.length > 0) work.push({ piece, context, rules: uncached });
       continue;
     }
-    for (let i = 0; i < uncached.length; i += MAX_RULES_PER_CALL) {
-      work.push({ piece, context, rules: uncached.slice(i, i + MAX_RULES_PER_CALL) });
+    const perCall = judge.kind === "clef" ? MAX_QUESTIONS : MAX_RULES_PER_CALL;
+    for (let i = 0; i < uncached.length; i += perCall) {
+      work.push({ piece, context, rules: uncached.slice(i, i + perCall) });
     }
   }
 
@@ -854,7 +878,7 @@ function groupScores(scored: readonly Hit[], showContext: boolean): PieceScore[]
       fromLine: hit.piece.fromLine,
       toLine: hit.piece.toLine,
       rules: [entry],
-      ...(showContext ? { jevSaw: pieceState(hit.piece, hit.context) } : {}),
+      ...(showContext ? { judgeSaw: pieceState(hit.piece, hit.context) } : {}),
     });
   }
 

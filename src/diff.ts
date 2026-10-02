@@ -4,7 +4,7 @@ export const CHUNK_MAX_BYTES = 12_000;
 
 /**
  * A diff line longer than this is data, not code: a minified bundle, a log record, a
- * base64 blob. Sending it costs a fortune in tokens and teaches Jev nothing, so the text
+ * base64 blob. Sending it costs a fortune in tokens and teaches the judge nothing, so the text
  * is replaced by a marker, so a piece never carries it.
  */
 export const LONG_LINE_LIMIT = 1000;
@@ -119,7 +119,7 @@ export interface Piece extends Chunk {
   toLine: number;
   cut: "unit" | "hunk" | "chunk";
   /**
-   * The code around this piece that rides to Jev with it, built at cut time out of the new
+   * The code around this piece that rides to the judge with it, built at cut time out of the new
    * file in the snapshot. The report always hands the agent the piece's own diff instead.
    */
   context: PieceContext;
@@ -485,10 +485,10 @@ export function chunkFile(file: FileDiff): Chunk[] {
 }
 
 /**
- * Halves a piece for a resend after max_tokens_exceeded, the same way a chunk is halved.
- * Null when it cannot shrink any further. A half carries no code around it: the whole point
- * of the halving is that the call was too long for Jev, and half a piece's window belongs to
- * the piece, not to the half.
+ * Halves a piece for a resend when the call was too long for the judge, the same way a chunk
+ * is halved. Null when it cannot shrink any further. A half carries no code around it: the
+ * whole point of the halving is that the call was too long, and half a piece's window belongs
+ * to the piece, not to the half.
  */
 export function halvePiece(piece: Piece): [Piece, Piece] | null {
   const halves = halveChunk(piece);
@@ -510,7 +510,7 @@ function asPiece(original: Piece, part: Chunk): Piece {
   };
 }
 
-/** Halves a chunk for a resend after max_tokens_exceeded. Null when it cannot shrink. */
+/** Halves a chunk for a resend when the call was too long. Null when it cannot shrink. */
 export function halveChunk(chunk: Chunk): [Chunk, Chunk] | null {
   if (chunk.hunks.length > 1) {
     const mid = Math.ceil(chunk.hunks.length / 2);

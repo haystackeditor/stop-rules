@@ -1,4 +1,4 @@
-# The stop-rules team server: a locked down Jev proxy on port 8080.
+# The stop-rules team server: a locked down proxy for Clef on Workers AI, on port 8080.
 # This one image is the deploy path for Cloud Run, Azure Container Apps, Fly.io, Render,
 # Railway, DigitalOcean App Platform and Heroku (with heroku.yml).
 

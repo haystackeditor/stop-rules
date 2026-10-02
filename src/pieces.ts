@@ -658,7 +658,7 @@ export function buildPieces(
       fromLine: Math.min(...group.atoms.map((atom) => atom.span.start)),
       toLine: Math.max(...group.atoms.map((atom) => atom.span.end)),
       cut: "unit",
-      // A piece that is one function goes to Jev with that whole function after the change.
+      // A piece that is one function goes to the judge with that whole function after the change.
       // A run of statements and declarations is no function, so it gets the wide form, clamped
       // to the lines no other piece of this file owns.
       context: group.fn
@@ -766,7 +766,7 @@ export const HUNK_TRAILING_CONTEXT = 3;
  * lines with it, and each piece carries a recomputed `@@` header. A piece with no added line
  * is dropped, because a claim about added lines has nothing to judge in it.
  *
- * `source` is the file's new text out of the snapshot, which is what the wide form Jev sees
+ * `source` is the file's new text out of the snapshot, which is what the wide form the judge sees
  * is built from.
  */
 export function piecesByHunk(file: FileDiff, source: string | null): Piece[] {

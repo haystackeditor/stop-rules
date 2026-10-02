@@ -1,5 +1,5 @@
 /**
- * The code around a change, which is what Jev is sent beside the diff.
+ * The code around a change, which is what the judge is sent beside the diff.
  *
  * Measured on our harness on 20 September 2026, over 240 real agent written changes with
  * blind labels and adjudications: the same piece with 25 unchanged lines above and below the
@@ -159,7 +159,7 @@ export interface LineRange {
  *    in that measurement. Measured on 20 September 2026: a piece of two import lines in a 19
  *    line file went from 0.08 to 0.84 on the swallowed errors rule, because its window reached
  *    into a neighbouring function's empty `catch` block. So there the window stops at the first
- *    line another piece owns and Jev only ever sees unowned code around the change.
+ *    line another piece owns and the judge only ever sees unowned code around the change.
  */
 export function widePieceText(piece: Chunk, fileText: string, taken: readonly LineRange[] = []): string {
   const lines = fileLines(fileText);

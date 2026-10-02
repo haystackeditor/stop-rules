@@ -1,13 +1,17 @@
 {
   "name": "stop-rules",
-  "description": "A locked down Jev proxy, so your team's coding rules hook needs no Jev key.",
+  "description": "A locked down proxy for Clef on Workers AI, so your team's coding rules hook needs no Cloudflare token.",
   "repository": "https://github.com/haystackeditor/stop-rules",
   "website": "https://github.com/haystackeditor/stop-rules",
-  "keywords": ["jev", "code-review", "claude-code", "stop-hook"],
+  "keywords": ["clef", "workers-ai", "code-review", "claude-code", "stop-hook"],
   "stack": "container",
   "env": {
-    "TYPESAFE_API_KEY": {
-      "description": "Your Jev API key from TypeSafe. It stays on this server and no developer needs it.",
+    "STOP_RULES_CLOUDFLARE_ACCOUNT_ID": {
+      "description": "The Cloudflare account Clef runs on, 32 hex characters, from the account's home page in the Cloudflare dashboard.",
+      "required": true
+    },
+    "STOP_RULES_CLOUDFLARE_API_TOKEN": {
+      "description": "A Cloudflare API token for that account with the Workers AI permission. It stays on this server and no developer needs it.",
       "required": true
     },
     "STOP_RULES_TOKEN": {
