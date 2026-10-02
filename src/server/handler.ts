@@ -71,7 +71,8 @@ export function missingFor(env: ServerEnv, judge: JudgeRoute): string[] {
 
 /**
  * Names, never values, so a fresh deploy can be diagnosed from a browser. Empty once either
- * judge's route is ready. Before that it names what Clef, the default judge, needs.
+ * judge's route has every name it needs. Before that it names what Clef, the default judge,
+ * needs. A value that is set but unusable is not a name that is missing: judgeStatus reports it.
  */
 export function missingEnv(env: ServerEnv): string[] {
   if (missingFor(env, "openai").length === 0) return [];
@@ -89,6 +90,30 @@ function pinnedModel(env: ServerEnv): { ok: true; model: string | null } | { ok:
     return { ok: false, reason: `STOP_RULES_CLEF_MODEL must be ${CLEF_MODELS.join(" or ")}` };
   }
   return { ok: true, model: pinned };
+}
+
+/** One judge's route: whether it can answer, the names it still needs, and anything else wrong. */
+export interface JudgeStatus {
+  ready: boolean;
+  /** Names, never values. */
+  missing: string[];
+  /** A set value the route cannot use, said without the value. */
+  problems: string[];
+}
+
+/**
+ * The one place readiness is decided, for the health route and the startup lines alike. Clef's
+ * route also needs a pinned model it can use: with STOP_RULES_CLEF_MODEL set to anything but a
+ * Clef model, every Clef request answers 503, so the route is not ready.
+ */
+export function judgeStatus(env: ServerEnv, judge: JudgeRoute): JudgeStatus {
+  const missing = missingFor(env, judge);
+  const problems: string[] = [];
+  if (judge === "clef") {
+    const pinned = pinnedModel(env);
+    if (!pinned.ok) problems.push(pinned.reason);
+  }
+  return { ready: missing.length === 0 && problems.length === 0, missing, problems };
 }
 
 function describe(error: unknown): string {
@@ -196,18 +221,22 @@ const RESPONSES_FIELDS = [
   "prompt_cache_key",
 ];
 
+/**
+ * 200 while at least one judge can answer, 503 while none can, so a platform's health check and
+ * `login --check` never pass a server whose every question would come back 503.
+ */
 function health(env: ServerEnv): Response {
-  const missing = missingEnv(env);
-  return json(200, {
-    ok: true,
+  const clef = judgeStatus(env, "clef");
+  const openai = judgeStatus(env, "openai");
+  const usable = clef.ready || openai.ready;
+  return json(usable ? 200 : 503, {
+    ok: usable,
     service: "stop-rules",
     version: SERVER_VERSION,
-    configured: missing.length === 0,
-    missing,
-    judges: {
-      clef: missingFor(env, "clef").length === 0,
-      openai: missingFor(env, "openai").length === 0,
-    },
+    configured: usable,
+    missing: missingEnv(env),
+    problems: [...clef.problems, ...openai.problems],
+    judges: { clef: clef.ready, openai: openai.ready },
   });
 }
 

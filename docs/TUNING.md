@@ -200,8 +200,9 @@ How to pick your own bar, and why there is no single right number: the bar trade
 for noise, and where you want to sit on that trade depends on how much your team minds a
 wrong flag against a missed break. Measured with Jev, the judge before Clef, on 96 agent
 sessions across six projects with well-worded rules (one piece per call, every flag ruled by a
-reviewer). Clef has been measured at 0.5 only (section 8), so these are the numbers the default
-rests on until it is measured at the other bars:
+reviewer). Clef has been measured on the 240 change sample at 0.6 and 0.5 only (section 8: 18
+of 32 with 4 plainly false flags at 0.6, 22 with 8 at 0.5), so these are the numbers the
+default rests on across bars:
 
 | Bar | Real breaks caught, of 62 | Wrong flags | Arguable flags |
 |---|---|---|---|
@@ -1114,22 +1115,24 @@ the hook baseline holds. It is never read as a zero.
 **Clef against Jev.** Measured on 2 October 2026 on the same 240 real agent written changes, as
 the 804 pieces of the default cut, under the six starter rules, with 32 real breaks: one piece
 per call, each piece's diff on its own with no lines around it, and the claim sentence as it was
-before the code around each piece was named in it, at a bar of 0.5. Flags are counted against
-the first reviewer's rulings, under which Jev's run had 10 plainly false flags and an AUC of
-0.977; the second reviewer's later rulings, in the table below, settled Jev at 20 and 0.978, and
-Clef's flags have not had that second look.
+before the code around each piece was named in it, at the default bar of 0.6 and at 0.5. The 0.5
+flags are counted against the first reviewer's rulings, under which Jev's run had 10 plainly
+false flags and an AUC of 0.977; the second reviewer's later rulings, in the table below,
+settled Jev at 20 and 0.978 at 0.5, and Clef's flags have not had that second look.
 
-| Judge | Real breaks caught, of 32 | Plainly false flags | AUC | Median time per call | Price per million input tokens |
-|---|---|---|---|---|---|
-| Clef (`clef`, 27B) | 22 | 8 | 0.976 | 578 ms | $0.24 |
-| Jev, the judge it replaced | 20 | 10 | 0.977 | | |
-| Clef Flash (`clef-flash`, 9B) | 2 | | | | $0.09 |
+| Judge | Caught of 32 at 0.6 | Plainly false flags at 0.6 | Caught of 32 at 0.5 | Plainly false flags at 0.5 | AUC | Median time per call | Price per million input tokens |
+|---|---|---|---|---|---|---|---|
+| Clef (`clef`, 27B) | 18 | 4 | 22 | 8 | 0.976 | 578 ms | $0.24 |
+| Jev, the judge it replaced | 11 | 1 | 20 | 10 | 0.977 | | |
+| Clef Flash (`clef-flash`, 9B) | | | 2 | | | | $0.09 |
 
-`clef-flash` ranks too poorly at this bar to be worth its lower price for this question, which is
-why `clef` is the default. What ships also sends the 25 lines around each piece and names them in
+At the default bar Clef catches 7 more of the 32 than Jev did, for 3 more plainly false flags.
+`clef-flash` ranks too poorly at 0.5 to be worth its lower price for this question, which is why
+`clef` is the default. What ships also sends the 25 lines around each piece and names them in
 the claim, which was measured with Jev (the table at the top of this file) and not yet with Clef.
-The default bar stays 0.6, from the six-project measurement in section 1, which was made with Jev;
-Clef was measured at 0.5 only.
+The default bar stays 0.6: it was set on the six-project measurement in section 1, made with
+Jev, and on this sample it is where Clef keeps 18 of its 22 catches at half the plainly false
+flags.
 
 **The OpenAI judge against Jev.** Measured on 22 September 2026 on the 240 real agent written changes (804 pieces, the six starter
 rules, 32 real breaks after the latest adjudication; the 20 September tables above say 31, from

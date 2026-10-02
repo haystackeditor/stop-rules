@@ -167,7 +167,7 @@ export function readTeamEndpoint(
 export type AccountLookup = { ok: true; value: string | null } | { ok: false; reason: string };
 
 /** Checks an account id where it was found, so the message can say where to fix it. */
-function accountId(raw: string, from: string): AccountLookup {
+function accountId(raw: string, from: string): { ok: true; value: string } | { ok: false; reason: string } {
   if (!ACCOUNT_ID.test(raw)) {
     return {
       ok: false,
@@ -361,40 +361,54 @@ const LOGIN_WHAT: Record<LoginTarget, string> = {
     "That is your own OpenAI key, used when this repo's judge is openai and it has no team endpoint.",
 };
 
-/**
- * Writes one value with mode 0600 in a directory only the user can read. The account id is not
- * a secret, but it lives beside the token it belongs to and is kept the same way.
- */
-export async function login(
-  env: NodeJS.ProcessEnv,
-  target: LoginTarget,
-  secret: string,
-): Promise<WriteResult> {
-  let value = secret.trim();
+export interface LoginValue {
+  target: LoginTarget;
+  /** As given, untrimmed: stdin for a secret, the flag value for the account id. */
+  secret: string;
+}
+
+/** One value made ready to write, or the lines that say why it cannot be. */
+function checkLoginValue(entry: LoginValue): { ok: true; value: string } | { ok: false; lines: string[] } {
+  const value = entry.secret.trim();
   if (value.length === 0) {
     return {
       ok: false,
       lines:
-        target === "cloudflare-account"
+        entry.target === "cloudflare-account"
           ? ["stop-rules: --cloudflare-account needs your Cloudflare account id."]
           : ["stop-rules: nothing arrived on stdin.", 'Use: printf %s "$SECRET" | stop-rules login --token-stdin'],
     };
   }
-  if (target === "cloudflare-account") {
-    const checked = accountId(value, "--cloudflare-account");
-    if (!checked.ok) return { ok: false, lines: [`stop-rules: ${checked.reason}`] };
-    value = checked.value ?? value;
+  if (entry.target !== "cloudflare-account") return { ok: true, value };
+  const checked = accountId(value, "--cloudflare-account");
+  return checked.ok ? checked : { ok: false, lines: [`stop-rules: ${checked.reason}`] };
+}
+
+/**
+ * Writes each value with mode 0600 in a directory only the user can read. Every value is checked
+ * before any is written, so a token and account id given together are stored together or not at
+ * all: a mistyped id, or a token that never arrived, never leaves a new id beside an old token.
+ * The account id is not a secret, but it lives beside the token it belongs to and is kept the
+ * same way.
+ */
+export async function login(env: NodeJS.ProcessEnv, entries: readonly LoginValue[]): Promise<WriteResult> {
+  const ready: { target: LoginTarget; value: string }[] = [];
+  for (const entry of entries) {
+    const checked = checkLoginValue(entry);
+    if (!checked.ok) return { ok: false, lines: [...checked.lines, "Nothing was stored."] };
+    ready.push({ target: entry.target, value: checked.value });
   }
   const dir = configDir(env);
-  const file = loginPath(env, target);
   await fs.mkdir(dir, { recursive: true, mode: 0o700 });
-  await fs.writeFile(file, `${value}\n`, { encoding: "utf8", mode: 0o600 });
-  // writeFile only applies mode when it creates the file, so set it either way.
-  await fs.chmod(file, 0o600);
-  return {
-    ok: true,
-    lines: [`wrote ${file} with mode 0600`, LOGIN_WHAT[target], "Check it with: stop-rules login --check"],
-  };
+  const lines: string[] = [];
+  for (const { target, value } of ready) {
+    const file = loginPath(env, target);
+    await fs.writeFile(file, `${value}\n`, { encoding: "utf8", mode: 0o600 });
+    // writeFile only applies mode when it creates the file, so set it either way.
+    await fs.chmod(file, 0o600);
+    lines.push(`wrote ${file} with mode 0600`, LOGIN_WHAT[target]);
+  }
+  return { ok: true, lines: [...lines, "Check it with: stop-rules login --check"] };
 }
 
 /** The rule and piece login --check asks about. Small, and plainly not a break. */

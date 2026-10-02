@@ -3325,29 +3325,36 @@ var LOGIN_WHAT = {
   "cloudflare-account": "That is the Cloudflare account Clef runs on, used when this repo has no team endpoint.",
   "openai-key": "That is your own OpenAI key, used when this repo's judge is openai and it has no team endpoint."
 };
-async function login(env, target, secret) {
-  let value2 = secret.trim();
+function checkLoginValue(entry) {
+  const value2 = entry.secret.trim();
   if (value2.length === 0) {
     return {
       ok: false,
-      lines: target === "cloudflare-account" ? ["stop-rules: --cloudflare-account needs your Cloudflare account id."] : ["stop-rules: nothing arrived on stdin.", 'Use: printf %s "$SECRET" | stop-rules login --token-stdin']
+      lines: entry.target === "cloudflare-account" ? ["stop-rules: --cloudflare-account needs your Cloudflare account id."] : ["stop-rules: nothing arrived on stdin.", 'Use: printf %s "$SECRET" | stop-rules login --token-stdin']
     };
   }
-  if (target === "cloudflare-account") {
-    const checked = accountId(value2, "--cloudflare-account");
-    if (!checked.ok) return { ok: false, lines: [`stop-rules: ${checked.reason}`] };
-    value2 = checked.value ?? value2;
+  if (entry.target !== "cloudflare-account") return { ok: true, value: value2 };
+  const checked = accountId(value2, "--cloudflare-account");
+  return checked.ok ? checked : { ok: false, lines: [`stop-rules: ${checked.reason}`] };
+}
+async function login(env, entries) {
+  const ready = [];
+  for (const entry of entries) {
+    const checked = checkLoginValue(entry);
+    if (!checked.ok) return { ok: false, lines: [...checked.lines, "Nothing was stored."] };
+    ready.push({ target: entry.target, value: checked.value });
   }
   const dir = configDir(env);
-  const file = loginPath(env, target);
   await fs10.mkdir(dir, { recursive: true, mode: 448 });
-  await fs10.writeFile(file, `${value2}
+  const lines = [];
+  for (const { target, value: value2 } of ready) {
+    const file = loginPath(env, target);
+    await fs10.writeFile(file, `${value2}
 `, { encoding: "utf8", mode: 384 });
-  await fs10.chmod(file, 384);
-  return {
-    ok: true,
-    lines: [`wrote ${file} with mode 0600`, LOGIN_WHAT[target], "Check it with: stop-rules login --check"]
-  };
+    await fs10.chmod(file, 384);
+    lines.push(`wrote ${file} with mode 0600`, LOGIN_WHAT[target]);
+  }
+  return { ok: true, lines: [...lines, "Check it with: stop-rules login --check"] };
 }
 var PROBE_RULE = { id: "probe", text: "Do not leave a TODO comment in the code." };
 var PROBE_VIEW = {
@@ -10346,6 +10353,15 @@ function pinnedModel(env) {
   }
   return { ok: true, model: pinned };
 }
+function judgeStatus(env, judge) {
+  const missing = missingFor(env, judge);
+  const problems = [];
+  if (judge === "clef") {
+    const pinned = pinnedModel(env);
+    if (!pinned.ok) problems.push(pinned.reason);
+  }
+  return { ready: missing.length === 0 && problems.length === 0, missing, problems };
+}
 function describe(error) {
   return error instanceof Error ? error.message : String(error);
 }
@@ -10428,17 +10444,17 @@ var RESPONSES_FIELDS = [
   "prompt_cache_key"
 ];
 function health(env) {
-  const missing = missingEnv(env);
-  return json(200, {
-    ok: true,
+  const clef2 = judgeStatus(env, "clef");
+  const openai = judgeStatus(env, "openai");
+  const usable = clef2.ready || openai.ready;
+  return json(usable ? 200 : 503, {
+    ok: usable,
     service: "stop-rules",
     version: SERVER_VERSION,
-    configured: missing.length === 0,
-    missing,
-    judges: {
-      clef: missingFor(env, "clef").length === 0,
-      openai: missingFor(env, "openai").length === 0
-    }
+    configured: usable,
+    missing: missingEnv(env),
+    problems: [...clef2.problems, ...openai.problems],
+    judges: { clef: clef2.ready, openai: openai.ready }
   });
 }
 function upstreamFor(env, judge, model) {
@@ -10703,15 +10719,17 @@ function startServer(port, env = process.env) {
 function startupLines(port, env) {
   const lines = [`stop-rules ${SERVER_VERSION} listening on http://${HOST}:${port}`];
   const serverEnv = env;
-  const missing = missingEnv(serverEnv);
-  if (missing.length > 0) {
-    lines.push(`not configured yet: set ${missing.join(" and ")} and restart`);
+  const clef2 = judgeStatus(serverEnv, "clef");
+  const openai = judgeStatus(serverEnv, "openai");
+  const fixes = (status) => [
+    ...status.missing.length > 0 ? [`set ${status.missing.join(" and ")}`] : [],
+    ...status.problems
+  ];
+  if (!clef2.ready && !openai.ready) {
+    lines.push(`not configured yet: ${fixes(clef2).join("; ")}, then restart`);
   }
-  const judge = (name2, route2) => {
-    const needs = missingFor(serverEnv, route2);
-    return needs.length === 0 ? `${name2} ready` : `${name2} needs ${needs.join(" and ")}`;
-  };
-  lines.push(`judges: ${judge("clef", "clef")}, ${judge("openai", "openai")}`);
+  const judge = (name2, status) => status.ready ? `${name2} ready` : `${name2} not ready (${fixes(status).join("; ")})`;
+  lines.push(`judges: ${judge("clef", clef2)}, ${judge("openai", openai)}`);
   return lines;
 }
 async function serveMain(port) {
@@ -11173,16 +11191,12 @@ async function runLoginCommand(args2) {
     );
     return 1;
   }
-  const lines = [];
-  if (account !== void 0) {
-    const stored2 = await login(process.env, "cloudflare-account", account);
-    if (!stored2.ok || fromStdin === 0) return writeResult(stored2);
-    lines.push(...stored2.lines.slice(0, -1));
+  const entries = account === void 0 ? [] : [{ target: "cloudflare-account", secret: account }];
+  if (fromStdin > 0) {
+    const target = args2.tokenStdin ? "token" : args2.cloudflareTokenStdin ? "cloudflare-token" : "openai-key";
+    entries.push({ target, secret: await readStdin() });
   }
-  const secret = await readStdin();
-  const target = args2.tokenStdin ? "token" : args2.cloudflareTokenStdin ? "cloudflare-token" : "openai-key";
-  const stored = await login(process.env, target, secret);
-  return writeResult({ ok: stored.ok, lines: [...lines, ...stored.lines] });
+  return writeResult(await login(process.env, entries));
 }
 async function main() {
   let args2;

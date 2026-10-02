@@ -55,16 +55,48 @@ describe("Clef credentials", () => {
   it("reads what login stored, mode 0600", async () => {
     const home = await configHome();
     const env = { XDG_CONFIG_HOME: home };
-    const bad = await login(env, "cloudflare-account", "nope");
+    const bad = await login(env, [{ target: "cloudflare-account", secret: "nope" }]);
     assert.equal(bad.ok, false);
-    assert.equal((await login(env, "cloudflare-account", ACCOUNT)).ok, true);
-    assert.equal((await login(env, "cloudflare-token", "stored-token\n")).ok, true);
+    assert.equal((await login(env, [{ target: "cloudflare-account", secret: ACCOUNT }])).ok, true);
+    assert.equal((await login(env, [{ target: "cloudflare-token", secret: "stored-token\n" }])).ok, true);
     const file = path.join(home, "stop-rules", "cloudflare-token");
     assert.equal((await fs.stat(file)).mode & 0o777, 0o600);
     const result = await resolveCredentials(NO_SETTINGS, env, CLEF);
     assert.ok(result.ok);
     assert.equal(result.credentials.bearer, "stored-token");
     assert.match(result.credentials.endpoint, new RegExp(`/accounts/${ACCOUNT.toLowerCase()}/`));
+  });
+
+  it("stores a token and account id together or not at all", async () => {
+    const home = await configHome();
+    const env = { XDG_CONFIG_HOME: home };
+    const accountA = "a".repeat(32);
+    const accountB = "b".repeat(32);
+    const both = (account: string, token: string) =>
+      login(env, [
+        { target: "cloudflare-account", secret: account },
+        { target: "cloudflare-token", secret: token },
+      ]);
+    assert.equal((await both(accountA, "token-for-a")).ok, true);
+    const stored = async (name: string) => (await fs.readFile(path.join(home, "stop-rules", name), "utf8")).trim();
+
+    // A new account with a token that never arrived: nothing changes, not even the account.
+    const noToken = await both(accountB, "  \n");
+    assert.equal(noToken.ok, false);
+    assert.match(noToken.lines.join("\n"), /nothing arrived on stdin[\s\S]*Nothing was stored/);
+    assert.equal(await stored("cloudflare-account"), accountA);
+    assert.equal(await stored("cloudflare-token"), "token-for-a");
+
+    // A mistyped account with a good token: the token is not written either.
+    const badAccount = await both("not-an-account", "token-for-b");
+    assert.equal(badAccount.ok, false);
+    assert.equal(await stored("cloudflare-account"), accountA);
+    assert.equal(await stored("cloudflare-token"), "token-for-a");
+
+    // The account on its own still works as before.
+    assert.equal((await login(env, [{ target: "cloudflare-account", secret: accountB }])).ok, true);
+    assert.equal(await stored("cloudflare-account"), accountB);
+    assert.equal(await stored("cloudflare-token"), "token-for-a");
   });
 
   it("sends team mode to the server's Clef route with the team token", async () => {

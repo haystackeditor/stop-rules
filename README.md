@@ -167,16 +167,21 @@ missing key, a rejected key, a model your key cannot use, or an answer that brea
 stops the run with one line, and the baseline stays where it was.
 
 Clef against the judge it replaced. Measured on 2 October 2026 on 240 real agent written
-changes cut into 804 pieces, the six starter rules and 32 real breaks, one piece per call, at a
-bar of 0.5: Clef caught 22 of the 32 with 8 plainly false flags, where Jev, the scoring service
-the tool used before, caught 20 with 10 on the same pieces. Both counts use the first reviewer's
-rulings, under which Jev had 10 plainly false flags and an AUC of 0.977; a second reviewer later
-settled Jev at 20 and 0.978 (the table below), and Clef's flags have not had that second look.
-The two rank pieces the same (AUC 0.976 against 0.977), and a Clef call took a median 578 ms.
-That run sent each piece's diff on its own with the older wording of the question; what ships
-also sends the 25 lines around each piece and names them in the question, which was measured
-with Jev (see "What the judge sees" below) and not yet with Clef. `clef-flash` caught 2 of the
-32 at 0.5.
+changes cut into 804 pieces, the six starter rules and 32 real breaks, one piece per call, on
+the same pieces for both, at the tool's default bar of 0.6 and at 0.5:
+
+| Judge | Caught of 32 at 0.6 | Plainly false flags at 0.6 | Caught of 32 at 0.5 | Plainly false flags at 0.5 | AUC | Median time per call |
+|---|---|---|---|---|---|---|
+| Clef (`clef`) | 18 | 4 | 22 | 8 | 0.976 | 578 ms |
+| Jev, the scoring service the tool used before | 11 | 1 | 20 | 10 | 0.977 | |
+
+At the default bar Clef catches 7 more of the 32 than Jev did for 3 more plainly false flags.
+The 0.5 counts use the first reviewer's rulings, under which Jev had 10 plainly false flags and
+an AUC of 0.977; a second reviewer later settled Jev at 20 and 0.978 at 0.5 (the OpenAI table
+below), and Clef's flags have not had that second look. That run sent each piece's diff on its
+own with the older wording of the question; what ships also sends the 25 lines around each piece
+and names them in the question, which was measured with Jev (see "What the judge sees" below)
+and not yet with Clef. `clef-flash` caught 2 of the 32 at 0.5.
 
 What the OpenAI trade looks like. Measured on 22 September 2026 on the same 240 changes (the six
 starter rules, 32 real breaks after the latest adjudication), at a bar of 0.5, the bar the

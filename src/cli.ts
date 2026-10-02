@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 import { DEFAULT_AGENT, agentNames, getAdapter } from "./adapters/index.js";
 import type { AgentAdapter, HookContext, HookOutput } from "./adapters/index.js";
 import { resetBaseline, run, type RunOutcome } from "./check.js";
-import { login, loginCheck, writeTeamConfig } from "./credentials.js";
+import { login, loginCheck, writeTeamConfig, type LoginValue } from "./credentials.js";
 import { DEFAULT_MAX_CALLS, DEFAULT_MAX_CALLS_REVIEW, DEFAULT_THRESHOLD } from "./engine.js";
 import {
   CLEF_MODELS,
@@ -539,17 +539,13 @@ async function runLoginCommand(args: ParsedArgs): Promise<number> {
     );
     return 1;
   }
-  const lines: string[] = [];
-  if (account !== undefined) {
-    // Checked and written before stdin is read, so a mistyped id stores nothing at all.
-    const stored = await login(process.env, "cloudflare-account", account);
-    if (!stored.ok || fromStdin === 0) return writeResult(stored);
-    lines.push(...stored.lines.slice(0, -1));
+  // One call with everything given, which checks every value before it writes any.
+  const entries: LoginValue[] = account === undefined ? [] : [{ target: "cloudflare-account", secret: account }];
+  if (fromStdin > 0) {
+    const target = args.tokenStdin ? "token" : args.cloudflareTokenStdin ? "cloudflare-token" : "openai-key";
+    entries.push({ target, secret: await readStdin() });
   }
-  const secret = await readStdin();
-  const target = args.tokenStdin ? "token" : args.cloudflareTokenStdin ? "cloudflare-token" : "openai-key";
-  const stored = await login(process.env, target, secret);
-  return writeResult({ ok: stored.ok, lines: [...lines, ...stored.lines] });
+  return writeResult(await login(process.env, entries));
 }
 
 async function main(): Promise<number> {

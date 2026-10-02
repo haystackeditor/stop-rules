@@ -64,11 +64,18 @@ Optional: `STOP_RULES_CLEF_MODEL` (`clef` or `clef-flash`; unset, each repositor
 is used), `PORT` (default 8080, container targets only).
 
 Open `<endpoint>/health` in a browser after deploying. It reports which names are still
-missing, never their values, and which judge's route is ready:
+missing, never their values, any value that is set but cannot be used (a
+`STOP_RULES_CLEF_MODEL` that is not `clef` or `clef-flash`, which makes the Clef route answer
+503), and which judge's route is ready:
 
 ```
-{"ok":true,"service":"stop-rules","version":"0.1.0","configured":true,"missing":[],"judges":{"clef":true,"openai":true}}
+{"ok":true,"service":"stop-rules","version":"0.1.0","configured":true,"missing":[],"problems":[],"judges":{"clef":true,"openai":true}}
 ```
+
+It answers 200 while at least one judge can answer and 503, with `"ok":false`, while none can,
+so a platform's health check and `stop-rules login --check` fail on a server that would refuse
+every question. A platform that gates a deploy on its health check therefore needs the values
+set before the first deploy, which every button below asks for.
 
 ## Then point each repository at it
 
@@ -423,6 +430,7 @@ HTTP 200 when this file was written.
 
 It never returns the Cloudflare API token, the OpenAI key or the team token, in a body, a
 header or a log line. Error messages are passed through a redaction step that replaces any of them with `[redacted]`
-before it can be returned. `GET /health` reports only the names of missing variables. The
+before it can be returned. `GET /health` reports only the names of missing variables, and of
+a variable set to something unusable it names the variable and what it must be, never the value. The
 token comparison hashes both sides with SHA-256 and compares the digests byte by byte with
 no early exit.

@@ -3,6 +3,7 @@
 import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
 import { handle } from "../src/server/handler.js";
+import { startupLines } from "../src/server/node.js";
 
 const ACCOUNT = "0123456789abcdef0123456789abcdef";
 const ENV = {
@@ -96,6 +97,40 @@ describe("the team server's Clef route", () => {
     assert.equal(seen.length, 1);
     const broken = await ask({ model: "clef", state: {}, questions: QUESTIONS }, { ...ENV, STOP_RULES_CLEF_MODEL: "big" });
     assert.equal(broken.status, 503);
+  });
+
+  it("is not healthy with a pinned model Clef does not have, and says why without the value", async () => {
+    const badPin = { ...ENV, STOP_RULES_CLEF_MODEL: "big" };
+    const health = await handle(new Request("https://rules.example.com/health"), badPin);
+    assert.equal(health.status, 503);
+    const body = (await health.json()) as Record<string, unknown>;
+    assert.equal(body["ok"], false);
+    assert.equal(body["configured"], false);
+    assert.deepEqual(body["judges"], { clef: false, openai: false });
+    assert.deepEqual(body["problems"], ["STOP_RULES_CLEF_MODEL must be clef or clef-flash"]);
+    assert.equal(JSON.stringify(body).includes("big"), false);
+    // The route itself agrees: every Clef question would be refused.
+    assert.equal((await ask({ model: "clef", state: {}, questions: QUESTIONS }, badPin)).status, 503);
+    const lines = startupLines(8080, badPin).join("\n");
+    assert.match(lines, /not configured yet: STOP_RULES_CLEF_MODEL must be clef or clef-flash, then restart/);
+    assert.match(lines, /clef not ready \(STOP_RULES_CLEF_MODEL must be clef or clef-flash\)/);
+
+    // With the OpenAI judge usable the server is healthy, and still says Clef is not.
+    const withOpenAi = await handle(new Request("https://rules.example.com/health"), { ...badPin, OPENAI_API_KEY: "sk" });
+    assert.equal(withOpenAi.status, 200);
+    assert.deepEqual(((await withOpenAi.json()) as { judges: unknown }).judges, { clef: false, openai: true });
+    assert.match(startupLines(8080, { ...badPin, OPENAI_API_KEY: "sk" }).join("\n"), /^judges: clef not ready .*, openai ready$/m);
+  });
+
+  it("is not healthy with nothing set, and names what Clef needs", async () => {
+    const health = await handle(new Request("https://rules.example.com/health"), {});
+    assert.equal(health.status, 503);
+    const body = (await health.json()) as { missing: string[]; judges: unknown };
+    assert.deepEqual(body.missing, ["STOP_RULES_CLOUDFLARE_ACCOUNT_ID", "STOP_RULES_CLOUDFLARE_API_TOKEN", "STOP_RULES_TOKEN"]);
+    assert.match(
+      startupLines(8080, {}).join("\n"),
+      /not configured yet: set STOP_RULES_CLOUDFLARE_ACCOUNT_ID and STOP_RULES_CLOUDFLARE_API_TOKEN and STOP_RULES_TOKEN, then restart/,
+    );
   });
 
   it("names what a fresh deploy is missing, never the values", async () => {

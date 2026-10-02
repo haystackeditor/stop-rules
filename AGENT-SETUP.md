@@ -98,7 +98,7 @@ measured totals behind each one, so read it before you answer questions about it
 | `threshold` | `0.6` | The bar a score must reach to count. Lower catches more and flags more. Measured on 96 agent sessions with well-worded rules: 0.5 caught 59 of 62 real breaks with 13 wrong flags, 0.6 caught 56 with 5, 0.7 caught 46 with 2. There is no single right number: it is how much the team minds a wrong flag against a missed break. Tell them that, show them those three rows, and say that `stop-rules score` on their own recent changes is how to see where their real problems and their noise land before settling on one. |
 | `maxCalls` | `240` | Requests to the judge in one run. Clef takes one piece per request, so that covers 240 pieces. When it runs out, the rest of the change is reported as not checked and picked up on the next run. |
 | `endpoint` | none, so each person uses their own Cloudflare account and token | Team mode: questions go to your team's server, which holds the one token. |
-| `judge` | `{"kind": "clef", "model": "clef"}` | Which service scores the pieces. `"model": "clef-flash"` is the smaller Clef: cheaper, and it caught 2 of 32 real breaks at bar 0.5 where `clef` caught 22, so do not suggest it for quality. The other judge is OpenAI: `node .stop-rules/stop-rules.mjs init --judge openai` writes `{"kind": "openai", "form": "review", "model": "gpt-6-luna", "effort": "low"}`: one call per change, and each finding hands the agent the offending line and a reason. Measured at bar 0.5 on 240 changes, on the first reviewer's rulings: Clef caught 22 of 32 real breaks with 8 plainly false flags and a median 578 ms a call; gpt-6-luna in the review form at effort low caught 31 with 10, $0.059 for all 240 and 2,643 ms a change. `"form": "scores"` is the older per-piece probability form. The README's "Which judge" has the whole story, including the later rulings. |
+| `judge` | `{"kind": "clef", "model": "clef"}` | Which service scores the pieces. `"model": "clef-flash"` is the smaller Clef: cheaper, and it caught 2 of 32 real breaks at bar 0.5 where `clef` caught 22, so do not suggest it for quality. The other judge is OpenAI: `node .stop-rules/stop-rules.mjs init --judge openai` writes `{"kind": "openai", "form": "review", "model": "gpt-6-luna", "effort": "low"}`: one call per change, and each finding hands the agent the offending line and a reason. Measured on 240 changes: at the default bar of 0.6 Clef caught 18 of 32 real breaks with 4 plainly false flags (Jev, the judge it replaced, 11 with 1), and at 0.5 Clef caught 22 with 8, on the first reviewer's rulings, with a median 578 ms a call; at 0.5 gpt-6-luna in the review form at effort low caught 31 with 10, $0.059 for all 240 and 2,643 ms a change. `"form": "scores"` is the older per-piece probability form. The README's "Which judge" has the whole story, including the later rulings. |
 
 Say this about the cut, in plain words, because it is the one the human is most likely to want
 changed: the default is git diff hunks, and nothing is installed for it. Tree-sitter would buy
@@ -292,9 +292,9 @@ npx wrangler secret put OPENAI_API_KEY < /path/to/openai-key-file   # only for t
    The Clef route was run under `wrangler dev` against real Workers AI on 2 October 2026; it
    has not been deployed since the swap, so watch step 5 closely the first time.
 
-5. Wait for `<endpoint>/health` to answer `"configured":true`. It says the secrets are
-   missing for a few seconds after they are set; poll every 3 seconds, and stop and tell the
-   human if it still names one after a minute.
+5. Wait for `<endpoint>/health` to answer `"configured":true`. Until then it answers 503. It
+   says the secrets are missing for a few seconds after they are set; poll every 3 seconds, and
+   stop and tell the human if it still names one, or lists a `problems` entry, after a minute.
 6. Run `init --team <endpoint>` from step 4 of this file, or `stop-rules team <endpoint>` if
    the repo is already installed, then `login --token-stdin` with the token file and
    `login --check`. Then step 9.
