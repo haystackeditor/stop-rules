@@ -1,7 +1,7 @@
 /**
  * The machine wide slot gate.
  *
- * Jev's rate limit is per account, so every stop-rules process on this machine shares it. A
+ * Clef's rate limit is per account, so every stop-rules process on this machine shares it. A
  * run holds a slot for the time of one HTTP attempt and there are eight slots, kept as files
  * in the user's cache folder that only one process can create. A slot whose owning process is
  * gone, or whose timestamp is older than 120 seconds, is taken over. The OpenAI judge's limit
@@ -14,7 +14,11 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 
-/** Measured by the owner's team: 16 calls in flight is fine, 32 gets about half refused. */
+/**
+ * Eight per judge, set when the owner's team measured the scoring service before Clef: 16 calls
+ * in flight were fine and 32 got about half refused. Workers AI's limit for Clef has not been
+ * measured; a 429 halves a run's in-flight ceiling (clef.ts) whatever the number here.
+ */
 export const MACHINE_SLOTS = 8;
 /** Bounded by the hook timeout, so a busy machine gives up instead of hanging the turn. */
 export const SLOT_WAIT_MS = 60_000;
@@ -22,7 +26,7 @@ export const SLOT_STALE_MS = 120_000;
 const POLL_MS = 100;
 
 export const MACHINE_BUSY =
-  "Jev is busy on this machine, this change will be checked on the next run";
+  "every judge slot on this machine is busy, this change will be checked on the next run";
 
 /** The same message for the judge a run uses, named the way the user knows it. */
 export function machineBusy(judgeName: string): string {
@@ -34,11 +38,11 @@ export type SlotOutcome = { ok: true; release: SlotRelease } | { ok: false; reas
 
 /**
  * Where the slot files live. An empty XDG_CACHE_HOME is an error, not a shrug. Each judge has
- * its own set of slots, because each has its own per-account limit: Jev's are in `slots`, the
- * OpenAI judge's in `openai-slots`, eight of each.
+ * its own set of slots, because each has its own per-account limit: Clef's are in
+ * `clef-slots`, the OpenAI judge's in `openai-slots`, eight of each.
  */
-export function slotsDir(env: NodeJS.ProcessEnv, judge: "jev" | "openai" = "jev"): string {
-  const folder = judge === "jev" ? "slots" : "openai-slots";
+export function slotsDir(env: NodeJS.ProcessEnv, judge: "clef" | "openai"): string {
+  const folder = judge === "clef" ? "clef-slots" : "openai-slots";
   const configured = env["XDG_CACHE_HOME"];
   if (configured !== undefined) {
     if (configured.trim().length === 0) {
@@ -109,7 +113,7 @@ export async function acquireSlot(dir: string, waitMs: number = SLOT_WAIT_MS): P
               } catch (error) {
                 const err = error as NodeJS.ErrnoException;
                 if (err.code !== "ENOENT") {
-                  process.stderr.write(`stop-rules: could not free a Jev slot: ${err.message}\n`);
+                  process.stderr.write(`stop-rules: could not free a judge slot: ${err.message}\n`);
                 }
               }
             },

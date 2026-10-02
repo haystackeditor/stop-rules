@@ -6,7 +6,9 @@ services:
     healthCheckPath: /health
     autoDeployTrigger: "off"
     envVars:
-      - key: TYPESAFE_API_KEY
+      - key: STOP_RULES_CLOUDFLARE_ACCOUNT_ID
+        sync: false
+      - key: STOP_RULES_CLOUDFLARE_API_TOKEN
         sync: false
       - key: STOP_RULES_TOKEN
         sync: false

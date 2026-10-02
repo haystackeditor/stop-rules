@@ -1,4 +1,4 @@
-/** Vercel Function, Node runtime: POST https://<your-app>.vercel.app/api/v1/systemone */
+/** Vercel Function, Node runtime: POST https://<your-app>.vercel.app/api/v1/clef */
 import { handle } from "../../dist/server/handler.js";
 
 export default {

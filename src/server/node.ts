@@ -5,7 +5,7 @@
  */
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { handle, missingEnv, missingFor, SERVER_VERSION } from "./handler.js";
+import { handle, judgeStatus, SERVER_VERSION, type JudgeStatus } from "./handler.js";
 
 export const DEFAULT_PORT = 8080;
 const HOST = "0.0.0.0";
@@ -128,15 +128,20 @@ export function startServer(port: number, env: NodeJS.ProcessEnv = process.env):
 export function startupLines(port: number, env: NodeJS.ProcessEnv): string[] {
   const lines = [`stop-rules ${SERVER_VERSION} listening on http://${HOST}:${port}`];
   const serverEnv = env as Record<string, string | undefined>;
-  const missing = missingEnv(serverEnv);
-  if (missing.length > 0) {
-    lines.push(`not configured yet: set ${missing.join(" and ")} and restart`);
+  const clef = judgeStatus(serverEnv, "clef");
+  const openai = judgeStatus(serverEnv, "openai");
+  // What would make a judge ready: the names to set, then any value set that it cannot use.
+  const fixes = (status: JudgeStatus): string[] => [
+    ...(status.missing.length > 0 ? [`set ${status.missing.join(" and ")}`] : []),
+    ...status.problems,
+  ];
+  if (!clef.ready && !openai.ready) {
+    // Neither judge can answer, so name what Clef, the default, needs.
+    lines.push(`not configured yet: ${fixes(clef).join("; ")}, then restart`);
   }
-  const judge = (name: string, route: "jev" | "openai"): string => {
-    const needs = missingFor(serverEnv, route);
-    return needs.length === 0 ? `${name} ready` : `${name} needs ${needs.join(" and ")}`;
-  };
-  lines.push(`judges: ${judge("jev", "jev")}, ${judge("openai", "openai")}`);
+  const judge = (name: string, status: JudgeStatus): string =>
+    status.ready ? `${name} ready` : `${name} not ready (${fixes(status).join("; ")})`;
+  lines.push(`judges: ${judge("clef", clef)}, ${judge("openai", openai)}`);
   return lines;
 }
 

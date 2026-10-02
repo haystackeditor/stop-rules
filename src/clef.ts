@@ -1,26 +1,76 @@
 /**
- * Jev transport. Budget, retries, 429 handling and splitting an over-long request.
+ * Clef transport: Cloudflare's decision model on Workers AI. Budget, retries, 429 handling,
+ * splitting an over-long request, and making sure Clef read all of what it was sent.
  * No domain knowledge, and no Node-only imports so it also runs on edge runtimes.
  */
 
-export const DEFAULT_ENDPOINT = "https://api.typesafe.ai/v1/systemone";
-export const DEFAULT_MODEL = "jev-latest";
-/** What a 401 or 403 from the endpoint reads as. Team mode translates it for the user. */
-export const AUTH_REJECTED = "Jev rejected the API key";
+/** Where Workers AI runs a model for an account. */
+export const WORKERS_AI_ACCOUNTS = "https://api.cloudflare.com/client/v4/accounts";
+
+/** The URL one account asks one Clef model at. The body names the model again. */
+export function clefEndpoint(accountId: string, model: string): string {
+  return `${WORKERS_AI_ACCOUNTS}/${encodeURIComponent(accountId)}/ai/run/@cf/cloudflare/${model}`;
+}
+
 /**
- * What an empty TypeSafe account reads as. It is the team's problem, not the agent's, so it
- * can never be delivered as something to fix. In team mode the server relays the upstream
- * status and body as they are, so the client sees the same 402.
+ * What a 401 or 403 from Workers AI reads as. A wrong account id gets the same 401, code 10000
+ * "Authentication error", as a wrong token (measured 2 October 2026). Team mode translates it
+ * for the user.
+ */
+export const AUTH_REJECTED =
+  "Workers AI rejected the Cloudflare account id or API token. The token needs the Workers AI permission on that account";
+/**
+ * What a Cloudflare account Workers AI will not run Clef for reads as. It is the team's problem,
+ * not the agent's, so it can never be delivered as something to fix. In team mode the server
+ * relays the upstream status and body as they are, so the client sees the same answer.
  */
 export const BILLING_EXHAUSTED =
-  "the Jev account is out of credits. Add credits at TypeSafe, then run again.";
+  "the Cloudflare account has no Workers AI allowance left. Upgrade it to Workers Paid, or wait for the daily free allowance, then run again.";
 
-export interface JevQuestion {
+/**
+ * Questions one call may carry. The request schema caps `questions` at 64 entries, and a 65th
+ * is refused with a 422 (measured 2 October 2026).
+ */
+export const MAX_QUESTIONS = 64;
+
+/**
+ * Tokens of `state` Workers AI reads. It drops the rest without a word and answers 200 on what
+ * is left. Measured on 2 October 2026: `usage.input_tokens` grows one for one with the state up
+ * to 2,048 state tokens and never past it, whatever the size, while the questions are counted
+ * in full on top, about 76 tokens each plus their own text. On 1 October a fact placed after
+ * 16,000 characters of filler was never seen. The model catalog says 64k; for the state it is
+ * wrong. No answer computed on a cut state is ever used.
+ */
+export const STATE_TOKENS = 2048;
+
+/**
+ * The most bytes of JSON state one token has been measured to cover, rounded up: 4.37 for an
+ * indented YAML file, 3.1 to 3.6 for TypeScript, Markdown and HTML diffs, 2.5 for a
+ * package-lock (2 October 2026). A state over STATE_TOKENS times this cannot be read whole, so
+ * it is halved before it is ever sent.
+ */
+export const MOST_BYTES_PER_TOKEN = 4.5;
+/** The state size past which a call is not even sent. */
+export const MOST_STATE_BYTES = Math.floor(STATE_TOKENS * MOST_BYTES_PER_TOKEN);
+
+/**
+ * The fewest bytes of JSON state one token has been measured to cover in a real file, 2.5 for a
+ * package-lock (a synthetic line of short numbered assignments went to 2.15). A state up to
+ * STATE_TOKENS times this is all but sure to be read whole, which is what the engine uses to
+ * decide whether the code around a piece can ride with it.
+ */
+export const FEWEST_BYTES_PER_TOKEN = 2.5;
+export const SURE_STATE_BYTES = Math.floor(STATE_TOKENS * FEWEST_BYTES_PER_TOKEN);
+
+/** `{}` as a state costs one token, the same as the one letter state "x" (measured). */
+const EMPTY_STATE_TOKENS = 1;
+
+export interface ClefQuestion {
   type: "noul";
   instructions: string;
 }
 
-export interface JevUsage {
+export interface ClefUsage {
   inputTokens: number;
   outputTokens: number;
 }
@@ -68,17 +118,17 @@ export type SlotGate = () => Promise<
 >;
 
 export type SendOutcome =
-  | { ok: true; answers: Record<string, number>; usage: JevUsage }
+  | { ok: true; answers: Record<string, number>; usage: ClefUsage }
   | { ok: false; failure: FailureClass; message: string };
 
 /**
- * One request that can shrink itself if the service says it is too long. The payload is
- * opaque to this module, which knows nothing about diffs or rules.
+ * One request that can shrink itself if Clef cannot read all of it. The payload is opaque to
+ * this module, which knows nothing about diffs or rules.
  */
 export interface AskNode<T> {
   payload: T;
   state: unknown;
-  questions: Record<string, JevQuestion>;
+  questions: Record<string, ClefQuestion>;
   halve: () => [AskNode<T>, AskNode<T>] | null;
 }
 
@@ -96,9 +146,10 @@ export interface FetchInit {
 
 export type FetchLike = (url: string, init: FetchInit) => Promise<Response>;
 
-export interface JevClientOptions {
+export interface ClefClientOptions {
   endpoint: string;
   model: string;
+  /** The Cloudflare API token in local mode, the team token in team mode. */
   apiKey: string;
   maxCalls: number;
   fetchImpl: FetchLike;
@@ -133,9 +184,21 @@ export function parseRetryAfter(header: string | null): number | null {
   return Math.max(when - Date.now(), 0);
 }
 
-function readAnswers(body: unknown): Record<string, number> | null {
+/** The bytes a state weighs as JSON, which is how it travels. */
+export function stateBytes(state: unknown): number {
+  return new TextEncoder().encode(JSON.stringify(state)).length;
+}
+
+/** Workers AI wraps every answer: `{ success, result: { answers, usage }, errors, messages }`. */
+function readResult(body: unknown): Record<string, unknown> | null {
   if (typeof body !== "object" || body === null) return null;
-  const answers = (body as { answers?: unknown }).answers;
+  const result = (body as { result?: unknown }).result;
+  if (typeof result !== "object" || result === null) return null;
+  return result as Record<string, unknown>;
+}
+
+function readAnswers(result: Record<string, unknown>): Record<string, number> | null {
+  const answers = result["answers"];
   if (typeof answers !== "object" || answers === null) return null;
   const out: Record<string, number> = {};
   for (const [id, value] of Object.entries(answers as Record<string, unknown>)) {
@@ -147,28 +210,39 @@ function readAnswers(body: unknown): Record<string, number> | null {
   return out;
 }
 
-function readUsage(body: unknown): JevUsage {
-  if (typeof body !== "object" || body === null) return { inputTokens: 0, outputTokens: 0 };
-  const usage = (body as { usage?: unknown }).usage;
-  if (typeof usage !== "object" || usage === null) return { inputTokens: 0, outputTokens: 0 };
+/**
+ * The token counts. Null when the input count is missing, because without it there is no
+ * telling whether the whole state was read.
+ */
+function readUsage(result: Record<string, unknown>): ClefUsage | null {
+  const usage = result["usage"];
+  if (typeof usage !== "object" || usage === null) return null;
   const input = (usage as { input_tokens?: unknown }).input_tokens;
   const output = (usage as { output_tokens?: unknown }).output_tokens;
-  return {
-    inputTokens: typeof input === "number" ? input : 0,
-    outputTokens: typeof output === "number" ? output : 0,
-  };
+  if (typeof input !== "number" || !Number.isFinite(input)) return null;
+  return { inputTokens: input, outputTokens: typeof output === "number" ? output : 0 };
 }
 
-export class JevClient {
+/** A body that names Cloudflare's own error code, as in `"code":4006`. */
+function hasErrorCode(text: string, code: number): boolean {
+  return new RegExp(`"code"\\s*:\\s*${code}\\b`).test(text);
+}
+
+/** The questions' share of the input count, or the failure that kept it from being measured. */
+type QuestionCost = { ok: true; tokens: number } | { ok: false; failure: FailureClass; message: string };
+
+export class ClefClient {
   private callsUsed = 0;
   /** The in-flight ceiling for this run. Halved on a 429, one step back up after four wins. */
   private limit: number;
   private readonly ceiling: number;
   private successStreak = 0;
   private readonly sleep: (ms: number) => Promise<void>;
-  readonly usage: JevUsage = { inputTokens: 0, outputTokens: 0 };
+  /** What each set of questions costs on its own, measured once per run and shared. */
+  private readonly questionCosts = new Map<string, Promise<QuestionCost>>();
+  readonly usage: ClefUsage = { inputTokens: 0, outputTokens: 0 };
 
-  constructor(private readonly options: JevClientOptions) {
+  constructor(private readonly options: ClefClientOptions) {
     this.ceiling = options.concurrency ?? 4;
     this.limit = this.ceiling;
     this.sleep = options.sleep ?? defaultSleep;
@@ -206,7 +280,7 @@ export class JevClient {
 
   /**
    * One HTTP attempt, with a machine wide slot held for its whole length, so all the
-   * stop-rules processes on this machine together stay inside Jev's per account limit.
+   * stop-rules processes on this machine together stay inside the account's limit.
    */
   private async fetchOnce(
     body: string,
@@ -255,9 +329,9 @@ export class JevClient {
     }
   }
 
-  /** One logical request, including retries. Every attempt costs one unit of budget. */
-  async send(state: unknown, questions: Record<string, JevQuestion>): Promise<SendOutcome> {
-    const body = JSON.stringify({ state, model: this.options.model, questions });
+  /** One call, including retries. Every attempt costs one unit of budget. */
+  private async post(state: unknown, questions: Record<string, ClefQuestion>): Promise<SendOutcome> {
+    const body = JSON.stringify({ model: this.options.model, state, questions });
     let attempt = 0;
     let backoff = BACKOFF_START_MS;
 
@@ -305,26 +379,35 @@ export class JevClient {
           }
           return { ok: false, failure: "server", message: `unparseable response: ${message}` };
         }
-        const answers = readAnswers(parsed);
-        if (answers === null) {
+        const result = readResult(parsed);
+        const answers = result === null ? null : readAnswers(result);
+        if (result === null || answers === null) {
           if (attempt < MAX_ATTEMPTS) {
-            this.options.note("200 response without an answers object, retrying");
+            this.options.note("200 response without a result.answers object, retrying");
             await this.sleep(backoff);
             backoff = Math.min(backoff * 2, BACKOFF_CAP_MS);
             continue;
           }
-          return { ok: false, failure: "server", message: "response had no answers object" };
+          return { ok: false, failure: "server", message: "response had no result.answers object" };
         }
-        const usage = readUsage(parsed);
+        const usage = readUsage(result);
+        if (usage === null) {
+          return {
+            ok: false,
+            failure: "server",
+            message: "response had no result.usage.input_tokens, so there is no telling whether Clef read the whole piece",
+          };
+        }
         this.usage.inputTokens += usage.inputTokens;
         this.usage.outputTokens += usage.outputTokens;
         this.speedUp();
         return { ok: true, answers, usage };
       }
 
-      // Out of credits. 402 is what TypeSafe answers with today, and the body names the
-      // reason, so a platform that rewrites the status is still recognised.
-      if (status === 402 || text.includes('"billing_error"')) {
+      // An account Workers AI will not run the model for. 402 if Cloudflare ever answers with
+      // it; 4006 is the code Workers AI names when a Workers Free account has used its daily
+      // allowance, and it can arrive under another status.
+      if (status === 402 || hasErrorCode(text, 4006)) {
         return { ok: false, failure: "billing", message: BILLING_EXHAUSTED };
       }
 
@@ -338,11 +421,7 @@ export class JevClient {
           backoff = Math.min(backoff * 2, BACKOFF_CAP_MS);
           continue;
         }
-        return { ok: false, failure: "rate_limit", message: "rate limited by Jev" };
-      }
-
-      if (status === 400 && text.includes("max_tokens_exceeded")) {
-        return { ok: false, failure: "too_large", message: "max_tokens_exceeded" };
+        return { ok: false, failure: "rate_limit", message: "rate limited by Workers AI" };
       }
 
       if (status === 401 || status === 403) {
@@ -351,32 +430,97 @@ export class JevClient {
 
       if (status >= 500) {
         if (attempt < MAX_ATTEMPTS) {
-          this.options.note(`Jev returned ${status}, retrying`);
+          this.options.note(`Clef returned ${status}, retrying`);
           await this.sleep(backoff);
           backoff = Math.min(backoff * 2, BACKOFF_CAP_MS);
           continue;
         }
-        return { ok: false, failure: "server", message: `Jev returned ${status}` };
+        return { ok: false, failure: "server", message: `Clef returned ${status}` };
       }
 
       const snippet = this.redact(text.slice(0, 200).replace(/\s+/g, " ").trim());
       return {
         ok: false,
         failure: "client",
-        message: `Jev returned ${status}: ${snippet}`,
+        message: `Clef returned ${status}: ${snippet}`,
       };
     }
   }
 
   /**
-   * Runs nodes with bounded concurrency. A node the service calls too long is halved and
-   * both halves are queued; a node that cannot halve is returned as a failure.
+   * What these questions cost with nothing else in the call: the same questions about an empty
+   * state, asked once per run however many calls carry them. A failed measurement is not kept,
+   * so a later call asks again.
+   */
+  private questionCost(questions: Record<string, ClefQuestion>): Promise<QuestionCost> {
+    const key = JSON.stringify(questions);
+    const known = this.questionCosts.get(key);
+    if (known !== undefined) return known;
+    const measured = this.post({}, questions).then((outcome): QuestionCost => {
+      if (!outcome.ok) {
+        this.questionCosts.delete(key);
+        return outcome;
+      }
+      return { ok: true, tokens: outcome.usage.inputTokens - EMPTY_STATE_TOKENS };
+    });
+    this.questionCosts.set(key, measured);
+    return measured;
+  }
+
+  /**
+   * One logical request: the call, its retries, and the check that Clef read the whole state.
+   * An answer on a cut state is thrown away and reported as too large, so the caller halves
+   * the request instead of ever using it.
+   */
+  async send(state: unknown, questions: Record<string, ClefQuestion>): Promise<SendOutcome> {
+    const count = Object.keys(questions).length;
+    if (count > MAX_QUESTIONS) {
+      return {
+        ok: false,
+        failure: "client",
+        message: `${count} questions in one call, and Clef takes at most ${MAX_QUESTIONS}`,
+      };
+    }
+    const asked = await this.post(state, questions);
+    if (!asked.ok) return asked;
+    // The count is the state's tokens plus the questions'. Under STATE_TOKENS in all, the state
+    // cannot have reached the cut, and no measurement is needed.
+    if (asked.usage.inputTokens < STATE_TOKENS) return asked;
+    const cost = await this.questionCost(questions);
+    if (!cost.ok) return cost;
+    const read = asked.usage.inputTokens - cost.tokens;
+    if (read >= STATE_TOKENS) {
+      return {
+        ok: false,
+        failure: "too_large",
+        message: `Clef read only the first ${STATE_TOKENS} tokens of the state`,
+      };
+    }
+    return asked;
+  }
+
+  /**
+   * Runs nodes with bounded concurrency. A node whose state is plainly too big for Clef is
+   * halved before it is sent, one Clef read only part of is halved and sent again, and a node
+   * that cannot halve is returned as a failure: never as an answer on part of a piece.
    */
   async askAll<T>(nodes: readonly AskNode<T>[]): Promise<NodeOutcome<T>[]> {
     const queue: AskNode<T>[] = [...nodes];
     const results: NodeOutcome<T>[] = [];
     let active = 0;
     let settled = false;
+
+    const ask = (node: AskNode<T>): Promise<SendOutcome> => {
+      const bytes = stateBytes(node.state);
+      if (bytes > MOST_STATE_BYTES) {
+        return Promise.resolve({
+          ok: false,
+          failure: "too_large",
+          message: `${bytes} bytes of state is more than the ${STATE_TOKENS} tokens Clef reads`,
+        });
+      }
+      return this.send(node.state, node.questions);
+    };
 
     return new Promise<NodeOutcome<T>[]>((resolve) => {
       const pump = (): void => {
@@ -390,12 +534,12 @@ export class JevClient {
           const node = queue.shift();
           if (node === undefined) break;
           active += 1;
-          this.send(node.state, node.questions)
+          ask(node)
             .then((outcome) => {
               if (!outcome.ok && outcome.failure === "too_large") {
                 const halves = node.halve();
                 if (halves !== null) {
-                  this.options.note("request too long for Jev, resending as two halves");
+                  this.options.note(`${outcome.message}, asking again in two halves`);
                   queue.push(halves[0], halves[1]);
                   return;
                 }
@@ -404,7 +548,7 @@ export class JevClient {
                   outcome: {
                     ok: false,
                     failure: "client",
-                    message: "too long for Jev and cannot be split further",
+                    message: `larger than Clef reads (${STATE_TOKENS} tokens of state) and cannot be split further`,
                   },
                 });
                 return;
@@ -419,7 +563,7 @@ export class JevClient {
             })
             .catch((error: unknown) => {
               const message = this.redact(error instanceof Error ? error.message : String(error));
-              this.options.note(`unexpected error while asking Jev: ${message}`);
+              this.options.note(`unexpected error while asking Clef: ${message}`);
               results.push({
                 node,
                 outcome: { ok: false, failure: "network", message },

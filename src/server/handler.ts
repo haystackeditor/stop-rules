@@ -1,7 +1,8 @@
 /**
  * Team mode server: a locked down proxy for the two judges and nothing more. It swaps a team
- * token for the real key, Jev's on POST /v1/systemone and OpenAI's on POST /v1/responses, so
- * no developer needs a key and all the checking logic stays in the client.
+ * token for the real key, the Cloudflare API token for Clef on POST /v1/clef and OpenAI's on
+ * POST /v1/responses, so no developer needs a key and all the checking logic stays in the
+ * client.
  *
  * Web standard APIs only: no node: imports, no process, no Buffer, no AbortSignal.timeout.
  * That is what lets this one file run unchanged on Node, Cloudflare Workers, Deno Deploy,
@@ -10,22 +11,26 @@
 
 /** Reported by the health route. Bump with the package version. */
 export const SERVER_VERSION = "0.1.0";
-export const DEFAULT_UPSTREAM = "https://api.typesafe.ai/v1/systemone";
-export const DEFAULT_MODEL = "jev-latest";
+/** Where Workers AI runs a model for an account. Clef's URL is built from it per request. */
+export const WORKERS_AI_ACCOUNTS = "https://api.cloudflare.com/client/v4/accounts";
+/** The two Clef models Workers AI serves. This file imports nothing, so it lists them itself. */
+export const CLEF_MODELS = ["clef", "clef-flash"];
 export const OPENAI_UPSTREAM = "https://api.openai.com/v1/responses";
 export const MAX_BODY_BYTES = 1000000;
 export const UPSTREAM_TIMEOUT_MS = 30000;
+/** Questions one Clef call may carry: Workers AI refuses a 65th with a 422. */
+export const MAX_QUESTIONS = 64;
 /**
  * OpenAI answers take longer, because the model reasons first. Measured over 800 calls per
  * effort in September 2026, the slowest was 13 s at low and 26 s at medium.
  */
 export const OPENAI_UPSTREAM_TIMEOUT_MS = 60000;
 /**
- * How many calls this server instance keeps open to Jev at once. Jev's limit is per account:
- * measured, 16 in flight is fine and 32 gets about half refused, so one server stays under
- * it with room for the developers who also run their own key. Past this the server answers
- * 429 with Retry-After: 1 and the client backs off through the same code path it uses for a
- * 429 from Jev itself. On a serverless platform this count is per instance.
+ * How many calls this server instance keeps open to each judge at once. Past this the server
+ * answers 429 with Retry-After: 1 and the client backs off through the same code path it uses
+ * for a 429 from the judge itself. On a serverless platform this count is per instance. 12 was
+ * set against the per-account limit of the scoring service before Clef; Workers AI's limit for
+ * Clef has not been measured, and a 429 from it reaches the client unchanged.
  */
 export const MAX_UPSTREAM_IN_FLIGHT = 12;
 
@@ -34,16 +39,23 @@ export const MAX_UPSTREAM_IN_FLIGHT = 12;
  * ceiling of 12, which was not measured against OpenAI: its limits depend on the account's
  * usage tier and are far above 12 calls at once on every paid tier.
  */
-const inFlight = { jev: 0, openai: 0 };
-/** The two secrets a deploy has to set for Jev. Values are never echoed, only these names. */
-export const REQUIRED_ENV = ["TYPESAFE_API_KEY", "STOP_RULES_TOKEN"];
+const inFlight = { clef: 0, openai: 0 };
+/**
+ * The three values a deploy has to set for Clef. Values are never echoed, only these names.
+ * The account id is not a secret; the token is.
+ */
+export const REQUIRED_ENV = [
+  "STOP_RULES_CLOUDFLARE_ACCOUNT_ID",
+  "STOP_RULES_CLOUDFLARE_API_TOKEN",
+  "STOP_RULES_TOKEN",
+];
 /** The two secrets the OpenAI judge's route needs. */
 export const OPENAI_REQUIRED_ENV = ["OPENAI_API_KEY", "STOP_RULES_TOKEN"];
 /** Every secret this server may hold, so none of them can leave in an error message. */
-const SECRET_ENV = ["TYPESAFE_API_KEY", "OPENAI_API_KEY", "STOP_RULES_TOKEN"];
+const SECRET_ENV = ["STOP_RULES_CLOUDFLARE_API_TOKEN", "OPENAI_API_KEY", "STOP_RULES_TOKEN"];
 
 export type ServerEnv = Record<string, string | undefined>;
-export type JudgeRoute = "jev" | "openai";
+export type JudgeRoute = "clef" | "openai";
 
 function value(env: ServerEnv, name: string): string {
   const raw = env[name];
@@ -52,18 +64,56 @@ function value(env: ServerEnv, name: string): string {
 
 /** What one judge's route still needs. Names, never values. */
 export function missingFor(env: ServerEnv, judge: JudgeRoute): string[] {
-  return (judge === "jev" ? REQUIRED_ENV : OPENAI_REQUIRED_ENV).filter(
+  return (judge === "clef" ? REQUIRED_ENV : OPENAI_REQUIRED_ENV).filter(
     (name) => value(env, name).length === 0,
   );
 }
 
 /**
  * Names, never values, so a fresh deploy can be diagnosed from a browser. Empty once either
- * judge's route is ready. Before that it names what Jev, the default judge, needs.
+ * judge's route has every name it needs. Before that it names what Clef, the default judge,
+ * needs. A value that is set but unusable is not a name that is missing: judgeStatus reports it.
  */
 export function missingEnv(env: ServerEnv): string[] {
   if (missingFor(env, "openai").length === 0) return [];
-  return missingFor(env, "jev");
+  return missingFor(env, "clef");
+}
+
+/**
+ * The Clef model this server is pinned to, when STOP_RULES_CLEF_MODEL is set. A value that is
+ * not a Clef model is a broken deploy, and says so rather than being ignored.
+ */
+function pinnedModel(env: ServerEnv): { ok: true; model: string | null } | { ok: false; reason: string } {
+  const pinned = value(env, "STOP_RULES_CLEF_MODEL");
+  if (pinned.length === 0) return { ok: true, model: null };
+  if (!CLEF_MODELS.includes(pinned)) {
+    return { ok: false, reason: `STOP_RULES_CLEF_MODEL must be ${CLEF_MODELS.join(" or ")}` };
+  }
+  return { ok: true, model: pinned };
+}
+
+/** One judge's route: whether it can answer, the names it still needs, and anything else wrong. */
+export interface JudgeStatus {
+  ready: boolean;
+  /** Names, never values. */
+  missing: string[];
+  /** A set value the route cannot use, said without the value. */
+  problems: string[];
+}
+
+/**
+ * The one place readiness is decided, for the health route and the startup lines alike. Clef's
+ * route also needs a pinned model it can use: with STOP_RULES_CLEF_MODEL set to anything but a
+ * Clef model, every Clef request answers 503, so the route is not ready.
+ */
+export function judgeStatus(env: ServerEnv, judge: JudgeRoute): JudgeStatus {
+  const missing = missingFor(env, judge);
+  const problems: string[] = [];
+  if (judge === "clef") {
+    const pinned = pinnedModel(env);
+    if (!pinned.ok) problems.push(pinned.reason);
+  }
+  return { ready: missing.length === 0 && problems.length === 0, missing, problems };
 }
 
 function describe(error: unknown): string {
@@ -116,11 +166,15 @@ function bearer(request: Request): string {
 /** A plain reason when the body is not a question set this proxy will forward. */
 function rejectPayload(body: unknown): string | null {
   if (!isObject(body)) return "the body must be a JSON object";
+  if (typeof body["model"] !== "string" || !CLEF_MODELS.includes(body["model"])) {
+    return `model must be ${CLEF_MODELS.join(" or ")}`;
+  }
   if (!isObject(body["state"])) return "state must be a JSON object";
   const questions = body["questions"];
   if (!isObject(questions)) return "questions must be a JSON object";
   const ids = Object.keys(questions);
   if (ids.length === 0) return "questions must hold at least one question";
+  if (ids.length > MAX_QUESTIONS) return `questions must hold at most ${MAX_QUESTIONS} questions`;
   for (const id of ids) {
     const question = questions[id];
     if (!isObject(question)) return `question ${id} must be a JSON object`;
@@ -167,38 +221,50 @@ const RESPONSES_FIELDS = [
   "prompt_cache_key",
 ];
 
+/**
+ * 200 while at least one judge can answer, 503 while none can, so a platform's health check and
+ * `login --check` never pass a server whose every question would come back 503.
+ */
 function health(env: ServerEnv): Response {
-  const missing = missingEnv(env);
-  return json(200, {
-    ok: true,
+  const clef = judgeStatus(env, "clef");
+  const openai = judgeStatus(env, "openai");
+  const usable = clef.ready || openai.ready;
+  return json(usable ? 200 : 503, {
+    ok: usable,
     service: "stop-rules",
     version: SERVER_VERSION,
-    configured: missing.length === 0,
-    missing,
-    judges: {
-      jev: missingFor(env, "jev").length === 0,
-      openai: missingFor(env, "openai").length === 0,
-    },
+    configured: usable,
+    missing: missingEnv(env),
+    problems: [...clef.problems, ...openai.problems],
+    judges: { clef: clef.ready, openai: openai.ready },
   });
 }
 
-async function forward(env: ServerEnv, judge: JudgeRoute, payload: string): Promise<Response> {
-  const upstream =
-    judge === "jev" ? value(env, "STOP_RULES_JEV_UPSTREAM") || DEFAULT_UPSTREAM : OPENAI_UPSTREAM;
-  const key = value(env, judge === "jev" ? "TYPESAFE_API_KEY" : "OPENAI_API_KEY");
+/** Where one judge's questions go, and the key that goes with them. */
+function upstreamFor(env: ServerEnv, judge: JudgeRoute, model: string): { url: string; key: string } {
+  if (judge === "openai") return { url: OPENAI_UPSTREAM, key: value(env, "OPENAI_API_KEY") };
+  const account = encodeURIComponent(value(env, "STOP_RULES_CLOUDFLARE_ACCOUNT_ID"));
+  return {
+    url: `${WORKERS_AI_ACCOUNTS}/${account}/ai/run/@cf/cloudflare/${model}`,
+    key: value(env, "STOP_RULES_CLOUDFLARE_API_TOKEN"),
+  };
+}
+
+async function forward(env: ServerEnv, judge: JudgeRoute, model: string, payload: string): Promise<Response> {
+  const upstream = upstreamFor(env, judge, model);
   const controller = new AbortController();
   const timer = setTimeout(
     () => {
       controller.abort();
     },
-    judge === "jev" ? UPSTREAM_TIMEOUT_MS : OPENAI_UPSTREAM_TIMEOUT_MS,
+    judge === "clef" ? UPSTREAM_TIMEOUT_MS : OPENAI_UPSTREAM_TIMEOUT_MS,
   );
   inFlight[judge] += 1;
   try {
-    const response = await fetch(upstream, {
+    const response = await fetch(upstream.url, {
       method: "POST",
       headers: {
-        authorization: `Bearer ${key}`,
+        authorization: `Bearer ${upstream.key}`,
         "content-type": "application/json",
       },
       body: payload,
@@ -211,14 +277,14 @@ async function forward(env: ServerEnv, judge: JudgeRoute, payload: string): Prom
     const retryAfter = response.headers.get("retry-after");
     if (retryAfter !== null) headers["retry-after"] = retryAfter;
     // Status, body and Retry-After go back untouched, so the client's own 429 backoff, its
-    // halving of a request that is too long and its reading of OpenAI's error codes keep
-    // working through the proxy.
+    // reading of Workers AI's answer and token count, its halving of a piece Clef could not
+    // read whole, and its reading of OpenAI's error codes keep working through the proxy.
     const empty = response.status === 204 || response.status === 304;
     return new Response(empty ? null : text, { status: response.status, headers });
   } catch (error) {
     return json(502, {
       error: "upstream_unreachable",
-      message: redact(env, `could not reach ${upstream}: ${describe(error)}`),
+      message: redact(env, `could not reach ${upstream.url}: ${describe(error)}`),
     });
   } finally {
     clearTimeout(timer);
@@ -242,7 +308,7 @@ async function admit(
       response: json(503, {
         error: "not_configured",
         message:
-          judge === "jev"
+          judge === "clef"
             ? "this stop-rules server is missing environment variables"
             : "this stop-rules server is missing environment variables for the openai judge",
         missing,
@@ -284,7 +350,7 @@ async function admit(
 /** Past the ceiling, tell the client to come back in a second. */
 function busy(judge: JudgeRoute): Response | null {
   if (inFlight[judge] < MAX_UPSTREAM_IN_FLIGHT) return null;
-  const name = judge === "jev" ? "Jev" : "OpenAI";
+  const name = judge === "clef" ? "Clef" : "OpenAI";
   return new Response(
     JSON.stringify({
       error: "too_many_requests",
@@ -311,30 +377,40 @@ async function responses(request: Request, env: ServerEnv): Promise<Response> {
     if (asked[field] !== undefined) forwarded[field] = asked[field];
   }
   forwarded["store"] = false;
-  return forward(env, "openai", JSON.stringify(forwarded));
+  return forward(env, "openai", String(asked["model"]), JSON.stringify(forwarded));
 }
 
-async function systemone(request: Request, env: ServerEnv): Promise<Response> {
-  const admitted = await admit(request, env, "jev");
+async function clef(request: Request, env: ServerEnv): Promise<Response> {
+  const pinned = pinnedModel(env);
+  if (!pinned.ok) {
+    return json(503, { error: "not_configured", message: pinned.reason, missing: [] });
+  }
+  const admitted = await admit(request, env, "clef");
   if (!admitted.ok) return admitted.response;
   const body = admitted.body;
   const reason = rejectPayload(body);
   if (reason !== null) return json(400, { error: "invalid_request", message: reason });
 
+  // The model is the repository's choice, from its committed settings, and the client keys its
+  // cache on it. A server pinned to one model refuses the other rather than answering with a
+  // model the client did not ask for.
+  const asked = body as { model: string; state: unknown; questions: unknown };
+  if (pinned.model !== null && asked.model !== pinned.model) {
+    return json(400, {
+      error: "invalid_request",
+      message: `this server answers with ${pinned.model} only, and this repository asks for ${asked.model}. Set "judge": {"kind": "clef", "model": "${pinned.model}"} in .stop-rules.json.`,
+    });
+  }
+
   // Hold the line at the account wide limit: tell the client to come back in a second.
-  const full = busy("jev");
+  const full = busy("clef");
   if (full !== null) return full;
 
-  const asked = body as { state: unknown; questions: unknown };
-  // The model is the server's choice, not the client's.
   return forward(
     env,
-    "jev",
-    JSON.stringify({
-      state: asked.state,
-      model: value(env, "STOP_RULES_JEV_MODEL") || DEFAULT_MODEL,
-      questions: asked.questions,
-    }),
+    "clef",
+    asked.model,
+    JSON.stringify({ model: asked.model, state: asked.state, questions: asked.questions }),
   );
 }
 
@@ -342,11 +418,11 @@ async function route(request: Request, env: ServerEnv): Promise<Response> {
   // Path suffixes, because some platforms mount a function under a prefix of their own.
   const path = new URL(request.url).pathname.replace(/\/+$/, "");
   if (request.method === "GET" && (path === "" || path.endsWith("/health"))) return health(env);
-  if (request.method === "POST" && path.endsWith("/v1/systemone")) return systemone(request, env);
+  if (request.method === "POST" && path.endsWith("/v1/clef")) return clef(request, env);
   if (request.method === "POST" && path.endsWith("/v1/responses")) return responses(request, env);
   return json(404, {
     error: "not_found",
-    message: "stop-rules serves GET /health, POST /v1/systemone and POST /v1/responses",
+    message: "stop-rules serves GET /health, POST /v1/clef and POST /v1/responses",
   });
 }
 
@@ -355,7 +431,7 @@ async function route(request: Request, env: ServerEnv): Promise<Response> {
  *
  * This module deliberately has no default export. A Workers entry module may only export
  * handlers, and workerd refuses to start when it finds a named export such as
- * DEFAULT_MODEL next to them, so the Worker shape lives in cloudflare.ts instead.
+ * CLEF_MODELS next to them, so the Worker shape lives in cloudflare.ts instead.
  */
 export async function handle(request: Request, env: ServerEnv): Promise<Response> {
   try {

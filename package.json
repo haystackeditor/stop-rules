@@ -1,7 +1,7 @@
 {
   "name": "stop-rules",
   "version": "0.1.0",
-  "description": "Holds your coding agent to your team's written coding rules: a stop hook for 14 agents that asks Jev whether each changed piece breaks a rule, and hands the piece back to the agent.",
+  "description": "Holds your coding agent to your team's written coding rules: a stop hook for 14 agents that asks Clef, Cloudflare's decision model on Workers AI, whether each changed piece breaks a rule, and hands the piece back to the agent.",
   "license": "MIT",
   "type": "module",
   "bin": {
@@ -23,7 +23,8 @@
     "build:server": "tsc -p tsconfig.json",
     "bundle": "node scripts/bundle.mjs",
     "verify:bin": "node scripts/bin.mjs --check",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json --noEmit",
+    "test": "tsc -p tsconfig.test.json && node --test \".test-dist/test/*.test.js\""
   },
   "devDependencies": {
     "@tree-sitter-grammars/tree-sitter-kotlin": "1.1.0",
@@ -50,7 +51,7 @@
     "stop-hook",
     "code-review",
     "coding-rules",
-    "jev",
-    "typesafe"
+    "clef",
+    "workers-ai"
   ]
 }

@@ -4,33 +4,39 @@
  * Team mode: one person deploys a stop-rules server that holds the judge's key, and every
  * developer's hook sends questions to that server with a team token. Local mode: the
  * developer's own key goes straight to the judge. Team mode wins when an endpoint is known.
- * Which judge is asked, Jev or OpenAI, is a separate setting, and either one works in either
- * mode.
+ * Which judge is asked, Clef or OpenAI, is a separate setting, and either one works in either
+ * mode. Clef in local mode needs two values: the Cloudflare account it runs on and an API
+ * token for that account.
  */
 
 import { promises as fs } from "node:fs";
 import { homedir } from "node:os";
 import * as path from "node:path";
-import { DEFAULT_ENDPOINT, DEFAULT_MODEL, JevClient, type FetchLike } from "./jev.js";
+import { ClefClient, clefEndpoint, type FetchLike } from "./clef.js";
 import { describeJudge, judgeInfo, type Judge } from "./judge.js";
-import { JEV_KEY_SOURCE, keySourceSet, OPENAI_KEY_SOURCE, resolveApiKey } from "./key.js";
+import { CLOUDFLARE_TOKEN_SOURCE, keySourceSet, OPENAI_KEY_SOURCE, resolveApiKey } from "./key.js";
 import { OPENAI_ENDPOINT, OpenAiClient, promptCacheKey, userInput } from "./openai.js";
 import { readReview, reviewBody, reviewInput } from "./review.js";
 import {
   chooseJudge,
   loadSettings,
   writeSettings,
-  type JudgeChoice,
   type JudgeFlags,
   type LoadedSettings,
 } from "./settings.js";
 
-export const SYSTEMONE_PATH = "/v1/systemone";
+/** The team server's route for Clef. */
+export const CLEF_PATH = "/v1/clef";
 /** The team server's route for the OpenAI judge, named after the API it forwards to. */
 export const RESPONSES_PATH = "/v1/responses";
 export const TOKEN_FILE = "token";
-export const JEV_KEY_FILE = "jev-key";
+export const CLOUDFLARE_TOKEN_FILE = "cloudflare-token";
+export const CLOUDFLARE_ACCOUNT_FILE = "cloudflare-account";
 export const OPENAI_KEY_FILE = "openai-key";
+/** The account id variable wrangler reads too. */
+export const CLOUDFLARE_ACCOUNT_ENV = "CLOUDFLARE_ACCOUNT_ID";
+/** A Cloudflare account id is 32 hex characters, so a token pasted in its place is caught. */
+const ACCOUNT_ID = /^[0-9a-f]{32}$/i;
 /** What a 401 from a team endpoint means for the developer reading it. */
 export const TOKEN_REJECTED = "the team token is missing or wrong; run stop-rules login";
 
@@ -78,8 +84,12 @@ export function tokenPath(env: NodeJS.ProcessEnv): string {
   return path.join(configDir(env), TOKEN_FILE);
 }
 
-export function jevKeyPath(env: NodeJS.ProcessEnv): string {
-  return path.join(configDir(env), JEV_KEY_FILE);
+export function cloudflareTokenPath(env: NodeJS.ProcessEnv): string {
+  return path.join(configDir(env), CLOUDFLARE_TOKEN_FILE);
+}
+
+export function cloudflareAccountPath(env: NodeJS.ProcessEnv): string {
+  return path.join(configDir(env), CLOUDFLARE_ACCOUNT_FILE);
 }
 
 export function openAiKeyPath(env: NodeJS.ProcessEnv): string {
@@ -124,14 +134,14 @@ export function parseEndpoint(raw: string): EndpointParse {
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
     return { ok: false, reason: `the team endpoint must start with http:// or https://, not ${parsed.protocol}` };
   }
-  const full = [SYSTEMONE_PATH, RESPONSES_PATH].find((route) => trimmed.endsWith(route));
+  const full = [CLEF_PATH, RESPONSES_PATH].find((route) => trimmed.endsWith(route));
   const base = full === undefined ? trimmed : trimmed.slice(0, -full.length);
-  return { ok: true, base, post: `${base}${SYSTEMONE_PATH}` };
+  return { ok: true, base, post: `${base}${CLEF_PATH}` };
 }
 
 /** The team server route a judge's questions go to. */
-export function teamRoute(base: string, judge: { kind: "jev" | "openai" }): string {
-  return `${base}${judge.kind === "jev" ? SYSTEMONE_PATH : RESPONSES_PATH}`;
+export function teamRoute(base: string, judge: { kind: "clef" | "openai" }): string {
+  return `${base}${judge.kind === "clef" ? CLEF_PATH : RESPONSES_PATH}`;
 }
 
 export type TeamEndpointLookup =
@@ -154,26 +164,54 @@ export function readTeamEndpoint(
   return { ok: true, endpoint, source: loaded.file };
 }
 
-/** Fills in the Jev model, which comes from the environment rather than the settings file. */
-function resolveJudge(choice: JudgeChoice, env: NodeJS.ProcessEnv): { ok: true; judge: Judge } | { ok: false; reason: string } {
-  if (choice.kind === "openai") return { ok: true, judge: choice };
-  const model = envValue(env, "STOP_RULES_JEV_MODEL");
-  if (!model.ok) return { ok: false, reason: model.reason };
-  return { ok: true, judge: { kind: "jev", model: model.value === null ? DEFAULT_MODEL : model.value } };
+export type AccountLookup = { ok: true; value: string | null } | { ok: false; reason: string };
+
+/** Checks an account id where it was found, so the message can say where to fix it. */
+function accountId(raw: string, from: string): { ok: true; value: string } | { ok: false; reason: string } {
+  if (!ACCOUNT_ID.test(raw)) {
+    return {
+      ok: false,
+      reason: `${from} does not hold a Cloudflare account id, which is 32 hex characters. The dashboard shows it on the account's home page.`,
+    };
+  }
+  return { ok: true, value: raw.toLowerCase() };
 }
+
+/** The Cloudflare account Clef runs on: the environment, then the file login wrote. */
+async function readCloudflareAccount(env: NodeJS.ProcessEnv): Promise<AccountLookup> {
+  const fromEnv = envValue(env, CLOUDFLARE_ACCOUNT_ENV);
+  if (!fromEnv.ok) return { ok: false, reason: fromEnv.reason };
+  if (fromEnv.value !== null) return accountId(fromEnv.value, CLOUDFLARE_ACCOUNT_ENV);
+  const file = cloudflareAccountPath(env);
+  const stored = await readTrimmed(file);
+  if (stored.error !== undefined) return { ok: false, reason: stored.error };
+  if (stored.value === null) return { ok: true, value: null };
+  return accountId(stored.value, file);
+}
+
+/** The Cloudflare API token: the environment, then the file login wrote. */
+async function readCloudflareToken(env: NodeJS.ProcessEnv): Promise<AccountLookup> {
+  if (keySourceSet(env, CLOUDFLARE_TOKEN_SOURCE)) {
+    const key = await resolveApiKey(env, CLOUDFLARE_TOKEN_SOURCE);
+    return key.ok ? { ok: true, value: key.key } : { ok: false, reason: key.reason };
+  }
+  const stored = await readTrimmed(cloudflareTokenPath(env));
+  if (stored.error !== undefined) return { ok: false, reason: stored.error };
+  return { ok: true, value: stored.value };
+}
+
+const STORE_CLOUDFLARE =
+  'printf %s "$CLOUDFLARE_API_TOKEN" | stop-rules login --cloudflare-token-stdin --cloudflare-account <account id>';
 
 export async function resolveCredentials(
   loaded: LoadedSettings,
   env: NodeJS.ProcessEnv,
-  choice: JudgeChoice,
+  judge: Judge,
 ): Promise<CredentialsResult> {
   // Checked here so a blank XDG_CONFIG_HOME is one plain message, not a thrown error from
   // deep inside a file read.
   const configHome = envValue(env, "XDG_CONFIG_HOME");
   if (!configHome.ok) return { ok: false, reason: configHome.reason };
-  const resolved = resolveJudge(choice, env);
-  if (!resolved.ok) return { ok: false, reason: resolved.reason };
-  const judge = resolved.judge;
 
   const team = readTeamEndpoint(loaded, env);
   if (!team.ok) return { ok: false, reason: team.reason };
@@ -211,7 +249,7 @@ export async function resolveCredentials(
 
   if (judge.kind === "openai") {
     // The OpenAI key comes from the environment, then from the file login wrote. Nothing
-    // falls back to the Jev key or to the other judge.
+    // falls back to the Cloudflare token or to the other judge.
     if (keySourceSet(env, OPENAI_KEY_SOURCE)) {
       const key = await resolveApiKey(env, OPENAI_KEY_SOURCE);
       if (!key.ok) return { ok: false, reason: key.reason };
@@ -229,30 +267,38 @@ export async function resolveCredentials(
     };
   }
 
-  const override = envValue(env, "STOP_RULES_JEV_ENDPOINT");
-  if (!override.ok) return { ok: false, reason: override.reason };
-  const endpoint = override.value === null ? DEFAULT_ENDPOINT : override.value;
-
-  if (keySourceSet(env, JEV_KEY_SOURCE)) {
-    const key = await resolveApiKey(env, JEV_KEY_SOURCE);
-    if (!key.ok) return { ok: false, reason: key.reason };
+  // Clef runs on the developer's own Cloudflare account: its id and a token for it, each from
+  // the environment first, then from the file login wrote.
+  const account = await readCloudflareAccount(env);
+  if (!account.ok) return { ok: false, reason: account.reason };
+  const token = await readCloudflareToken(env);
+  if (!token.ok) return { ok: false, reason: token.reason };
+  if (account.value === null && token.value === null) {
     return {
-      ok: true,
-      credentials: { mode: "local", endpoint, bearer: key.key, judge },
+      ok: false,
+      reason: `no Cloudflare account id or API token for Clef, and no team endpoint. Set ${CLOUDFLARE_ACCOUNT_ENV} and ${CLOUDFLARE_TOKEN_SOURCE.direct}, or store them with ${STORE_CLOUDFLARE}, or point this repo at your team server with stop-rules team <url>.`,
     };
   }
-  const stored = await readTrimmed(jevKeyPath(env));
-  if (stored.error !== undefined) return { ok: false, reason: stored.error };
-  if (stored.value !== null) {
+  if (account.value === null) {
     return {
-      ok: true,
-      credentials: { mode: "local", endpoint, bearer: stored.value, judge },
+      ok: false,
+      reason: `no Cloudflare account id for Clef. Set ${CLOUDFLARE_ACCOUNT_ENV}, or store it with stop-rules login --cloudflare-account <account id>.`,
+    };
+  }
+  if (token.value === null) {
+    return {
+      ok: false,
+      reason: `no Cloudflare API token for Clef. Set ${CLOUDFLARE_TOKEN_SOURCE.direct}, or store one with printf %s "$CLOUDFLARE_API_TOKEN" | stop-rules login --cloudflare-token-stdin. It needs the Workers AI permission.`,
     };
   }
   return {
-    ok: false,
-    reason:
-      "no Jev API key and no team endpoint. Set TYPESAFE_API_KEY, or store a key with stop-rules login --jev-key-stdin, or point this repo at your team server with stop-rules team <url>.",
+    ok: true,
+    credentials: {
+      mode: "local",
+      endpoint: clefEndpoint(account.value, judge.model),
+      bearer: token.value,
+      judge,
+    },
   };
 }
 
@@ -290,41 +336,79 @@ export async function writeTeamConfig(repoRoot: string, endpoint: string): Promi
   };
 }
 
-export type LoginTarget = "token" | "jev-key" | "openai-key";
+export type LoginTarget = "token" | "cloudflare-token" | "cloudflare-account" | "openai-key";
 
-/** Writes one secret with mode 0600 in a directory only the user can read. */
-export async function login(
-  env: NodeJS.ProcessEnv,
-  target: LoginTarget,
-  secret: string,
-): Promise<WriteResult> {
-  const value = secret.trim();
+function loginPath(env: NodeJS.ProcessEnv, target: LoginTarget): string {
+  switch (target) {
+    case "token":
+      return tokenPath(env);
+    case "cloudflare-token":
+      return cloudflareTokenPath(env);
+    case "cloudflare-account":
+      return cloudflareAccountPath(env);
+    case "openai-key":
+      return openAiKeyPath(env);
+  }
+}
+
+const LOGIN_WHAT: Record<LoginTarget, string> = {
+  token: "That is the team token. The judge's key stays on your team's server.",
+  "cloudflare-token":
+    "That is your own Cloudflare API token for Clef, used when this repo has no team endpoint. It needs the Workers AI permission.",
+  "cloudflare-account":
+    "That is the Cloudflare account Clef runs on, used when this repo has no team endpoint.",
+  "openai-key":
+    "That is your own OpenAI key, used when this repo's judge is openai and it has no team endpoint.",
+};
+
+export interface LoginValue {
+  target: LoginTarget;
+  /** As given, untrimmed: stdin for a secret, the flag value for the account id. */
+  secret: string;
+}
+
+/** One value made ready to write, or the lines that say why it cannot be. */
+function checkLoginValue(entry: LoginValue): { ok: true; value: string } | { ok: false; lines: string[] } {
+  const value = entry.secret.trim();
   if (value.length === 0) {
     return {
       ok: false,
-      lines: [
-        "stop-rules: nothing arrived on stdin.",
-        'Use: printf %s "$SECRET" | stop-rules login --token-stdin',
-      ],
+      lines:
+        entry.target === "cloudflare-account"
+          ? ["stop-rules: --cloudflare-account needs your Cloudflare account id."]
+          : ["stop-rules: nothing arrived on stdin.", 'Use: printf %s "$SECRET" | stop-rules login --token-stdin'],
     };
   }
+  if (entry.target !== "cloudflare-account") return { ok: true, value };
+  const checked = accountId(value, "--cloudflare-account");
+  return checked.ok ? checked : { ok: false, lines: [`stop-rules: ${checked.reason}`] };
+}
+
+/**
+ * Writes each value with mode 0600 in a directory only the user can read. Every value is checked
+ * before any is written, so a token and account id given together are stored together or not at
+ * all: a mistyped id, or a token that never arrived, never leaves a new id beside an old token.
+ * The account id is not a secret, but it lives beside the token it belongs to and is kept the
+ * same way.
+ */
+export async function login(env: NodeJS.ProcessEnv, entries: readonly LoginValue[]): Promise<WriteResult> {
+  const ready: { target: LoginTarget; value: string }[] = [];
+  for (const entry of entries) {
+    const checked = checkLoginValue(entry);
+    if (!checked.ok) return { ok: false, lines: [...checked.lines, "Nothing was stored."] };
+    ready.push({ target: entry.target, value: checked.value });
+  }
   const dir = configDir(env);
-  const file =
-    target === "token" ? tokenPath(env) : target === "jev-key" ? jevKeyPath(env) : openAiKeyPath(env);
   await fs.mkdir(dir, { recursive: true, mode: 0o700 });
-  await fs.writeFile(file, `${value}\n`, { encoding: "utf8", mode: 0o600 });
-  // writeFile only applies mode when it creates the file, so set it either way.
-  await fs.chmod(file, 0o600);
-  const what =
-    target === "token"
-      ? "That is the team token. The judge's key stays on your team's server."
-      : target === "jev-key"
-        ? "That is your own Jev key, used when this repo has no team endpoint."
-        : "That is your own OpenAI key, used when this repo's judge is openai and it has no team endpoint.";
-  return {
-    ok: true,
-    lines: [`wrote ${file} with mode 0600`, what, "Check it with: stop-rules login --check"],
-  };
+  const lines: string[] = [];
+  for (const { target, value } of ready) {
+    const file = loginPath(env, target);
+    await fs.writeFile(file, `${value}\n`, { encoding: "utf8", mode: 0o600 });
+    // writeFile only applies mode when it creates the file, so set it either way.
+    await fs.chmod(file, 0o600);
+    lines.push(`wrote ${file} with mode 0600`, LOGIN_WHAT[target]);
+  }
+  return { ok: true, lines: [...lines, "Check it with: stop-rules login --check"] };
 }
 
 /** The rule and piece login --check asks about. Small, and plainly not a break. */
@@ -435,7 +519,7 @@ export async function loginCheck(
     return { ok, lines };
   }
 
-  const client = new JevClient({
+  const client = new ClefClient({
     endpoint,
     model: judge.model,
     apiKey: bearer,
@@ -445,20 +529,20 @@ export async function loginCheck(
   });
   const outcome = await client.send(
     { probe: "stop-rules connectivity check" },
-    { q0: { type: "noul", instructions: "This request reached Jev." } },
+    { q0: { type: "noul", instructions: "This request reached Clef." } },
   );
   if (outcome.ok) {
     const answer = outcome.answers["q0"];
     lines.push(
       answer === undefined
-        ? "jev: fail (the answer for q0 was missing)"
-        : `jev: pass (answered ${answer.toFixed(2)})`,
+        ? "clef: fail (the answer for q0 was missing)"
+        : `clef: pass (${judge.model} answered ${answer.toFixed(2)}, ${outcome.usage.inputTokens} input tokens)`,
     );
     if (answer === undefined) ok = false;
   } else {
     const message =
       outcome.failure === "auth" && mode === "team" ? TOKEN_REJECTED : outcome.message;
-    lines.push(`jev: fail (${message})`);
+    lines.push(`clef: fail (${message})`);
     ok = false;
   }
   return { ok, lines };

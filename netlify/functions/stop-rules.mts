@@ -7,5 +7,5 @@ import { handle } from "../../dist/server/handler.js";
 export default async (request: Request): Promise<Response> => handle(request, process.env);
 
 export const config = {
-  path: ["/health", "/v1/systemone", "/v1/responses"],
+  path: ["/health", "/v1/clef", "/v1/responses"],
 };

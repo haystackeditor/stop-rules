@@ -3,9 +3,11 @@ import { fileURLToPath } from "node:url";
 import { DEFAULT_AGENT, agentNames, getAdapter } from "./adapters/index.js";
 import type { AgentAdapter, HookContext, HookOutput } from "./adapters/index.js";
 import { resetBaseline, run, type RunOutcome } from "./check.js";
-import { login, loginCheck, writeTeamConfig } from "./credentials.js";
-import { DEFAULT_MAX_CALLS, DEFAULT_MAX_CALLS_OPENAI, DEFAULT_THRESHOLD } from "./engine.js";
+import { login, loginCheck, writeTeamConfig, type LoginValue } from "./credentials.js";
+import { DEFAULT_MAX_CALLS, DEFAULT_MAX_CALLS_REVIEW, DEFAULT_THRESHOLD } from "./engine.js";
 import {
+  CLEF_MODELS,
+  DEFAULT_CLEF_MODEL,
   DEFAULT_EFFORT,
   DEFAULT_IN_FLIGHT,
   DEFAULT_OPENAI_MODEL,
@@ -30,7 +32,10 @@ Usage:
   stop-rules init [options]            vendor the checker and wire it into your agents
   stop-rules team <endpoint>           point this repo at your team's stop-rules server
   stop-rules login --token-stdin       store the team token, read from stdin
-  stop-rules login --jev-key-stdin     store your own Jev key, read from stdin
+  stop-rules login --cloudflare-token-stdin --cloudflare-account <id>
+                                       store your own Cloudflare API token for Clef, read
+                                       from stdin, and the account id it belongs to; either
+                                       one alone stores just that one
   stop-rules login --openai-key-stdin  store your own OpenAI key, read from stdin
   stop-rules login --check             check the endpoint and one real call to the judge
   stop-rules serve [--port n]          run the team server (it holds the judges' keys)
@@ -45,9 +50,10 @@ Options:
   --cut <mode>         hunks or chunks (no parser), functions (tree-sitter) (default ${DEFAULT_CUT})
   --threshold <0..1>   score at or above which a rule counts as violated (default ${DEFAULT_THRESHOLD})
   --max-calls <n>      hard ceiling on requests to the judge in one run (default ${DEFAULT_MAX_CALLS},
-                       ${DEFAULT_MAX_CALLS_OPENAI} for the openai judge's scores form, one piece per call)
-  --judge <kind>       jev or openai: which service scores the pieces (default jev)
-  --model <name>       openai judge only: the model to ask (default ${DEFAULT_OPENAI_MODEL})
+                       one piece per call, ${DEFAULT_MAX_CALLS_REVIEW} for the openai judge's review form)
+  --judge <kind>       clef or openai: which service scores the pieces (default clef)
+  --model <name>       the model to ask: ${CLEF_MODELS.join(" or ")} for clef (default ${DEFAULT_CLEF_MODEL}),
+                       any model name for openai (default ${DEFAULT_OPENAI_MODEL})
   --effort <level>     openai judge only: ${EFFORTS.join(", ")} (default ${DEFAULT_EFFORT})
   --base <rev>         check and score modes: diff this revision against the working tree
   --diff <path>        score mode only: score a unified diff file instead of the working tree
@@ -63,7 +69,7 @@ Agents: ${agentNames().join(", ")}
 
 Settings: ${SETTINGS_FILE} in the repository root holds endpoint, cut, threshold, maxCalls
 and judge. It is committed and holds no secret. A flag above beats the file. The judge is
-{"kind": "jev"}, the default, or
+{"kind": "clef", "model": "${DEFAULT_CLEF_MODEL}"}, the default, where model is ${CLEF_MODELS.join(" or ")}, or
   {"kind": "openai", "form": "review", "model": "${DEFAULT_OPENAI_MODEL}", "effort": "${DEFAULT_EFFORT}", "inFlight": ${DEFAULT_IN_FLIGHT}}
 where form is review (one call per change, each finding quotes its line, the default) or
 scores (one call per piece, a probability per rule), and inFlight, 1 to ${MAX_IN_FLIGHT}, is how many
@@ -73,19 +79,21 @@ docs/TUNING.md.
 Environment, client:
   STOP_RULES_ENDPOINT      your team's stop-rules server, beats .stop-rules.json
   STOP_RULES_TOKEN         the team token, beats the stored token file
-  TYPESAFE_API_KEY         your own Jev API key, used when there is no team endpoint
-  TYPESAFE_API_KEY_FILE    a file holding that key, used when the variable above is unset
+  CLOUDFLARE_ACCOUNT_ID    the Cloudflare account Clef runs on, used when there is no team
+                           endpoint
+  CLOUDFLARE_API_TOKEN     an API token for that account with the Workers AI permission
+  CLOUDFLARE_API_TOKEN_FILE  a file holding that token, used when the variable above is unset
   OPENAI_API_KEY           your own OpenAI API key, used when the judge is openai and there
                            is no team endpoint
   OPENAI_API_KEY_FILE      a file holding that key, used when the variable above is unset
-  STOP_RULES_JEV_ENDPOINT  override the Jev endpoint in local mode
-  STOP_RULES_JEV_MODEL     override the Jev model
 
 Environment, server (stop-rules serve and every cloud deploy):
-  TYPESAFE_API_KEY         the Jev key the server holds on the team's behalf
+  STOP_RULES_CLOUDFLARE_ACCOUNT_ID  the Cloudflare account the server runs Clef on
+  STOP_RULES_CLOUDFLARE_API_TOKEN   an API token for it with the Workers AI permission
+  STOP_RULES_CLEF_MODEL    clef or clef-flash: pins the one Clef model the server answers
+                           with; unset, each repo's own setting is used
   OPENAI_API_KEY           the OpenAI key the server holds, needed only for the openai judge
   STOP_RULES_TOKEN         the token every developer's hook sends
-  STOP_RULES_JEV_UPSTREAM  override where the server forwards questions
   PORT                     port to listen on
 
 Exit codes: 0 clean, 2 violations, 1 could not run. Some agents need a different code to
@@ -114,7 +122,9 @@ interface ParsedArgs {
   team?: string;
   port?: number;
   tokenStdin: boolean;
-  jevKeyStdin: boolean;
+  cloudflareTokenStdin: boolean;
+  /** Not a secret, so it is a flag value rather than stdin. */
+  cloudflareAccount?: string;
   openAiKeyStdin: boolean;
   check: boolean;
   reset: boolean;
@@ -131,7 +141,7 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
     showContext: false,
     agent: DEFAULT_AGENT,
     tokenStdin: false,
-    jevKeyStdin: false,
+    cloudflareTokenStdin: false,
     openAiKeyStdin: false,
     check: false,
     reset: false,
@@ -169,8 +179,12 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
       case "--token-stdin":
         parsed.tokenStdin = true;
         break;
-      case "--jev-key-stdin":
-        parsed.jevKeyStdin = true;
+      case "--cloudflare-token-stdin":
+        parsed.cloudflareTokenStdin = true;
+        break;
+      case "--cloudflare-account":
+        i += 1;
+        parsed.cloudflareAccount = take(i, "--cloudflare-account");
         break;
       case "--openai-key-stdin":
         parsed.openAiKeyStdin = true;
@@ -178,7 +192,7 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
       case "--judge": {
         i += 1;
         const value = take(i, "--judge");
-        if (value !== "jev" && value !== "openai") throw new UsageError("--judge must be jev or openai");
+        if (value !== "clef" && value !== "openai") throw new UsageError("--judge must be clef or openai");
         parsed.judge = value;
         break;
       }
@@ -509,22 +523,29 @@ async function runLoginCommand(args: ParsedArgs): Promise<number> {
     const root = resolved.ok ? resolved.repo.root : process.cwd();
     return writeResult(await loginCheck(root, process.env, judgeArgs(args)));
   }
-  const asked = [args.tokenStdin, args.jevKeyStdin, args.openAiKeyStdin].filter(Boolean).length;
-  if (asked !== 1) {
+  const fromStdin = [args.tokenStdin, args.cloudflareTokenStdin, args.openAiKeyStdin].filter(Boolean).length;
+  const account = args.cloudflareAccount;
+  // The account id goes with the Cloudflare token or on its own, never with another secret.
+  const strayAccount = account !== undefined && (args.tokenStdin || args.openAiKeyStdin);
+  if (fromStdin > 1 || strayAccount || (fromStdin === 0 && account === undefined)) {
     process.stderr.write(
       [
-        "stop-rules: login needs one of --token-stdin, --jev-key-stdin, --openai-key-stdin or --check.",
+        "stop-rules: login needs one of --token-stdin, --cloudflare-token-stdin (with or without --cloudflare-account), --cloudflare-account, --openai-key-stdin or --check.",
         '  printf %s "$TOKEN" | stop-rules login --token-stdin',
-        '  printf %s "$JEV_KEY" | stop-rules login --jev-key-stdin',
+        '  printf %s "$CLOUDFLARE_API_TOKEN" | stop-rules login --cloudflare-token-stdin --cloudflare-account <account id>',
         '  printf %s "$OPENAI_KEY" | stop-rules login --openai-key-stdin',
         "  stop-rules login --check",
       ].join("\n") + "\n",
     );
     return 1;
   }
-  const secret = await readStdin();
-  const target = args.tokenStdin ? "token" : args.jevKeyStdin ? "jev-key" : "openai-key";
-  return writeResult(await login(process.env, target, secret));
+  // One call with everything given, which checks every value before it writes any.
+  const entries: LoginValue[] = account === undefined ? [] : [{ target: "cloudflare-account", secret: account }];
+  if (fromStdin > 0) {
+    const target = args.tokenStdin ? "token" : args.cloudflareTokenStdin ? "cloudflare-token" : "openai-key";
+    entries.push({ target, secret: await readStdin() });
+  }
+  return writeResult(await login(process.env, entries));
 }
 
 async function main(): Promise<number> {

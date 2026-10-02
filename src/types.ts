@@ -25,7 +25,7 @@ export interface AddedLine {
  */
 export type CutMode = "functions" | "hunks" | "chunks";
 
-/** One whole function after the change, as Jev is shown it in `functions` mode. */
+/** One whole function after the change, as the judge is shown it in `functions` mode. */
 export interface PieceFunction {
   /** The name the report uses for this unit. */
   name: string;
@@ -37,7 +37,7 @@ export interface PieceFunction {
 }
 
 /**
- * The code around a piece that goes to Jev with it.
+ * The code around a piece that goes to the judge with it.
  *
  * none      the piece's own diff only, with the tool's normal context.
  * wide      the diff widened to 25 unchanged lines around each change.
@@ -48,11 +48,11 @@ export type PieceContext =
   | { kind: "wide"; diff: string }
   | { kind: "function"; functions: PieceFunction[] };
 
-/** The one value for "Jev sees the diff and nothing else". */
+/** The one value for "the judge sees the diff and nothing else". */
 export const NO_CONTEXT: PieceContext = { kind: "none" };
 
 /** Exactly what one piece looked like inside a call's state. What `--show-context` prints. */
-export interface JevView {
+export interface JudgeView {
   file: string;
   diff: string;
   function?: PieceFunction[];
@@ -118,7 +118,7 @@ export interface RunStats {
   /** Pieces the diff was cut into. Each one is judged on its own. */
   pieces: number;
   /**
-   * Pieces that got at least one answer, from Jev or from the cache. Zero with files above
+   * Pieces that got at least one answer, from the judge or from the cache. Zero with files above
    * zero means nothing in this change was checked, whatever else the report says.
    */
   checked: number;
@@ -134,15 +134,16 @@ export interface RunStats {
   notChecked: number;
   /** Files cut by diff hunk instead of by syntax, and why. */
   cutByHunk: CutByHunk[];
-  /** How many unchanged lines Jev was shown around each change. */
+  /** How many unchanged lines the judge was shown around each change. */
   contextLines: number;
-  /** Pieces Jev saw with their diff widened to those lines. */
+  /** Pieces the judge saw with their diff widened to those lines. */
   widened: number;
-  /** Pieces Jev saw with the whole function after the change. */
+  /** Pieces the judge saw with the whole function after the change. */
   withFunction: number;
   /**
-   * Pieces Jev saw without the code around them, because the wide form on its own would go
-   * over the 60,000 byte call cap. A recorded fact, never a silent fallback.
+   * Pieces the judge saw without the code around them, because the wide form on its own would
+   * go over the judge's cap: the 5,120 bytes of state Clef is sure to read whole, or the
+   * 60,000 byte OpenAI call cap. A recorded fact, never a silent fallback.
    */
   tooBigToWiden: WidenRefused[];
   /** OpenAI review form: findings refused for an unknown rule or a line the change did not add. */
@@ -191,8 +192,8 @@ export interface PieceScore {
   fromLine: number;
   toLine: number;
   rules: RuleScore[];
-  /** Exactly what Jev saw for this piece. Only filled in by `score --show-context`. */
-  jevSaw?: JevView;
+  /** Exactly what the judge saw for this piece. Only filled in by `score --show-context`. */
+  judgeSaw?: JudgeView;
 }
 
 /** What `stop-rules score` returns: every piece, every rule, every score, no cutoff. */

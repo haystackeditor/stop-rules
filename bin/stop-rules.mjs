@@ -1901,11 +1901,20 @@ import { promises as fs10 } from "node:fs";
 import { homedir } from "node:os";
 import * as path16 from "node:path";
 
-// src/jev.ts
-var DEFAULT_ENDPOINT = "https://api.typesafe.ai/v1/systemone";
-var DEFAULT_MODEL = "jev-latest";
-var AUTH_REJECTED = "Jev rejected the API key";
-var BILLING_EXHAUSTED = "the Jev account is out of credits. Add credits at TypeSafe, then run again.";
+// src/clef.ts
+var WORKERS_AI_ACCOUNTS = "https://api.cloudflare.com/client/v4/accounts";
+function clefEndpoint(accountId2, model) {
+  return `${WORKERS_AI_ACCOUNTS}/${encodeURIComponent(accountId2)}/ai/run/@cf/cloudflare/${model}`;
+}
+var AUTH_REJECTED = "Workers AI rejected the Cloudflare account id or API token. The token needs the Workers AI permission on that account";
+var BILLING_EXHAUSTED = "the Cloudflare account has no Workers AI allowance left. Upgrade it to Workers Paid, or wait for the daily free allowance, then run again.";
+var MAX_QUESTIONS = 64;
+var STATE_TOKENS = 2048;
+var MOST_BYTES_PER_TOKEN = 4.5;
+var MOST_STATE_BYTES = Math.floor(STATE_TOKENS * MOST_BYTES_PER_TOKEN);
+var FEWEST_BYTES_PER_TOKEN = 2.5;
+var SURE_STATE_BYTES = Math.floor(STATE_TOKENS * FEWEST_BYTES_PER_TOKEN);
+var EMPTY_STATE_TOKENS = 1;
 function holdsBaseline(failure2) {
   return failure2 === "network" || failure2 === "server" || failure2 === "rate_limit" || failure2 === "auth" || failure2 === "billing" || failure2 === "budget" || failure2 === "busy" || failure2 === "model";
 }
@@ -1929,9 +1938,17 @@ function parseRetryAfter(header) {
   if (Number.isNaN(when)) return null;
   return Math.max(when - Date.now(), 0);
 }
-function readAnswers(body2) {
+function stateBytes(state) {
+  return new TextEncoder().encode(JSON.stringify(state)).length;
+}
+function readResult(body2) {
   if (typeof body2 !== "object" || body2 === null) return null;
-  const answers = body2.answers;
+  const result = body2.result;
+  if (typeof result !== "object" || result === null) return null;
+  return result;
+}
+function readAnswers(result) {
+  const answers = result["answers"];
   if (typeof answers !== "object" || answers === null) return null;
   const out3 = {};
   for (const [id, value2] of Object.entries(answers)) {
@@ -1942,18 +1959,18 @@ function readAnswers(body2) {
   }
   return out3;
 }
-function readUsage(body2) {
-  if (typeof body2 !== "object" || body2 === null) return { inputTokens: 0, outputTokens: 0 };
-  const usage = body2.usage;
-  if (typeof usage !== "object" || usage === null) return { inputTokens: 0, outputTokens: 0 };
+function readUsage(result) {
+  const usage = result["usage"];
+  if (typeof usage !== "object" || usage === null) return null;
   const input = usage.input_tokens;
   const output = usage.output_tokens;
-  return {
-    inputTokens: typeof input === "number" ? input : 0,
-    outputTokens: typeof output === "number" ? output : 0
-  };
+  if (typeof input !== "number" || !Number.isFinite(input)) return null;
+  return { inputTokens: input, outputTokens: typeof output === "number" ? output : 0 };
 }
-var JevClient = class {
+function hasErrorCode(text, code) {
+  return new RegExp(`"code"\\s*:\\s*${code}\\b`).test(text);
+}
+var ClefClient = class {
   constructor(options) {
     this.options = options;
     this.ceiling = options.concurrency ?? 4;
@@ -1966,6 +1983,8 @@ var JevClient = class {
   ceiling;
   successStreak = 0;
   sleep;
+  /** What each set of questions costs on its own, measured once per run and shared. */
+  questionCosts = /* @__PURE__ */ new Map();
   usage = { inputTokens: 0, outputTokens: 0 };
   get calls() {
     return this.callsUsed;
@@ -1994,7 +2013,7 @@ var JevClient = class {
   }
   /**
    * One HTTP attempt, with a machine wide slot held for its whole length, so all the
-   * stop-rules processes on this machine together stay inside Jev's per account limit.
+   * stop-rules processes on this machine together stay inside the account's limit.
    */
   async fetchOnce(body2) {
     let free = null;
@@ -2036,9 +2055,9 @@ var JevClient = class {
       if (free !== null) await free();
     }
   }
-  /** One logical request, including retries. Every attempt costs one unit of budget. */
-  async send(state, questions) {
-    const body2 = JSON.stringify({ state, model: this.options.model, questions });
+  /** One call, including retries. Every attempt costs one unit of budget. */
+  async post(state, questions) {
+    const body2 = JSON.stringify({ model: this.options.model, state, questions });
     let attempt = 0;
     let backoff = BACKOFF_START_MS;
     for (; ; ) {
@@ -2078,23 +2097,31 @@ var JevClient = class {
           }
           return { ok: false, failure: "server", message: `unparseable response: ${message}` };
         }
-        const answers = readAnswers(parsed);
-        if (answers === null) {
+        const result = readResult(parsed);
+        const answers = result === null ? null : readAnswers(result);
+        if (result === null || answers === null) {
           if (attempt < MAX_ATTEMPTS) {
-            this.options.note("200 response without an answers object, retrying");
+            this.options.note("200 response without a result.answers object, retrying");
             await this.sleep(backoff);
             backoff = Math.min(backoff * 2, BACKOFF_CAP_MS);
             continue;
           }
-          return { ok: false, failure: "server", message: "response had no answers object" };
+          return { ok: false, failure: "server", message: "response had no result.answers object" };
         }
-        const usage = readUsage(parsed);
+        const usage = readUsage(result);
+        if (usage === null) {
+          return {
+            ok: false,
+            failure: "server",
+            message: "response had no result.usage.input_tokens, so there is no telling whether Clef read the whole piece"
+          };
+        }
         this.usage.inputTokens += usage.inputTokens;
         this.usage.outputTokens += usage.outputTokens;
         this.speedUp();
         return { ok: true, answers, usage };
       }
-      if (status === 402 || text.includes('"billing_error"')) {
+      if (status === 402 || hasErrorCode(text, 4006)) {
         return { ok: false, failure: "billing", message: BILLING_EXHAUSTED };
       }
       if (status === 429) {
@@ -2107,40 +2134,97 @@ var JevClient = class {
           backoff = Math.min(backoff * 2, BACKOFF_CAP_MS);
           continue;
         }
-        return { ok: false, failure: "rate_limit", message: "rate limited by Jev" };
-      }
-      if (status === 400 && text.includes("max_tokens_exceeded")) {
-        return { ok: false, failure: "too_large", message: "max_tokens_exceeded" };
+        return { ok: false, failure: "rate_limit", message: "rate limited by Workers AI" };
       }
       if (status === 401 || status === 403) {
         return { ok: false, failure: "auth", message: AUTH_REJECTED };
       }
       if (status >= 500) {
         if (attempt < MAX_ATTEMPTS) {
-          this.options.note(`Jev returned ${status}, retrying`);
+          this.options.note(`Clef returned ${status}, retrying`);
           await this.sleep(backoff);
           backoff = Math.min(backoff * 2, BACKOFF_CAP_MS);
           continue;
         }
-        return { ok: false, failure: "server", message: `Jev returned ${status}` };
+        return { ok: false, failure: "server", message: `Clef returned ${status}` };
       }
       const snippet = this.redact(text.slice(0, 200).replace(/\s+/g, " ").trim());
       return {
         ok: false,
         failure: "client",
-        message: `Jev returned ${status}: ${snippet}`
+        message: `Clef returned ${status}: ${snippet}`
       };
     }
   }
   /**
-   * Runs nodes with bounded concurrency. A node the service calls too long is halved and
-   * both halves are queued; a node that cannot halve is returned as a failure.
+   * What these questions cost with nothing else in the call: the same questions about an empty
+   * state, asked once per run however many calls carry them. A failed measurement is not kept,
+   * so a later call asks again.
+   */
+  questionCost(questions) {
+    const key = JSON.stringify(questions);
+    const known = this.questionCosts.get(key);
+    if (known !== void 0) return known;
+    const measured = this.post({}, questions).then((outcome) => {
+      if (!outcome.ok) {
+        this.questionCosts.delete(key);
+        return outcome;
+      }
+      return { ok: true, tokens: outcome.usage.inputTokens - EMPTY_STATE_TOKENS };
+    });
+    this.questionCosts.set(key, measured);
+    return measured;
+  }
+  /**
+   * One logical request: the call, its retries, and the check that Clef read the whole state.
+   * An answer on a cut state is thrown away and reported as too large, so the caller halves
+   * the request instead of ever using it.
+   */
+  async send(state, questions) {
+    const count2 = Object.keys(questions).length;
+    if (count2 > MAX_QUESTIONS) {
+      return {
+        ok: false,
+        failure: "client",
+        message: `${count2} questions in one call, and Clef takes at most ${MAX_QUESTIONS}`
+      };
+    }
+    const asked = await this.post(state, questions);
+    if (!asked.ok) return asked;
+    if (asked.usage.inputTokens < STATE_TOKENS) return asked;
+    const cost = await this.questionCost(questions);
+    if (!cost.ok) return cost;
+    const read = asked.usage.inputTokens - cost.tokens;
+    if (read >= STATE_TOKENS) {
+      return {
+        ok: false,
+        failure: "too_large",
+        message: `Clef read only the first ${STATE_TOKENS} tokens of the state`
+      };
+    }
+    return asked;
+  }
+  /**
+   * Runs nodes with bounded concurrency. A node whose state is plainly too big for Clef is
+   * halved before it is sent, one Clef read only part of is halved and sent again, and a node
+   * that cannot halve is returned as a failure: never as an answer on part of a piece.
    */
   async askAll(nodes) {
     const queue = [...nodes];
     const results = [];
     let active = 0;
     let settled = false;
+    const ask = (node) => {
+      const bytes = stateBytes(node.state);
+      if (bytes > MOST_STATE_BYTES) {
+        return Promise.resolve({
+          ok: false,
+          failure: "too_large",
+          message: `${bytes} bytes of state is more than the ${STATE_TOKENS} tokens Clef reads`
+        });
+      }
+      return this.send(node.state, node.questions);
+    };
     return new Promise((resolve4) => {
       const pump = () => {
         if (settled) return;
@@ -2153,11 +2237,11 @@ var JevClient = class {
           const node = queue.shift();
           if (node === void 0) break;
           active += 1;
-          this.send(node.state, node.questions).then((outcome) => {
+          ask(node).then((outcome) => {
             if (!outcome.ok && outcome.failure === "too_large") {
               const halves = node.halve();
               if (halves !== null) {
-                this.options.note("request too long for Jev, resending as two halves");
+                this.options.note(`${outcome.message}, asking again in two halves`);
                 queue.push(halves[0], halves[1]);
                 return;
               }
@@ -2166,7 +2250,7 @@ var JevClient = class {
                 outcome: {
                   ok: false,
                   failure: "client",
-                  message: "too long for Jev and cannot be split further"
+                  message: `larger than Clef reads (${STATE_TOKENS} tokens of state) and cannot be split further`
                 }
               });
               return;
@@ -2180,7 +2264,7 @@ var JevClient = class {
             }
           }).catch((error) => {
             const message = this.redact(error instanceof Error ? error.message : String(error));
-            this.options.note(`unexpected error while asking Jev: ${message}`);
+            this.options.note(`unexpected error while asking Clef: ${message}`);
             results.push({
               node,
               outcome: { ok: false, failure: "network", message }
@@ -2197,6 +2281,8 @@ var JevClient = class {
 };
 
 // src/judge.ts
+var CLEF_MODELS = ["clef", "clef-flash"];
+var DEFAULT_CLEF_MODEL = "clef";
 var EFFORTS = ["none", "low", "medium", "high"];
 var DEFAULT_OPENAI_MODEL = "gpt-6-luna";
 var DEFAULT_EFFORT = "low";
@@ -2205,15 +2291,16 @@ var MAX_IN_FLIGHT = 8;
 var FORMS = ["review", "scores"];
 var DEFAULT_FORM = "review";
 function judgeName(judge) {
-  return judge.kind === "jev" ? "Jev" : judge.model;
+  if (judge.kind === "openai") return judge.model;
+  return judge.model === "clef-flash" ? "Clef Flash" : "Clef";
 }
 function cacheModel(judge) {
-  if (judge.kind === "jev") return judge.model;
+  if (judge.kind === "clef") return `@cf/cloudflare/${judge.model}`;
   const base = `openai:${judge.model}:${judge.effort}`;
   return judge.form === "scores" ? base : `${base}:review`;
 }
 function judgeInfo(judge) {
-  return judge.kind === "jev" ? { kind: "jev", model: judge.model } : { kind: "openai", model: judge.model, effort: judge.effort, form: judge.form };
+  return judge.kind === "clef" ? { kind: "clef", model: judge.model } : { kind: "openai", model: judge.model, effort: judge.effort, form: judge.form };
 }
 function describeJudge(judge) {
   if (judge.effort === void 0) return `${judge.kind}, model ${judge.model}`;
@@ -2223,10 +2310,10 @@ function describeJudge(judge) {
 
 // src/key.ts
 import { promises as fs8 } from "node:fs";
-var JEV_KEY_SOURCE = {
-  direct: "TYPESAFE_API_KEY",
-  file: "TYPESAFE_API_KEY_FILE",
-  label: "Jev API key"
+var CLOUDFLARE_TOKEN_SOURCE = {
+  direct: "CLOUDFLARE_API_TOKEN",
+  file: "CLOUDFLARE_API_TOKEN_FILE",
+  label: "Cloudflare API token"
 };
 var OPENAI_KEY_SOURCE = {
   direct: "OPENAI_API_KEY",
@@ -2236,7 +2323,7 @@ var OPENAI_KEY_SOURCE = {
 function keySourceSet(env, source) {
   return env[source.direct] !== void 0 || env[source.file] !== void 0;
 }
-async function resolveApiKey(env, source = JEV_KEY_SOURCE) {
+async function resolveApiKey(env, source) {
   const direct = env[source.direct];
   if (typeof direct === "string") {
     if (direct.trim().length === 0) {
@@ -2623,7 +2710,7 @@ var OpenAiClient = class {
     }
   }
   /**
-   * Runs nodes with bounded concurrency, the same way JevClient.askAll does. A node the model
+   * Runs nodes with bounded concurrency, the same way ClefClient.askAll does. A node the model
    * calls too long is halved and both halves are queued.
    */
   async askAll(nodes) {
@@ -2804,21 +2891,28 @@ import * as path15 from "node:path";
 var SETTINGS_FILE = ".stop-rules.json";
 var DEFAULT_CUT = "hunks";
 var KNOWN_KEYS = ["endpoint", "cut", "threshold", "maxCalls", "judge"];
-var JEV_JUDGE_KEYS = ["kind"];
+var CLEF_JUDGE_KEYS = ["kind", "model"];
 var OPENAI_JUDGE_KEYS = ["kind", "form", "model", "effort", "inFlight"];
+function isClefModel(model) {
+  return CLEF_MODELS.includes(model);
+}
 function chooseJudge(file, flags2) {
-  const kind = flags2.judge ?? file?.kind ?? "jev";
-  if (kind === "jev") {
-    const stray = [];
-    if (flags2.model !== void 0) stray.push("--model");
-    if (flags2.effort !== void 0) stray.push("--effort");
-    if (stray.length > 0) {
+  const kind = flags2.judge ?? file?.kind ?? "clef";
+  if (kind === "clef") {
+    if (flags2.effort !== void 0) {
       return {
         ok: false,
-        reason: `${stray.join(" and ")} ${stray.length === 1 ? "is" : "are"} for the openai judge, and this run uses jev. Add --judge openai, or set "judge" in ${SETTINGS_FILE}.`
+        reason: `--effort is for the openai judge, and this run uses clef. Add --judge openai, or set "judge" in ${SETTINGS_FILE}.`
       };
     }
-    return { ok: true, choice: { kind: "jev" } };
+    if (flags2.model !== void 0 && !isClefModel(flags2.model)) {
+      return {
+        ok: false,
+        reason: `--model for the clef judge must be ${CLEF_MODELS.join(" or ")}, not ${flags2.model}. For an OpenAI model add --judge openai.`
+      };
+    }
+    const base2 = file?.kind === "clef" ? file : void 0;
+    return { ok: true, choice: { kind: "clef", model: flags2.model ?? base2?.model ?? DEFAULT_CLEF_MODEL } };
   }
   const base = file?.kind === "openai" ? file : void 0;
   return {
@@ -2834,17 +2928,17 @@ function chooseJudge(file, flags2) {
 }
 function parseJudge(file, raw) {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
-    return { ok: false, reason: `"judge" in ${file} must be an object, such as {"kind": "jev"}.` };
+    return { ok: false, reason: `"judge" in ${file} must be an object, such as {"kind": "clef"}.` };
   }
   const record = raw;
   const kind = record["kind"];
-  if (kind !== "jev" && kind !== "openai") {
+  if (kind !== "clef" && kind !== "openai") {
     return {
       ok: false,
-      reason: `"judge.kind" in ${file} must be "jev" or "openai", not ${JSON.stringify(kind)}.`
+      reason: `"judge.kind" in ${file} must be "clef" or "openai", not ${JSON.stringify(kind)}.`
     };
   }
-  const allowed = kind === "jev" ? JEV_JUDGE_KEYS : OPENAI_JUDGE_KEYS;
+  const allowed = kind === "clef" ? CLEF_JUDGE_KEYS : OPENAI_JUDGE_KEYS;
   for (const key of Object.keys(record)) {
     if (!allowed.includes(key)) {
       return {
@@ -2853,7 +2947,17 @@ function parseJudge(file, raw) {
       };
     }
   }
-  if (kind === "jev") return { ok: true, judge: { kind: "jev" } };
+  if (kind === "clef") {
+    const model2 = record["model"];
+    if (model2 === void 0) return { ok: true, judge: { kind: "clef" } };
+    if (!isClefModel(model2)) {
+      return {
+        ok: false,
+        reason: `"judge.model" in ${file} must be ${CLEF_MODELS.map((name2) => `"${name2}"`).join(" or ")} for the clef judge, not ${JSON.stringify(model2)}.`
+      };
+    }
+    return { ok: true, judge: { kind: "clef", model: model2 } };
+  }
   const judge = { kind: "openai" };
   const model = record["model"];
   if (model !== void 0) {
@@ -2993,11 +3097,14 @@ async function writeSettings(repoRoot, patch) {
 }
 
 // src/credentials.ts
-var SYSTEMONE_PATH = "/v1/systemone";
+var CLEF_PATH = "/v1/clef";
 var RESPONSES_PATH = "/v1/responses";
 var TOKEN_FILE = "token";
-var JEV_KEY_FILE = "jev-key";
+var CLOUDFLARE_TOKEN_FILE = "cloudflare-token";
+var CLOUDFLARE_ACCOUNT_FILE = "cloudflare-account";
 var OPENAI_KEY_FILE = "openai-key";
+var CLOUDFLARE_ACCOUNT_ENV = "CLOUDFLARE_ACCOUNT_ID";
+var ACCOUNT_ID = /^[0-9a-f]{32}$/i;
 var TOKEN_REJECTED = "the team token is missing or wrong; run stop-rules login";
 function envValue(env, name2) {
   const raw = env[name2];
@@ -3017,8 +3124,11 @@ function configDir(env) {
 function tokenPath(env) {
   return path16.join(configDir(env), TOKEN_FILE);
 }
-function jevKeyPath(env) {
-  return path16.join(configDir(env), JEV_KEY_FILE);
+function cloudflareTokenPath(env) {
+  return path16.join(configDir(env), CLOUDFLARE_TOKEN_FILE);
+}
+function cloudflareAccountPath(env) {
+  return path16.join(configDir(env), CLOUDFLARE_ACCOUNT_FILE);
 }
 function openAiKeyPath(env) {
   return path16.join(configDir(env), OPENAI_KEY_FILE);
@@ -3047,12 +3157,12 @@ function parseEndpoint(raw) {
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
     return { ok: false, reason: `the team endpoint must start with http:// or https://, not ${parsed.protocol}` };
   }
-  const full = [SYSTEMONE_PATH, RESPONSES_PATH].find((route2) => trimmed.endsWith(route2));
+  const full = [CLEF_PATH, RESPONSES_PATH].find((route2) => trimmed.endsWith(route2));
   const base = full === void 0 ? trimmed : trimmed.slice(0, -full.length);
-  return { ok: true, base, post: `${base}${SYSTEMONE_PATH}` };
+  return { ok: true, base, post: `${base}${CLEF_PATH}` };
 }
 function teamRoute(base, judge) {
-  return `${base}${judge.kind === "jev" ? SYSTEMONE_PATH : RESPONSES_PATH}`;
+  return `${base}${judge.kind === "clef" ? CLEF_PATH : RESPONSES_PATH}`;
 }
 function readTeamEndpoint(loaded, env) {
   const fromEnv = envValue(env, "STOP_RULES_ENDPOINT");
@@ -3064,18 +3174,38 @@ function readTeamEndpoint(loaded, env) {
   if (endpoint === void 0) return { ok: true, endpoint: null, source: "none" };
   return { ok: true, endpoint, source: loaded.file };
 }
-function resolveJudge(choice, env) {
-  if (choice.kind === "openai") return { ok: true, judge: choice };
-  const model = envValue(env, "STOP_RULES_JEV_MODEL");
-  if (!model.ok) return { ok: false, reason: model.reason };
-  return { ok: true, judge: { kind: "jev", model: model.value === null ? DEFAULT_MODEL : model.value } };
+function accountId(raw, from) {
+  if (!ACCOUNT_ID.test(raw)) {
+    return {
+      ok: false,
+      reason: `${from} does not hold a Cloudflare account id, which is 32 hex characters. The dashboard shows it on the account's home page.`
+    };
+  }
+  return { ok: true, value: raw.toLowerCase() };
 }
-async function resolveCredentials(loaded, env, choice) {
+async function readCloudflareAccount(env) {
+  const fromEnv = envValue(env, CLOUDFLARE_ACCOUNT_ENV);
+  if (!fromEnv.ok) return { ok: false, reason: fromEnv.reason };
+  if (fromEnv.value !== null) return accountId(fromEnv.value, CLOUDFLARE_ACCOUNT_ENV);
+  const file = cloudflareAccountPath(env);
+  const stored = await readTrimmed(file);
+  if (stored.error !== void 0) return { ok: false, reason: stored.error };
+  if (stored.value === null) return { ok: true, value: null };
+  return accountId(stored.value, file);
+}
+async function readCloudflareToken(env) {
+  if (keySourceSet(env, CLOUDFLARE_TOKEN_SOURCE)) {
+    const key = await resolveApiKey(env, CLOUDFLARE_TOKEN_SOURCE);
+    return key.ok ? { ok: true, value: key.key } : { ok: false, reason: key.reason };
+  }
+  const stored = await readTrimmed(cloudflareTokenPath(env));
+  if (stored.error !== void 0) return { ok: false, reason: stored.error };
+  return { ok: true, value: stored.value };
+}
+var STORE_CLOUDFLARE = 'printf %s "$CLOUDFLARE_API_TOKEN" | stop-rules login --cloudflare-token-stdin --cloudflare-account <account id>';
+async function resolveCredentials(loaded, env, judge) {
   const configHome = envValue(env, "XDG_CONFIG_HOME");
   if (!configHome.ok) return { ok: false, reason: configHome.reason };
-  const resolved = resolveJudge(choice, env);
-  if (!resolved.ok) return { ok: false, reason: resolved.reason };
-  const judge = resolved.judge;
   const team = readTeamEndpoint(loaded, env);
   if (!team.ok) return { ok: false, reason: team.reason };
   if (team.endpoint !== null) {
@@ -3083,13 +3213,13 @@ async function resolveCredentials(loaded, env, choice) {
     if (!parsed.ok) return { ok: false, reason: `${parsed.reason} (from ${team.source})` };
     const fromEnv = envValue(env, "STOP_RULES_TOKEN");
     if (!fromEnv.ok) return { ok: false, reason: fromEnv.reason };
-    let token = fromEnv.value;
-    if (token === null) {
+    let token2 = fromEnv.value;
+    if (token2 === null) {
       const file = await readTrimmed(tokenPath(env));
       if (file.error !== void 0) return { ok: false, reason: file.error };
-      token = file.value;
+      token2 = file.value;
     }
-    if (token === null) {
+    if (token2 === null) {
       return {
         ok: false,
         reason: `no team token for ${parsed.base}. Store one with: printf %s "$TOKEN" | stop-rules login --token-stdin`
@@ -3100,7 +3230,7 @@ async function resolveCredentials(loaded, env, choice) {
       credentials: {
         mode: "team",
         endpoint: teamRoute(parsed.base, judge),
-        bearer: token,
+        bearer: token2,
         judge,
         teamBase: parsed.base
       }
@@ -3112,38 +3242,46 @@ async function resolveCredentials(loaded, env, choice) {
       if (!key.ok) return { ok: false, reason: key.reason };
       return { ok: true, credentials: { mode: "local", endpoint: OPENAI_ENDPOINT, bearer: key.key, judge } };
     }
-    const stored2 = await readTrimmed(openAiKeyPath(env));
-    if (stored2.error !== void 0) return { ok: false, reason: stored2.error };
-    if (stored2.value !== null) {
-      return { ok: true, credentials: { mode: "local", endpoint: OPENAI_ENDPOINT, bearer: stored2.value, judge } };
+    const stored = await readTrimmed(openAiKeyPath(env));
+    if (stored.error !== void 0) return { ok: false, reason: stored.error };
+    if (stored.value !== null) {
+      return { ok: true, credentials: { mode: "local", endpoint: OPENAI_ENDPOINT, bearer: stored.value, judge } };
     }
     return {
       ok: false,
       reason: "no OpenAI API key and no team endpoint, and this repo's judge is openai. Set OPENAI_API_KEY, or store a key with stop-rules login --openai-key-stdin, or point this repo at your team server with stop-rules team <url>."
     };
   }
-  const override = envValue(env, "STOP_RULES_JEV_ENDPOINT");
-  if (!override.ok) return { ok: false, reason: override.reason };
-  const endpoint = override.value === null ? DEFAULT_ENDPOINT : override.value;
-  if (keySourceSet(env, JEV_KEY_SOURCE)) {
-    const key = await resolveApiKey(env, JEV_KEY_SOURCE);
-    if (!key.ok) return { ok: false, reason: key.reason };
+  const account = await readCloudflareAccount(env);
+  if (!account.ok) return { ok: false, reason: account.reason };
+  const token = await readCloudflareToken(env);
+  if (!token.ok) return { ok: false, reason: token.reason };
+  if (account.value === null && token.value === null) {
     return {
-      ok: true,
-      credentials: { mode: "local", endpoint, bearer: key.key, judge }
+      ok: false,
+      reason: `no Cloudflare account id or API token for Clef, and no team endpoint. Set ${CLOUDFLARE_ACCOUNT_ENV} and ${CLOUDFLARE_TOKEN_SOURCE.direct}, or store them with ${STORE_CLOUDFLARE}, or point this repo at your team server with stop-rules team <url>.`
     };
   }
-  const stored = await readTrimmed(jevKeyPath(env));
-  if (stored.error !== void 0) return { ok: false, reason: stored.error };
-  if (stored.value !== null) {
+  if (account.value === null) {
     return {
-      ok: true,
-      credentials: { mode: "local", endpoint, bearer: stored.value, judge }
+      ok: false,
+      reason: `no Cloudflare account id for Clef. Set ${CLOUDFLARE_ACCOUNT_ENV}, or store it with stop-rules login --cloudflare-account <account id>.`
+    };
+  }
+  if (token.value === null) {
+    return {
+      ok: false,
+      reason: `no Cloudflare API token for Clef. Set ${CLOUDFLARE_TOKEN_SOURCE.direct}, or store one with printf %s "$CLOUDFLARE_API_TOKEN" | stop-rules login --cloudflare-token-stdin. It needs the Workers AI permission.`
     };
   }
   return {
-    ok: false,
-    reason: "no Jev API key and no team endpoint. Set TYPESAFE_API_KEY, or store a key with stop-rules login --jev-key-stdin, or point this repo at your team server with stop-rules team <url>."
+    ok: true,
+    credentials: {
+      mode: "local",
+      endpoint: clefEndpoint(account.value, judge.model),
+      bearer: token.value,
+      judge
+    }
   };
 }
 async function writeTeamConfig(repoRoot, endpoint) {
@@ -3169,28 +3307,54 @@ async function writeTeamConfig(repoRoot, endpoint) {
     ]
   };
 }
-async function login(env, target, secret) {
-  const value2 = secret.trim();
+function loginPath(env, target) {
+  switch (target) {
+    case "token":
+      return tokenPath(env);
+    case "cloudflare-token":
+      return cloudflareTokenPath(env);
+    case "cloudflare-account":
+      return cloudflareAccountPath(env);
+    case "openai-key":
+      return openAiKeyPath(env);
+  }
+}
+var LOGIN_WHAT = {
+  token: "That is the team token. The judge's key stays on your team's server.",
+  "cloudflare-token": "That is your own Cloudflare API token for Clef, used when this repo has no team endpoint. It needs the Workers AI permission.",
+  "cloudflare-account": "That is the Cloudflare account Clef runs on, used when this repo has no team endpoint.",
+  "openai-key": "That is your own OpenAI key, used when this repo's judge is openai and it has no team endpoint."
+};
+function checkLoginValue(entry) {
+  const value2 = entry.secret.trim();
   if (value2.length === 0) {
     return {
       ok: false,
-      lines: [
-        "stop-rules: nothing arrived on stdin.",
-        'Use: printf %s "$SECRET" | stop-rules login --token-stdin'
-      ]
+      lines: entry.target === "cloudflare-account" ? ["stop-rules: --cloudflare-account needs your Cloudflare account id."] : ["stop-rules: nothing arrived on stdin.", 'Use: printf %s "$SECRET" | stop-rules login --token-stdin']
     };
   }
+  if (entry.target !== "cloudflare-account") return { ok: true, value: value2 };
+  const checked = accountId(value2, "--cloudflare-account");
+  return checked.ok ? checked : { ok: false, lines: [`stop-rules: ${checked.reason}`] };
+}
+async function login(env, entries) {
+  const ready = [];
+  for (const entry of entries) {
+    const checked = checkLoginValue(entry);
+    if (!checked.ok) return { ok: false, lines: [...checked.lines, "Nothing was stored."] };
+    ready.push({ target: entry.target, value: checked.value });
+  }
   const dir = configDir(env);
-  const file = target === "token" ? tokenPath(env) : target === "jev-key" ? jevKeyPath(env) : openAiKeyPath(env);
   await fs10.mkdir(dir, { recursive: true, mode: 448 });
-  await fs10.writeFile(file, `${value2}
+  const lines = [];
+  for (const { target, value: value2 } of ready) {
+    const file = loginPath(env, target);
+    await fs10.writeFile(file, `${value2}
 `, { encoding: "utf8", mode: 384 });
-  await fs10.chmod(file, 384);
-  const what = target === "token" ? "That is the team token. The judge's key stays on your team's server." : target === "jev-key" ? "That is your own Jev key, used when this repo has no team endpoint." : "That is your own OpenAI key, used when this repo's judge is openai and it has no team endpoint.";
-  return {
-    ok: true,
-    lines: [`wrote ${file} with mode 0600`, what, "Check it with: stop-rules login --check"]
-  };
+    await fs10.chmod(file, 384);
+    lines.push(`wrote ${file} with mode 0600`, LOGIN_WHAT[target]);
+  }
+  return { ok: true, lines: [...lines, "Check it with: stop-rules login --check"] };
 }
 var PROBE_RULE = { id: "probe", text: "Do not leave a TODO comment in the code." };
 var PROBE_VIEW = {
@@ -3278,7 +3442,7 @@ async function loginCheck(repoRoot, env, flags2 = {}, fetchImpl = (url, init3) =
     }
     return { ok, lines };
   }
-  const client = new JevClient({
+  const client = new ClefClient({
     endpoint,
     model: judge.model,
     apiKey: bearer2,
@@ -3288,17 +3452,17 @@ async function loginCheck(repoRoot, env, flags2 = {}, fetchImpl = (url, init3) =
   });
   const outcome = await client.send(
     { probe: "stop-rules connectivity check" },
-    { q0: { type: "noul", instructions: "This request reached Jev." } }
+    { q0: { type: "noul", instructions: "This request reached Clef." } }
   );
   if (outcome.ok) {
     const answer = outcome.answers["q0"];
     lines.push(
-      answer === void 0 ? "jev: fail (the answer for q0 was missing)" : `jev: pass (answered ${answer.toFixed(2)})`
+      answer === void 0 ? "clef: fail (the answer for q0 was missing)" : `clef: pass (${judge.model} answered ${answer.toFixed(2)}, ${outcome.usage.inputTokens} input tokens)`
     );
     if (answer === void 0) ok = false;
   } else {
     const message = outcome.failure === "auth" && mode === "team" ? TOKEN_REJECTED : outcome.message;
-    lines.push(`jev: fail (${message})`);
+    lines.push(`clef: fail (${message})`);
     ok = false;
   }
   return { ok, lines };
@@ -3961,7 +4125,7 @@ function buildPieces(file, source, table, root) {
       fromLine: Math.min(...group.atoms.map((atom) => atom.span.start)),
       toLine: Math.max(...group.atoms.map((atom) => atom.span.end)),
       cut: "unit",
-      // A piece that is one function goes to Jev with that whole function after the change.
+      // A piece that is one function goes to the judge with that whole function after the change.
       // A run of statements and declarations is no function, so it gets the wide form, clamped
       // to the lines no other piece of this file owns.
       context: group.fn ? functionContext(wholeFunctions(group.atoms, sourceLines)) : wideContext(
@@ -4142,7 +4306,7 @@ import { promises as fs11 } from "node:fs";
 import * as path17 from "node:path";
 import { fileURLToPath } from "node:url";
 
-// ../../../../private/tmp/claude-501/-Users-akshaysubramaniam-haystack-review/86acc7b8-f4aa-4d0c-bcb0-6c6afc607144/scratchpad/pi/deps/node_modules/web-tree-sitter/tree-sitter.js
+// node_modules/web-tree-sitter/tree-sitter.js
 var __defProp = Object.defineProperty;
 var __name = (target, value2) => __defProp(target, "name", { value: value2, configurable: true });
 var SIZE_OF_SHORT = 2;
@@ -8253,12 +8417,12 @@ async function cutFiles(files, options) {
 
 // src/engine.ts
 var DEFAULT_THRESHOLD = 0.6;
-var DEFAULT_MAX_CALLS = 60;
-var DEFAULT_MAX_CALLS_OPENAI = 240;
+var DEFAULT_MAX_CALLS = 240;
+var DEFAULT_MAX_CALLS_REVIEW = 60;
 function defaultMaxCalls(judge) {
-  return judge.kind === "openai" && judge.form === "scores" ? DEFAULT_MAX_CALLS_OPENAI : DEFAULT_MAX_CALLS;
+  return judge.kind === "openai" && judge.form === "review" ? DEFAULT_MAX_CALLS_REVIEW : DEFAULT_MAX_CALLS;
 }
-var PIECES_PER_CALL = 4;
+var PIECES_PER_CALL = 1;
 var PACK_MAX_BYTES = 6e4;
 var MAX_RULES_PER_CALL = 200;
 var CACHE_KEY_VERSION = "v1";
@@ -8311,11 +8475,10 @@ function packQuestions(work) {
   });
   return { state: { pieces }, questions, byQuestion };
 }
-function packBytes(model, work) {
-  const { state, questions } = packQuestions(work);
-  return utf8Bytes(JSON.stringify({ state, model, questions }));
+function packStateBytes(work) {
+  return stateBytes(packQuestions(work).state);
 }
-function makePackNode(model, work) {
+function makePackNode(work) {
   const { state, questions, byQuestion } = packQuestions(work);
   return {
     payload: { work, byQuestion },
@@ -8324,20 +8487,21 @@ function makePackNode(model, work) {
     halve: () => {
       if (work.length > 1) {
         const mid = Math.ceil(work.length / 2);
-        return [makePackNode(model, work.slice(0, mid)), makePackNode(model, work.slice(mid))];
+        return [makePackNode(work.slice(0, mid)), makePackNode(work.slice(mid))];
       }
       const only = work[0];
       if (only === void 0) return null;
       const halves = halvePiece(only.piece);
       if (halves === null) return null;
       return [
-        makePackNode(model, [{ piece: halves[0], context: halves[0].context, rules: only.rules }]),
-        makePackNode(model, [{ piece: halves[1], context: halves[1].context, rules: only.rules }])
+        makePackNode([{ piece: halves[0], context: halves[0].context, rules: only.rules }]),
+        makePackNode([{ piece: halves[1], context: halves[1].context, rules: only.rules }])
       ];
     }
   };
 }
-function packWork(model, work) {
+function packWork(work) {
+  const questionsIn = (pack) => pack.reduce((total, item) => total + item.rules.length, 0);
   const packs = [];
   let current = [];
   for (const item of work) {
@@ -8346,7 +8510,7 @@ function packWork(model, work) {
       continue;
     }
     const candidate = [...current, item];
-    if (candidate.length > PIECES_PER_CALL || packBytes(model, candidate) > PACK_MAX_BYTES) {
+    if (candidate.length > PIECES_PER_CALL || questionsIn(candidate) > MAX_QUESTIONS || packStateBytes(candidate) > SURE_STATE_BYTES) {
       packs.push(current);
       current = [item];
       continue;
@@ -8493,14 +8657,17 @@ function scoreReview(payload, findings, rules, judgeLabel) {
   }
   return { answers, details, rejected };
 }
-function soloBytes(judge, work, rules) {
-  if (judge.kind === "jev") return packBytes(judge.model, [work]);
-  return judge.form === "scores" ? openAiBytes(judge, work) : reviewBytes(judge, [work], rules);
+function soloWeight(judge, work, rules) {
+  if (judge.kind === "clef") {
+    return { bytes: packStateBytes([work]), cap: SURE_STATE_BYTES, what: `bytes of state ${judgeName(judge)} is sure to read whole` };
+  }
+  const bytes = judge.form === "scores" ? openAiBytes(judge, work) : reviewBytes(judge, [work], rules);
+  return { bytes, cap: PACK_MAX_BYTES, what: "byte cap" };
 }
 async function askJudge(input, work) {
   const { judge, note } = input;
-  if (judge.kind === "jev") {
-    const client2 = new JevClient({
+  if (judge.kind === "clef") {
+    const client2 = new ClefClient({
       endpoint: input.endpoint,
       model: judge.model,
       apiKey: input.apiKey,
@@ -8511,7 +8678,7 @@ async function askJudge(input, work) {
       ...input.concurrency !== void 0 ? { concurrency: input.concurrency } : {},
       ...input.slot ? { slot: input.slot } : {}
     });
-    const nodes2 = packWork(judge.model, work).map((pack) => makePackNode(judge.model, pack));
+    const nodes2 = packWork(work).map((pack) => makePackNode(pack));
     const results2 = (await client2.askAll(nodes2)).map((result) => ({
       payload: result.node.payload,
       outcome: result.outcome
@@ -8565,11 +8732,11 @@ async function askJudge(input, work) {
 function contextThatFits(judge, piece, rules, refused, note) {
   const context = piece.context;
   if (context.kind === "none") return context;
-  const bytes = soloBytes(judge, { piece, context, rules: [...rules] }, rules);
-  if (bytes <= PACK_MAX_BYTES) return context;
-  refused.push({ file: piece.file, fromLine: piece.fromLine, toLine: piece.toLine, bytes });
+  const weight = soloWeight(judge, { piece, context, rules: [...rules] }, rules);
+  if (weight.bytes <= weight.cap) return context;
+  refused.push({ file: piece.file, fromLine: piece.fromLine, toLine: piece.toLine, bytes: weight.bytes });
   note(
-    `${piece.file} lines ${piece.fromLine}-${piece.toLine}: too big to widen, a call with the ${CONTEXT_LINES} lines around it would be ${bytes} bytes, over the ${PACK_MAX_BYTES} byte cap, so ${judgeName(judge)} saw the diff alone`
+    `${piece.file} lines ${piece.fromLine}-${piece.toLine}: too big to widen, a call with the ${CONTEXT_LINES} lines around it would be ${weight.bytes} bytes, over the ${weight.cap} ${weight.what}, so ${judgeName(judge)} saw the diff alone`
   );
   return NO_CONTEXT;
 }
@@ -8631,8 +8798,9 @@ async function runEngine(input) {
       if (uncached.length > 0) work.push({ piece, context, rules: uncached });
       continue;
     }
-    for (let i2 = 0; i2 < uncached.length; i2 += MAX_RULES_PER_CALL) {
-      work.push({ piece, context, rules: uncached.slice(i2, i2 + MAX_RULES_PER_CALL) });
+    const perCall = judge.kind === "clef" ? MAX_QUESTIONS : MAX_RULES_PER_CALL;
+    for (let i2 = 0; i2 < uncached.length; i2 += perCall) {
+      work.push({ piece, context, rules: uncached.slice(i2, i2 + perCall) });
     }
   }
   const asked = await askJudge(input, work);
@@ -8768,7 +8936,7 @@ function groupScores(scored, showContext) {
       fromLine: hit.piece.fromLine,
       toLine: hit.piece.toLine,
       rules: [entry],
-      ...showContext ? { jevSaw: pieceState(hit.piece, hit.context) } : {}
+      ...showContext ? { judgeSaw: pieceState(hit.piece, hit.context) } : {}
     });
   }
   const pieces = [...byPiece.values()];
@@ -8972,7 +9140,7 @@ function headline(report) {
 This does not say your code is clean. The reasons are below.`;
   }
 }
-function whatJevSaw(stats, judge = "Jev") {
+function whatJudgeSaw(stats, judge) {
   const parts2 = [];
   const lines = stats.contextLines;
   if (stats.withFunction > 0 && stats.widened > 0) {
@@ -8995,7 +9163,7 @@ function whatJevSaw(stats, judge = "Jev") {
 function renderReport(report) {
   const { pieces, notChecked } = report;
   const sections = [];
-  const saw = whatJevSaw(report.stats, judgeName(report.judge));
+  const saw = whatJudgeSaw(report.stats, judgeName(report.judge));
   if (pieces.length === 0) {
     sections.push(saw === null ? headline(report) : `${headline(report)} ${saw}`);
   } else {
@@ -9017,7 +9185,7 @@ function cutWords(cut) {
   if (cut === "hunks") return "one diff hunk each, with no parser";
   return "diff hunks grouped into 12,000 byte chunks, with no parser";
 }
-function jevSawLines(saw, judge) {
+function judgeSawLines(saw, judge) {
   const lines = [`   What ${judge} saw:`, `     file: ${saw.file}`, "     diff:"];
   for (const line of saw.diff.split("\n")) {
     if (line.length > 0) lines.push(`       ${line}`);
@@ -9036,7 +9204,7 @@ function scoreBlock(piece, index, judge) {
     if (rule.line !== void 0) lines.push(`         Line: ${rule.line}`);
     if (rule.reason !== void 0) lines.push(`         Why: ${rule.reason}`);
   }
-  if (piece.jevSaw !== void 0) lines.push(...jevSawLines(piece.jevSaw, judge));
+  if (piece.judgeSaw !== void 0) lines.push(...judgeSawLines(piece.judgeSaw, judge));
   return lines.join("\n");
 }
 function renderScores(report) {
@@ -9187,12 +9355,12 @@ var MACHINE_SLOTS = 8;
 var SLOT_WAIT_MS = 6e4;
 var SLOT_STALE_MS = 12e4;
 var POLL_MS = 100;
-var MACHINE_BUSY = "Jev is busy on this machine, this change will be checked on the next run";
+var MACHINE_BUSY = "every judge slot on this machine is busy, this change will be checked on the next run";
 function machineBusy(judgeName2) {
   return `${judgeName2} is busy on this machine, this change will be checked on the next run`;
 }
-function slotsDir(env, judge = "jev") {
-  const folder = judge === "jev" ? "slots" : "openai-slots";
+function slotsDir(env, judge) {
+  const folder = judge === "clef" ? "clef-slots" : "openai-slots";
   const configured = env["XDG_CACHE_HOME"];
   if (configured !== void 0) {
     if (configured.trim().length === 0) {
@@ -9247,7 +9415,7 @@ async function acquireSlot(dir, waitMs = SLOT_WAIT_MS) {
               } catch (error) {
                 const err2 = error;
                 if (err2.code !== "ENOENT") {
-                  process.stderr.write(`stop-rules: could not free a Jev slot: ${err2.message}
+                  process.stderr.write(`stop-rules: could not free a judge slot: ${err2.message}
 `);
                 }
               }
@@ -9649,7 +9817,7 @@ async function runLocked(args2) {
   if (engineResult.blocked !== null) {
     await saveCache(stateDir, cache);
     if (engineResult.blocked === "billing") {
-      return cannotRun(judge.kind === "jev" ? BILLING_EXHAUSTED : OPENAI_BILLING_EXHAUSTED);
+      return cannotRun(judge.kind === "clef" ? BILLING_EXHAUSTED : OPENAI_BILLING_EXHAUSTED);
     }
     if (engineResult.blocked === "busy") return cannotRun(machineBusy(name2));
     if (engineResult.blocked === "model") {
@@ -9657,7 +9825,7 @@ async function runLocked(args2) {
       return cannotRun(`${said.replace(/\.+$/, "")}.`);
     }
     if (credentials.mode === "team") return cannotRun(TOKEN_REJECTED);
-    return cannotRun(`${judge.kind === "jev" ? AUTH_REJECTED : OPENAI_AUTH_REJECTED}.`);
+    return cannotRun(`${judge.kind === "clef" ? AUTH_REJECTED : OPENAI_AUTH_REJECTED}.`);
   }
   if (pieces.length > 0 && engineResult.answered === 0 && engineResult.transportFailed) {
     await saveCache(stateDir, cache);
@@ -9852,7 +10020,7 @@ function failure(repo, reason) {
     repo,
     cut: DEFAULT_CUT,
     mode: "local",
-    judge: { kind: "jev", model: "jev-latest" },
+    judge: { kind: "clef", model: DEFAULT_CLEF_MODEL },
     bundle: { path: BUNDLE_PATH, written: false },
     grammars: noGrammars(),
     rules: { path: ".stop-rules.md", created: false },
@@ -9902,7 +10070,7 @@ async function init2(options) {
   });
   if (!pickedJudge.ok) return failure(root, pickedJudge.reason);
   const choice = pickedJudge.choice;
-  const judge = choice.kind === "jev" ? { kind: "jev", model: "jev-latest" } : { kind: "openai", model: choice.model, effort: choice.effort, form: choice.form };
+  const judge = judgeInfo(choice);
   const report = {
     ok: true,
     repo: root,
@@ -9942,7 +10110,7 @@ async function init2(options) {
   }
   if (judgeFlagsGiven) {
     const existingJudge = existingSettings.loaded.settings.judge;
-    const setting = choice.kind === "jev" ? { kind: "jev" } : {
+    const setting = choice.kind === "clef" ? { kind: "clef", model: choice.model } : {
       kind: "openai",
       form: choice.form,
       model: choice.model,
@@ -10011,7 +10179,7 @@ async function init2(options) {
     });
   }
   report.todo.push(
-    report.mode === "team" ? 'Store the team token: printf %s "$TOKEN" | stop-rules login --token-stdin' : judge.kind === "openai" ? 'Give it your own OpenAI key: set OPENAI_API_KEY, or run printf %s "$KEY" | stop-rules login --openai-key-stdin' : 'Give it your own Jev key from TypeSafe: set TYPESAFE_API_KEY, or run printf %s "$KEY" | stop-rules login --jev-key-stdin'
+    report.mode === "team" ? 'Store the team token: printf %s "$TOKEN" | stop-rules login --token-stdin' : judge.kind === "openai" ? 'Give it your own OpenAI key: set OPENAI_API_KEY, or run printf %s "$KEY" | stop-rules login --openai-key-stdin' : 'Give it your Cloudflare account for Clef: set CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN (a token with the Workers AI permission), or run printf %s "$CLOUDFLARE_API_TOKEN" | stop-rules login --cloudflare-token-stdin --cloudflare-account <account id>'
   );
   report.todo.push(`Edit ${report.rules.path} so it says what your team actually cares about.`);
   if (cut === "functions" && report.grammars.languages.length === 0) {
@@ -10124,7 +10292,7 @@ function renderInit(report) {
       report.team.written ? `  wrote ${report.team.path} pointing at ${report.team.endpoint}` : `  team server already set to ${report.team.endpoint} (from ${report.team.path})`
     );
   }
-  const keyName = report.judge.kind === "openai" ? "OpenAI key" : "Jev key";
+  const keyName = report.judge.kind === "openai" ? "OpenAI key" : "Cloudflare API token";
   lines.push(`  judge: ${describeJudge(report.judge)}`);
   lines.push(
     report.mode === "team" ? `  mode: team (the ${keyName} stays on your team's server)` : `  mode: local (this machine needs your own ${keyName})`
@@ -10148,29 +10316,51 @@ import { createServer } from "node:http";
 
 // src/server/handler.ts
 var SERVER_VERSION = "0.1.0";
-var DEFAULT_UPSTREAM = "https://api.typesafe.ai/v1/systemone";
-var DEFAULT_MODEL2 = "jev-latest";
+var WORKERS_AI_ACCOUNTS2 = "https://api.cloudflare.com/client/v4/accounts";
+var CLEF_MODELS2 = ["clef", "clef-flash"];
 var OPENAI_UPSTREAM = "https://api.openai.com/v1/responses";
 var MAX_BODY_BYTES = 1e6;
 var UPSTREAM_TIMEOUT_MS = 3e4;
+var MAX_QUESTIONS2 = 64;
 var OPENAI_UPSTREAM_TIMEOUT_MS = 6e4;
 var MAX_UPSTREAM_IN_FLIGHT = 12;
-var inFlight = { jev: 0, openai: 0 };
-var REQUIRED_ENV = ["TYPESAFE_API_KEY", "STOP_RULES_TOKEN"];
+var inFlight = { clef: 0, openai: 0 };
+var REQUIRED_ENV = [
+  "STOP_RULES_CLOUDFLARE_ACCOUNT_ID",
+  "STOP_RULES_CLOUDFLARE_API_TOKEN",
+  "STOP_RULES_TOKEN"
+];
 var OPENAI_REQUIRED_ENV = ["OPENAI_API_KEY", "STOP_RULES_TOKEN"];
-var SECRET_ENV = ["TYPESAFE_API_KEY", "OPENAI_API_KEY", "STOP_RULES_TOKEN"];
+var SECRET_ENV = ["STOP_RULES_CLOUDFLARE_API_TOKEN", "OPENAI_API_KEY", "STOP_RULES_TOKEN"];
 function value(env, name2) {
   const raw = env[name2];
   return typeof raw === "string" ? raw.trim() : "";
 }
 function missingFor(env, judge) {
-  return (judge === "jev" ? REQUIRED_ENV : OPENAI_REQUIRED_ENV).filter(
+  return (judge === "clef" ? REQUIRED_ENV : OPENAI_REQUIRED_ENV).filter(
     (name2) => value(env, name2).length === 0
   );
 }
 function missingEnv(env) {
   if (missingFor(env, "openai").length === 0) return [];
-  return missingFor(env, "jev");
+  return missingFor(env, "clef");
+}
+function pinnedModel(env) {
+  const pinned = value(env, "STOP_RULES_CLEF_MODEL");
+  if (pinned.length === 0) return { ok: true, model: null };
+  if (!CLEF_MODELS2.includes(pinned)) {
+    return { ok: false, reason: `STOP_RULES_CLEF_MODEL must be ${CLEF_MODELS2.join(" or ")}` };
+  }
+  return { ok: true, model: pinned };
+}
+function judgeStatus(env, judge) {
+  const missing = missingFor(env, judge);
+  const problems = [];
+  if (judge === "clef") {
+    const pinned = pinnedModel(env);
+    if (!pinned.ok) problems.push(pinned.reason);
+  }
+  return { ready: missing.length === 0 && problems.length === 0, missing, problems };
 }
 function describe(error) {
   return error instanceof Error ? error.message : String(error);
@@ -10209,11 +10399,15 @@ function bearer(request) {
 }
 function rejectPayload(body2) {
   if (!isObject(body2)) return "the body must be a JSON object";
+  if (typeof body2["model"] !== "string" || !CLEF_MODELS2.includes(body2["model"])) {
+    return `model must be ${CLEF_MODELS2.join(" or ")}`;
+  }
   if (!isObject(body2["state"])) return "state must be a JSON object";
   const questions = body2["questions"];
   if (!isObject(questions)) return "questions must be a JSON object";
   const ids = Object.keys(questions);
   if (ids.length === 0) return "questions must hold at least one question";
+  if (ids.length > MAX_QUESTIONS2) return `questions must hold at most ${MAX_QUESTIONS2} questions`;
   for (const id of ids) {
     const question = questions[id];
     if (!isObject(question)) return `question ${id} must be a JSON object`;
@@ -10250,35 +10444,42 @@ var RESPONSES_FIELDS = [
   "prompt_cache_key"
 ];
 function health(env) {
-  const missing = missingEnv(env);
-  return json(200, {
-    ok: true,
+  const clef2 = judgeStatus(env, "clef");
+  const openai = judgeStatus(env, "openai");
+  const usable = clef2.ready || openai.ready;
+  return json(usable ? 200 : 503, {
+    ok: usable,
     service: "stop-rules",
     version: SERVER_VERSION,
-    configured: missing.length === 0,
-    missing,
-    judges: {
-      jev: missingFor(env, "jev").length === 0,
-      openai: missingFor(env, "openai").length === 0
-    }
+    configured: usable,
+    missing: missingEnv(env),
+    problems: [...clef2.problems, ...openai.problems],
+    judges: { clef: clef2.ready, openai: openai.ready }
   });
 }
-async function forward(env, judge, payload) {
-  const upstream = judge === "jev" ? value(env, "STOP_RULES_JEV_UPSTREAM") || DEFAULT_UPSTREAM : OPENAI_UPSTREAM;
-  const key = value(env, judge === "jev" ? "TYPESAFE_API_KEY" : "OPENAI_API_KEY");
+function upstreamFor(env, judge, model) {
+  if (judge === "openai") return { url: OPENAI_UPSTREAM, key: value(env, "OPENAI_API_KEY") };
+  const account = encodeURIComponent(value(env, "STOP_RULES_CLOUDFLARE_ACCOUNT_ID"));
+  return {
+    url: `${WORKERS_AI_ACCOUNTS2}/${account}/ai/run/@cf/cloudflare/${model}`,
+    key: value(env, "STOP_RULES_CLOUDFLARE_API_TOKEN")
+  };
+}
+async function forward(env, judge, model, payload) {
+  const upstream = upstreamFor(env, judge, model);
   const controller = new AbortController();
   const timer = setTimeout(
     () => {
       controller.abort();
     },
-    judge === "jev" ? UPSTREAM_TIMEOUT_MS : OPENAI_UPSTREAM_TIMEOUT_MS
+    judge === "clef" ? UPSTREAM_TIMEOUT_MS : OPENAI_UPSTREAM_TIMEOUT_MS
   );
   inFlight[judge] += 1;
   try {
-    const response = await fetch(upstream, {
+    const response = await fetch(upstream.url, {
       method: "POST",
       headers: {
-        authorization: `Bearer ${key}`,
+        authorization: `Bearer ${upstream.key}`,
         "content-type": "application/json"
       },
       body: payload,
@@ -10295,7 +10496,7 @@ async function forward(env, judge, payload) {
   } catch (error) {
     return json(502, {
       error: "upstream_unreachable",
-      message: redact(env, `could not reach ${upstream}: ${describe(error)}`)
+      message: redact(env, `could not reach ${upstream.url}: ${describe(error)}`)
     });
   } finally {
     clearTimeout(timer);
@@ -10309,7 +10510,7 @@ async function admit(request, env, judge) {
       ok: false,
       response: json(503, {
         error: "not_configured",
-        message: judge === "jev" ? "this stop-rules server is missing environment variables" : "this stop-rules server is missing environment variables for the openai judge",
+        message: judge === "clef" ? "this stop-rules server is missing environment variables" : "this stop-rules server is missing environment variables for the openai judge",
         missing
       })
     };
@@ -10344,7 +10545,7 @@ async function admit(request, env, judge) {
 }
 function busy(judge) {
   if (inFlight[judge] < MAX_UPSTREAM_IN_FLIGHT) return null;
-  const name2 = judge === "jev" ? "Jev" : "OpenAI";
+  const name2 = judge === "clef" ? "Clef" : "OpenAI";
   return new Response(
     JSON.stringify({
       error: "too_many_requests",
@@ -10367,35 +10568,42 @@ async function responses(request, env) {
     if (asked[field] !== void 0) forwarded[field] = asked[field];
   }
   forwarded["store"] = false;
-  return forward(env, "openai", JSON.stringify(forwarded));
+  return forward(env, "openai", String(asked["model"]), JSON.stringify(forwarded));
 }
-async function systemone(request, env) {
-  const admitted = await admit(request, env, "jev");
+async function clef(request, env) {
+  const pinned = pinnedModel(env);
+  if (!pinned.ok) {
+    return json(503, { error: "not_configured", message: pinned.reason, missing: [] });
+  }
+  const admitted = await admit(request, env, "clef");
   if (!admitted.ok) return admitted.response;
   const body2 = admitted.body;
   const reason = rejectPayload(body2);
   if (reason !== null) return json(400, { error: "invalid_request", message: reason });
-  const full = busy("jev");
-  if (full !== null) return full;
   const asked = body2;
+  if (pinned.model !== null && asked.model !== pinned.model) {
+    return json(400, {
+      error: "invalid_request",
+      message: `this server answers with ${pinned.model} only, and this repository asks for ${asked.model}. Set "judge": {"kind": "clef", "model": "${pinned.model}"} in .stop-rules.json.`
+    });
+  }
+  const full = busy("clef");
+  if (full !== null) return full;
   return forward(
     env,
-    "jev",
-    JSON.stringify({
-      state: asked.state,
-      model: value(env, "STOP_RULES_JEV_MODEL") || DEFAULT_MODEL2,
-      questions: asked.questions
-    })
+    "clef",
+    asked.model,
+    JSON.stringify({ model: asked.model, state: asked.state, questions: asked.questions })
   );
 }
 async function route(request, env) {
   const path24 = new URL(request.url).pathname.replace(/\/+$/, "");
   if (request.method === "GET" && (path24 === "" || path24.endsWith("/health"))) return health(env);
-  if (request.method === "POST" && path24.endsWith("/v1/systemone")) return systemone(request, env);
+  if (request.method === "POST" && path24.endsWith("/v1/clef")) return clef(request, env);
   if (request.method === "POST" && path24.endsWith("/v1/responses")) return responses(request, env);
   return json(404, {
     error: "not_found",
-    message: "stop-rules serves GET /health, POST /v1/systemone and POST /v1/responses"
+    message: "stop-rules serves GET /health, POST /v1/clef and POST /v1/responses"
   });
 }
 async function handle2(request, env) {
@@ -10511,15 +10719,17 @@ function startServer(port, env = process.env) {
 function startupLines(port, env) {
   const lines = [`stop-rules ${SERVER_VERSION} listening on http://${HOST}:${port}`];
   const serverEnv = env;
-  const missing = missingEnv(serverEnv);
-  if (missing.length > 0) {
-    lines.push(`not configured yet: set ${missing.join(" and ")} and restart`);
+  const clef2 = judgeStatus(serverEnv, "clef");
+  const openai = judgeStatus(serverEnv, "openai");
+  const fixes = (status) => [
+    ...status.missing.length > 0 ? [`set ${status.missing.join(" and ")}`] : [],
+    ...status.problems
+  ];
+  if (!clef2.ready && !openai.ready) {
+    lines.push(`not configured yet: ${fixes(clef2).join("; ")}, then restart`);
   }
-  const judge = (name2, route2) => {
-    const needs = missingFor(serverEnv, route2);
-    return needs.length === 0 ? `${name2} ready` : `${name2} needs ${needs.join(" and ")}`;
-  };
-  lines.push(`judges: ${judge("jev", "jev")}, ${judge("openai", "openai")}`);
+  const judge = (name2, status) => status.ready ? `${name2} ready` : `${name2} not ready (${fixes(status).join("; ")})`;
+  lines.push(`judges: ${judge("clef", clef2)}, ${judge("openai", openai)}`);
   return lines;
 }
 async function serveMain(port) {
@@ -10545,7 +10755,10 @@ Usage:
   stop-rules init [options]            vendor the checker and wire it into your agents
   stop-rules team <endpoint>           point this repo at your team's stop-rules server
   stop-rules login --token-stdin       store the team token, read from stdin
-  stop-rules login --jev-key-stdin     store your own Jev key, read from stdin
+  stop-rules login --cloudflare-token-stdin --cloudflare-account <id>
+                                       store your own Cloudflare API token for Clef, read
+                                       from stdin, and the account id it belongs to; either
+                                       one alone stores just that one
   stop-rules login --openai-key-stdin  store your own OpenAI key, read from stdin
   stop-rules login --check             check the endpoint and one real call to the judge
   stop-rules serve [--port n]          run the team server (it holds the judges' keys)
@@ -10560,9 +10773,10 @@ Options:
   --cut <mode>         hunks or chunks (no parser), functions (tree-sitter) (default ${DEFAULT_CUT})
   --threshold <0..1>   score at or above which a rule counts as violated (default ${DEFAULT_THRESHOLD})
   --max-calls <n>      hard ceiling on requests to the judge in one run (default ${DEFAULT_MAX_CALLS},
-                       ${DEFAULT_MAX_CALLS_OPENAI} for the openai judge's scores form, one piece per call)
-  --judge <kind>       jev or openai: which service scores the pieces (default jev)
-  --model <name>       openai judge only: the model to ask (default ${DEFAULT_OPENAI_MODEL})
+                       one piece per call, ${DEFAULT_MAX_CALLS_REVIEW} for the openai judge's review form)
+  --judge <kind>       clef or openai: which service scores the pieces (default clef)
+  --model <name>       the model to ask: ${CLEF_MODELS.join(" or ")} for clef (default ${DEFAULT_CLEF_MODEL}),
+                       any model name for openai (default ${DEFAULT_OPENAI_MODEL})
   --effort <level>     openai judge only: ${EFFORTS.join(", ")} (default ${DEFAULT_EFFORT})
   --base <rev>         check and score modes: diff this revision against the working tree
   --diff <path>        score mode only: score a unified diff file instead of the working tree
@@ -10578,7 +10792,7 @@ Agents: ${agentNames().join(", ")}
 
 Settings: ${SETTINGS_FILE} in the repository root holds endpoint, cut, threshold, maxCalls
 and judge. It is committed and holds no secret. A flag above beats the file. The judge is
-{"kind": "jev"}, the default, or
+{"kind": "clef", "model": "${DEFAULT_CLEF_MODEL}"}, the default, where model is ${CLEF_MODELS.join(" or ")}, or
   {"kind": "openai", "form": "review", "model": "${DEFAULT_OPENAI_MODEL}", "effort": "${DEFAULT_EFFORT}", "inFlight": ${DEFAULT_IN_FLIGHT}}
 where form is review (one call per change, each finding quotes its line, the default) or
 scores (one call per piece, a probability per rule), and inFlight, 1 to ${MAX_IN_FLIGHT}, is how many
@@ -10588,19 +10802,21 @@ docs/TUNING.md.
 Environment, client:
   STOP_RULES_ENDPOINT      your team's stop-rules server, beats .stop-rules.json
   STOP_RULES_TOKEN         the team token, beats the stored token file
-  TYPESAFE_API_KEY         your own Jev API key, used when there is no team endpoint
-  TYPESAFE_API_KEY_FILE    a file holding that key, used when the variable above is unset
+  CLOUDFLARE_ACCOUNT_ID    the Cloudflare account Clef runs on, used when there is no team
+                           endpoint
+  CLOUDFLARE_API_TOKEN     an API token for that account with the Workers AI permission
+  CLOUDFLARE_API_TOKEN_FILE  a file holding that token, used when the variable above is unset
   OPENAI_API_KEY           your own OpenAI API key, used when the judge is openai and there
                            is no team endpoint
   OPENAI_API_KEY_FILE      a file holding that key, used when the variable above is unset
-  STOP_RULES_JEV_ENDPOINT  override the Jev endpoint in local mode
-  STOP_RULES_JEV_MODEL     override the Jev model
 
 Environment, server (stop-rules serve and every cloud deploy):
-  TYPESAFE_API_KEY         the Jev key the server holds on the team's behalf
+  STOP_RULES_CLOUDFLARE_ACCOUNT_ID  the Cloudflare account the server runs Clef on
+  STOP_RULES_CLOUDFLARE_API_TOKEN   an API token for it with the Workers AI permission
+  STOP_RULES_CLEF_MODEL    clef or clef-flash: pins the one Clef model the server answers
+                           with; unset, each repo's own setting is used
   OPENAI_API_KEY           the OpenAI key the server holds, needed only for the openai judge
   STOP_RULES_TOKEN         the token every developer's hook sends
-  STOP_RULES_JEV_UPSTREAM  override where the server forwards questions
   PORT                     port to listen on
 
 Exit codes: 0 clean, 2 violations, 1 could not run. Some agents need a different code to
@@ -10615,7 +10831,7 @@ function parseArgs(argv) {
     showContext: false,
     agent: DEFAULT_AGENT,
     tokenStdin: false,
-    jevKeyStdin: false,
+    cloudflareTokenStdin: false,
     openAiKeyStdin: false,
     check: false,
     reset: false,
@@ -10649,8 +10865,12 @@ function parseArgs(argv) {
       case "--token-stdin":
         parsed.tokenStdin = true;
         break;
-      case "--jev-key-stdin":
-        parsed.jevKeyStdin = true;
+      case "--cloudflare-token-stdin":
+        parsed.cloudflareTokenStdin = true;
+        break;
+      case "--cloudflare-account":
+        i2 += 1;
+        parsed.cloudflareAccount = take(i2, "--cloudflare-account");
         break;
       case "--openai-key-stdin":
         parsed.openAiKeyStdin = true;
@@ -10658,7 +10878,7 @@ function parseArgs(argv) {
       case "--judge": {
         i2 += 1;
         const value2 = take(i2, "--judge");
-        if (value2 !== "jev" && value2 !== "openai") throw new UsageError("--judge must be jev or openai");
+        if (value2 !== "clef" && value2 !== "openai") throw new UsageError("--judge must be clef or openai");
         parsed.judge = value2;
         break;
       }
@@ -10956,22 +11176,27 @@ async function runLoginCommand(args2) {
     const root = resolved.ok ? resolved.repo.root : process.cwd();
     return writeResult(await loginCheck(root, process.env, judgeArgs(args2)));
   }
-  const asked = [args2.tokenStdin, args2.jevKeyStdin, args2.openAiKeyStdin].filter(Boolean).length;
-  if (asked !== 1) {
+  const fromStdin = [args2.tokenStdin, args2.cloudflareTokenStdin, args2.openAiKeyStdin].filter(Boolean).length;
+  const account = args2.cloudflareAccount;
+  const strayAccount = account !== void 0 && (args2.tokenStdin || args2.openAiKeyStdin);
+  if (fromStdin > 1 || strayAccount || fromStdin === 0 && account === void 0) {
     process.stderr.write(
       [
-        "stop-rules: login needs one of --token-stdin, --jev-key-stdin, --openai-key-stdin or --check.",
+        "stop-rules: login needs one of --token-stdin, --cloudflare-token-stdin (with or without --cloudflare-account), --cloudflare-account, --openai-key-stdin or --check.",
         '  printf %s "$TOKEN" | stop-rules login --token-stdin',
-        '  printf %s "$JEV_KEY" | stop-rules login --jev-key-stdin',
+        '  printf %s "$CLOUDFLARE_API_TOKEN" | stop-rules login --cloudflare-token-stdin --cloudflare-account <account id>',
         '  printf %s "$OPENAI_KEY" | stop-rules login --openai-key-stdin',
         "  stop-rules login --check"
       ].join("\n") + "\n"
     );
     return 1;
   }
-  const secret = await readStdin();
-  const target = args2.tokenStdin ? "token" : args2.jevKeyStdin ? "jev-key" : "openai-key";
-  return writeResult(await login(process.env, target, secret));
+  const entries = account === void 0 ? [] : [{ target: "cloudflare-account", secret: account }];
+  if (fromStdin > 0) {
+    const target = args2.tokenStdin ? "token" : args2.cloudflareTokenStdin ? "cloudflare-token" : "openai-key";
+    entries.push({ target, secret: await readStdin() });
+  }
+  return writeResult(await login(process.env, entries));
 }
 async function main() {
   let args2;

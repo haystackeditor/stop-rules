@@ -14,24 +14,25 @@ Every key is optional.
   "endpoint": "https://stop-rules.your-team.example.com",
   "cut": "hunks",
   "threshold": 0.6,
-  "maxCalls": 60,
-  "judge": {"kind": "jev"}
+  "maxCalls": 240,
+  "judge": {"kind": "clef", "model": "clef"}
 }
 ```
 
 | Knob | File key | Flag | Default |
 |---|---|---|---|
-| Where questions go | `endpoint` | `--team <url>` on `init` | your own key |
+| Where questions go | `endpoint` | `--team <url>` on `init` | your own Cloudflare account |
 | How a change is cut into pieces | `cut` | `--cut hunks\|functions\|chunks` | `hunks` |
 | The bar a score must reach | `threshold` | `--threshold <0..1>` | `0.6` |
-| Requests to the judge in one run | `maxCalls` | `--max-calls <n>` | `60`, and `240` for the OpenAI scores form |
-| Which service scores the pieces | `judge.kind` | `--judge jev\|openai` | `jev` |
+| Requests to the judge in one run | `maxCalls` | `--max-calls <n>` | `240`, and `60` for the OpenAI review form |
+| Which service scores the pieces | `judge.kind` | `--judge clef\|openai` | `clef` |
+| The Clef model | `judge.model` | `--model clef\|clef-flash` | `clef` |
 | How the OpenAI judge is asked | `judge.form` | none | `review` |
 | The OpenAI model | `judge.model` | `--model <name>` | `gpt-6-luna` |
 | How long the OpenAI model reasons | `judge.effort` | `--effort none\|low\|medium\|high` | `low` |
 | OpenAI calls one run keeps open | `judge.inFlight` | none | `4` |
 
-The five judge knobs are in [section 8](#8-the-judge-judge).
+The judge knobs are in [section 8](#8-the-judge-judge).
 
 Every default in that table was measured, and none of them is a recommendation. The two this
 file spends the most words on are the cut, which is `hunks` because it parses nothing and
@@ -55,13 +56,21 @@ you are looking at your code and not at ours.
 `stop-rules score --diff some.diff` scores a diff file instead of the working tree. A diff
 file has no file content, so it can never be cut into functions: in the default mode it is cut
 into one piece per hunk, which is what was asked for anyway, and if you ask for `functions` the
-output says it used hunks instead and why. It also has no lines around a change to send Jev, so
-that is the one mode where Jev sees the diff alone, and the output says that too.
+output says it used hunks instead and why. It also has no lines around a change to send the
+judge, so that is the one mode where the judge sees the diff alone, and the output says that too.
 
-`stop-rules score --show-context` prints, under each piece, exactly what Jev was sent for it:
-the widened diff, or the diff and the whole function. Use it whenever a score surprises you.
+`stop-rules score --show-context` prints, under each piece, exactly what the judge was sent for
+it: the widened diff, or the diff and the whole function. Use it whenever a score surprises you.
 
 ## About the numbers in this file
+
+The judge is Clef, Cloudflare's decision model on Workers AI, since 2 October 2026. Every
+measurement in this file dated before that was made with Jev, the scoring service Clef
+replaced, and says so where the judge matters; they are kept because they are what decided the
+cut, the bar, the 25 lines and the rule wording, and because what a piece can and cannot show
+does not depend on the judge. Clef's own measurement, against Jev on the same pieces, is in
+[section 8](#8-the-judge-judge). Re-run `stop-rules score` on your own code with Clef before you
+lean on any number below.
 
 Two kinds of number appear below.
 
@@ -71,11 +80,11 @@ Two kinds of number appear below.
   Your code will give you different numbers.
 - **Example scores** come from the small examples in
   [`examples/tuning/`](../examples/tuning), which we wrote for this file. Every one of them
-  is a real answer from the live service. The scores below were last run on 20 September 2026,
-  when Jev started seeing the code around each piece; asked on that day, the service reported
-  its version as `jev-1.13.0`, the same version as the runs the day before, so the movement
-  between the two days is the new claim wording plus the ordinary movement between runs, and not
-  a new model. The tool asks for `jev-latest`.
+  is a real answer from the live service of the day, which was Jev. The scores below were last
+  run on 20 September 2026, when Jev started seeing the code around each piece; asked on that
+  day, the service reported its version as `jev-1.13.0`, the same version as the runs the day
+  before, so the movement between the two days is the new claim wording plus the ordinary
+  movement between runs, and not a new model. They have not been re-run with Clef.
 
 Two things about the numbers themselves. Scores drift between model versions, and they also
 move between runs on one version. We asked the five examples below seven times, with a cold
@@ -84,19 +93,23 @@ borderline one moved from 0.45 to 0.80. So treat every number here as the shape 
 not as a constant, re-run `score` on your own code, and do not set a bar that sits right next
 to a score you care about.
 
-## What Jev sees
+## What the judge sees
 
 This is not a knob, and it is the thing that changed most recently, so it comes before the
 knobs. Every score below was produced with it, and the last time a number in this file was
 measured without it, the text says so.
 
-Jev is sent, for each piece: the path of the file, the piece's diff with **25 unchanged lines
+Clef is sent, for each piece: the path of the file, the piece's diff with **25 unchanged lines
 above the change and 25 below**, read out of the snapshot, and the rules. In `functions` mode a
 piece that is one function carries **that whole function after the change** instead of the wide
 diff, and a piece of statements and declarations carries the wide diff, clamped so it never
 reaches into a line another piece of that file owns. None of this changes what the agent is
 handed: the report prints the piece with the tool's own 8 lines of context, and the first line of
-the report says what Jev saw, once.
+the report says what the judge saw, once.
+
+Clef reads only the first 2,048 tokens of the piece it is sent, so the wide form rides along only
+when the piece and its lines come to at most 5,120 bytes; see "When a piece is too big to widen"
+below, and section 8 for what happens to a piece Clef cannot read whole.
 
 The clamp is only in `functions` mode, and only for the pieces that are not functions. In
 `hunks` and `chunks` a piece is a whole hunk or a group of them, which is what the table below
@@ -106,14 +119,14 @@ import lines in a 19 line file scored 0.84 on the swallowed errors rule, because
 reached into a neighbouring function's empty `catch`. Section 2 has the whole example.
 
 ```bash
-stop-rules score --show-context     # prints exactly what Jev saw, per piece
+stop-rules score --show-context     # prints exactly what the judge saw, per piece
 ```
 
 ### The measurement behind it
 
-On our measurement harness, on 20 September 2026, over the same 240 real agent written changes, blind
-labelled with an adjudicator on every disagreement, which hold 31 real breaks, at the default
-bar of 0.5, cut one hunk per piece:
+On our measurement harness, on 20 September 2026, with Jev, over the same 240 real agent written
+changes, blind labelled with an adjudicator on every disagreement, which hold 31 real breaks, at
+the then default bar of 0.5, cut one hunk per piece:
 
 | What Jev was shown | Real breaks caught, of 31 | Plainly false flags | Flags not yet ruled on |
 |---|---|---|---|
@@ -127,9 +140,10 @@ real breaks against 1 for the piece alone, and it found a missing doc comment th
 missed. Whole functions caught the same 2 of 3, and needed the parser to do it.
 
 What it costs: 7 of 1,358 clean pairs were newly flagged, which is the price of showing code the
-rule is not about. Input tokens went from about $0.11 to $0.21 per 1,000 changes at TypeSafe's
+rule is not about. Jev's input tokens went from about $0.11 to $0.21 per 1,000 changes at its
 published price. The wide form ships because it needs no parser, it works in every language, and
-it argues with you less.
+it argues with you less. It has not been measured with Clef: Clef's own measurement sent each
+piece's diff alone.
 
 ### What was tried and not built
 
@@ -141,27 +155,33 @@ it argues with you less.
 - **Widening only where that question asked for it.** 2 to 4 times the calls for no gain over
   widening every piece. Do not rebuild either of these two.
 
-Two smaller measurements from the same work. Packing four pieces per call rather than one moved
-answers by about 0.02, so the packing stays. The claim sentence that names the code around the
-piece moved answers by 0.011 against the older one that named only the diff, and it is the
-wording the table above was measured with, so it is the wording that ships.
+Two smaller measurements from the same work, with Jev. Packing four pieces per call rather than
+one moved answers by about 0.02; Clef was measured one piece per call and asks that way, so
+nothing is packed now. The claim sentence that names the code around the piece moved answers by
+0.011 against the older one that named only the diff, and it is the wording the table above was
+measured with, so it is the wording that ships.
 
 ### When a piece is too big to widen
 
-A request is capped at 60,000 bytes. If the wide form of one piece would put a request carrying
-only that piece over the cap, that piece goes to Jev with its diff alone. That is a recorded
-fact, never a quiet retreat: the piece, its lines and the byte count go in `run.log`, the count
-goes in `check --json` under `stats.tooBigToWiden`, and the first line of the report says how
-many pieces it happened to. Measured on 20 September 2026, a change that rolls thirty 900
-character lines into one:
-
-```json
-"tooBigToWiden": [ { "file": "src/rows.ts", "fromLine": 32, "toLine": 48, "bytes": 74830 } ]
-```
+Clef reads only the first 2,048 tokens of a piece. A token of diff was measured at 2.5 to 4.4
+bytes, so a piece of at most 5,120 bytes, as Clef is sent it, is read whole. If the wide form of
+one piece would come to more than that, the piece goes to Clef with its diff alone. On the
+OpenAI judge the cap is the 60,000 byte request instead. That is a recorded fact, never a quiet
+retreat: the piece, its lines and the byte count go in `run.log`, the count goes in
+`check --json` under `stats.tooBigToWiden`, and the first line of the report says how many
+pieces it happened to. Measured on 2 October 2026, a new file of 45 dense lines of numbers,
+which `hunks` cut into two pieces:
 
 ```
-stop-rules: no rule violations in your latest changes. 1 piece was too big to widen, so Jev saw it without the code around it.
+src/dense.ts lines 1-30: too big to widen, a call with the 25 lines around it would be 8745 bytes, over the 5120 bytes of state Clef is sure to read whole, so Clef saw the diff alone
 ```
+
+```
+stop-rules: no rule violations in your latest changes. 2 pieces were too big to widen, so Clef saw them without the code around them.
+```
+
+Those two pieces were still more than Clef reads on their own: section 8 shows what happened
+next.
 
 `score --diff` is the one case with no lines around a change at all, because a diff file has no
 file content to read them from. The output says so on its first line.
@@ -178,8 +198,11 @@ stop-rules check --threshold 0.5
 
 How to pick your own bar, and why there is no single right number: the bar trades catches
 for noise, and where you want to sit on that trade depends on how much your team minds a
-wrong flag against a missed break. Measured on 96 agent sessions across six projects with
-well-worded rules (one piece per call, every flag ruled by a reviewer):
+wrong flag against a missed break. Measured with Jev, the judge before Clef, on 96 agent
+sessions across six projects with well-worded rules (one piece per call, every flag ruled by a
+reviewer). Clef has been measured on the 240 change sample at 0.6 and 0.5 only (section 8: 18
+of 32 with 4 plainly false flags at 0.6, 22 with 8 at 0.5), so these are the numbers the
+default rests on across bars:
 
 | Bar | Real breaks caught, of 62 | Wrong flags | Arguable flags |
 |---|---|---|---|
@@ -228,8 +251,8 @@ The rule is the starter rule about swallowed errors
 stop-rules score --diff examples/tuning/bar.diff --rules examples/tuning/rules-errors.md
 ```
 
-A diff file has no file content, so these five are the one case Jev sees no code around the
-change. Seven runs, cold cache each time, same day, same model version:
+A diff file has no file content, so these five are the one case the judge sees no code around
+the change. Seven runs with Jev, cold cache each time, same day, same model version:
 
 | Example | What it is | Scores seen |
 |---|---|---|
@@ -358,8 +381,8 @@ later run in that repository parses. Nothing changes mode on its own: a reposito
 settings say `functions` and that has no grammar files reports that, run after run, rather than
 quietly falling back to hunks.
 
-All three then go through the same packing: four pieces per request, and a request is also
-bounded at 60,000 bytes.
+All three then go to Clef the same way: one piece per request, and a piece more than Clef reads
+is split before it is answered (section 8).
 
 ### The same change, three ways
 
@@ -367,7 +390,7 @@ bounded at 60,000 bytes.
 middle one swallows an error. The other two are fine.
 
 The runs below are `stop-rules score` on that file in a scratch repository, on 20 September
-2026, when the service reported `jev-1.13.0`.
+2026, with Jev, when the service reported `jev-1.13.0`, four pieces to a request.
 
 The default cut, one hunk, so one piece:
 
@@ -478,7 +501,7 @@ score. The pieces, calls and token rows were re-run on 20 September 2026.
 | Jev requests, 172 changes | 214 | 247 | 172 |
 | Input tokens, 172 changes | 433,421 | 490,231 | 269,307 |
 | Pieces, calls and tokens on `cutting.diff` with one rule, 20 September 2026 | 1 piece, 1 call, 582 in and 23 out | 4 pieces, 1 call, 1,448 in and 80 out | 1 piece, 1 call, 582 in and 23 out |
-| What Jev is shown per piece | the piece plus 25 lines each way | the whole function, or, when the piece is not one, up to 25 lines each way of what no other piece owns | the piece plus 25 lines each way |
+| What the judge is shown per piece | the piece plus 25 lines each way | the whole function, or, when the piece is not one, up to 25 lines each way of what no other piece owns | the piece plus 25 lines each way |
 | Real breaks caught at the default 0.5, of 21 | 14 | 11 | 9 |
 | Disputed flags at 0.5 | 16 | 26 | 6 |
 | Real breaks caught at 0.6, of 21 | 8 | 5 | 5 |
@@ -499,9 +522,9 @@ What you gain by switching, and lose:
 - **`hunks`**, the default, is bad at this: a new file is one giant hunk, so it gets cut blindly
   every 30 added lines with no regard for where a function starts or ends. Two functions that
   sit next to each other share a hunk. A hunk can start in the middle of a function, so the
-  agent is handed a piece of code with no head, even though Jev saw 25 lines around it.
-- **`functions`** buys the agent exactly one function, named, with nothing else in it, and Jev
-  the whole of that function. It costs the grammar files, which are megabytes in the repository,
+  agent is handed a piece of code with no head, even though the judge saw 25 lines around it.
+- **`functions`** buys the agent exactly one function, named, with nothing else in it, and the
+  judge the whole of that function. It costs the grammar files, which are megabytes in the repository,
   and it only knows the ten languages listed above. A file it cannot parse is not checked at
   all, and a language whose grammar is missing is not checked either. Its pieces that are not
   functions, meaning the imports, constants and type declarations, are small, so their window is
@@ -509,7 +532,9 @@ What you gain by switching, and lose:
   purpose: unclamped, the example above turned two import lines into a 0.84.
 - **`chunks`** buys the fewest requests and the fewest tokens. It costs the most dilution: one
   bad line sits in a big diff, which is the quietest setting of the three and the one that
-  misses most at a low bar, and the agent is handed a large diff to search.
+  misses most at a low bar, and the agent is handed a large diff to search. With Clef it also
+  loses most of what it buys: a piece over 9,216 bytes is more than Clef reads and is split in
+  halves before it is asked, and one over 5,120 bytes goes without the lines around it.
 
 The parse behaviours are worth seeing for real. A file with broken syntax and a `.sql` file,
 with `--cut functions`, on 20 September 2026:
@@ -549,10 +574,11 @@ Same repository, same rule, same file. The default mode judged it and `functions
 Rules are not in `.stop-rules.json`. They are in `.stop-rules.md`, one top-level list item
 each, and they are the knob that changes the most. Every rule adds one question per piece.
 
-### Which rules Jev can judge
+### Which rules can be judged
 
 This is the part that decides whether the tool is worth running at all, so it is the part
-with the most honest numbers we have. Two sources, and they are kept apart on purpose.
+with the most honest numbers we have. Two sources, and they are kept apart on purpose. Both
+were measured with Jev, the scoring service Clef replaced.
 
 - **The experiment.** On 19 September 2026, 16 real Claude Code sessions (Sonnet and Haiku)
   worked on one small service that had 8 team specific rules the agent could not see. Its
@@ -759,8 +785,8 @@ That is the opposite of the experiment, and we are not going to pretend the two 
 these four files the folder in the path was enough, even for the pair whose code is identical.
 In the experiment, on real handlers and services, it was not. The difference we can point at
 is what the piece carries: a path with `handlers/` in it and code that obviously belongs to
-one layer is a signal, and a real file whose name says nothing about its layer leaves Jev
-guessing. So this kind of rule is not reliable, it is conditional, and `score` on your own
+one layer is a signal, and a real file whose name says nothing about its layer leaves the
+judge guessing. So this kind of rule is not reliable, it is conditional, and `score` on your own
 code is the only way to find out which side yours falls on. Three runs each, the third on 20 September 2026 under the new claim sentence, one pair of
 examples, one experiment.
 
@@ -773,7 +799,7 @@ time.
 
 #### Does not work: a rule that needs the rest of the file or the codebase
 
-A piece is all Jev is given, so "this option is used nowhere else" or "this duplicates
+A piece is all the judge is given, so "this option is used nowhere else" or "this duplicates
 something in another module" is a guess dressed as a number. The measured version of that is
 already in this file: the "do not add options nothing uses" rule caused 55 of 71 false alarms
 when code was judged piece by piece.
@@ -790,7 +816,7 @@ a bare seed with nothing to copy from (39 breaks in the new-subsystem tasks, 33 
 
 Set your expectations from that. Rules that repeat what your code already demonstrates buy
 little. Rules about the thing your codebase has no example of yet, and rules of the "never
-call X, use Y" kind, are where this is worth a Jev call.
+call X, use Y" kind, are where this is worth a call to the judge.
 
 #### Told once, and quiet is not clean
 
@@ -828,7 +854,7 @@ short one, and on the third run 0.87 against 0.32. The examples inside the rule 
 
 The linter rule scores between 0.57 and 0.66 on a variable that really is unused. ESLint's
 `no-unused-vars` gives you the same answer for nothing, every time, with the line number.
-Paying a Jev question for it buys you a maybe.
+Paying a judge's question for it buys you a maybe.
 
 The codebase rule scores between 0.62 and 0.73 on an option that nothing in the piece uses. Whether
 anything in the repository uses it is a question this piece cannot answer, so a score like
@@ -845,36 +871,44 @@ that is a guess dressed as a number.
 
 ### What rules cost
 
-The same change, [`cutting.diff`](../examples/tuning/cutting.diff), one piece, cold cache:
+The same change, [`cutting.diff`](../examples/tuning/cutting.diff), one piece, cold cache,
+scored as a diff file, with Clef on 2 October 2026 and with Jev before it:
 
-| Rules | Questions | Calls | Input tokens | Output tokens |
-|---|---|---|---|---|
-| [3](../examples/tuning/rules-three.md) | 3 | 1 | 696 | 61 |
-| [12](../examples/tuning/rules-twelve.md) | 12 | 1 | 1,234 | 234 |
+| Rules | Questions | Calls | Clef input tokens | Jev input tokens | Jev output tokens |
+|---|---|---|---|---|---|
+| [3](../examples/tuning/rules-three.md) | 3 | 1 | 709 | 696 | 61 |
+| [12](../examples/tuning/rules-twelve.md) | 12 | 1 | 1,891 | 1,234 | 234 |
 
 Four times the rules is not four times the cost, because the piece is sent once and the rules
-ride along with it. It is about 1.8 times the input tokens here. Five to fifteen rules is the
-range we would stay in, for noise rather than for money.
+ride along with it: 2.7 times the input tokens with Clef, which counts every question in full,
+and 1.8 times with Jev. Clef writes no output tokens. Five to fifteen rules is the range we would
+stay in, for noise rather than for money.
 
 ## 4. Calls per run: `maxCalls`
 
-One run sends at most this many requests to the judge, counted across retries and splits. `60`
-is the default for Jev, which is far more than a normal turn needs: four pieces ride in one
-request, so a change that touches forty hunks is ten requests. The OpenAI judge takes one piece
-per request in its scores form, so there the default is `240`, the same number of pieces; the
-review form puts a whole change in one request and keeps `60`. See section 8.
+One run sends at most this many requests to the judge, counted across retries and splits. `240`
+is the default: Clef takes one piece per request, with every rule as a question, so 240 requests
+cover 240 pieces, which is far more than a normal turn touches. A piece Clef cannot read whole
+costs more, one request for each try and each half, and once per run, when a request comes near
+the 2,048 tokens Clef reads, one more request measures what the questions cost on their own. The
+OpenAI judge's scores form also takes one piece per request and has the same `240`; its review
+form puts a whole change in one request and has `60`. See section 8.
 
 When the budget runs out, the work left over is reported and nothing pretends it was checked.
-Ten new files, one hunk each, in the default mode, with a budget of one request:
+Ten new files, one hunk each, in the default mode, with a budget of one request, on 2 October
+2026 with Clef:
 
 ```bash
 stop-rules check --max-calls 1
 ```
 
 ```
-stop-rules: no rule violations in the 4 pieces that were checked, and 6 not checked, listed below. Jev saw 25 lines around it.
+stop-rules: no rule violations in the 1 piece that was checked, and 9 not checked, listed below. Clef saw 25 lines around it.
 
-Not checked (6):
+Not checked (9):
+  src/step1.ts lines 1-4: call budget exhausted
+  src/step2.ts lines 1-4: call budget exhausted
+  src/step3.ts lines 1-4: call budget exhausted
   src/step4.ts lines 1-4: call budget exhausted
   src/step5.ts lines 1-4: call budget exhausted
   src/step6.ts lines 1-4: call budget exhausted
@@ -883,12 +917,12 @@ Not checked (6):
   src/step9.ts lines 1-4: call budget exhausted
 ```
 
-The one request covered four pieces. The next run picks the rest up, and the four already
-answered cost nothing because they are in the cache:
+The one request covered one piece. The next run picks the rest up, and the one already answered
+costs nothing because it is in the cache:
 
 ```json
-{"mode":"check","cut":"hunks","pieces":10,"checked":4,"calls":1,"cacheHits":0,"notChecked":6,"widened":10,"withFunction":0,"tooBigToWiden":0}
-{"mode":"check","cut":"hunks","pieces":10,"checked":10,"calls":2,"cacheHits":4,"notChecked":0,"widened":10,"withFunction":0,"tooBigToWiden":0}
+{"mode":"check","cut":"hunks","pieces":10,"checked":1,"calls":1,"cacheHits":0,"notChecked":9,"widened":10,"withFunction":0,"tooBigToWiden":0}
+{"mode":"check","cut":"hunks","pieces":10,"checked":10,"calls":9,"cacheHits":1,"notChecked":0,"widened":10,"withFunction":0,"tooBigToWiden":0}
 ```
 
 `checked` is how many pieces got an answer. When it is 0 and `files` is not, nothing in the
@@ -899,19 +933,32 @@ checked again on the next turn until it is finished.
 
 ## 5. What it costs in money
 
-TypeSafe's launch post for System One and Jev says, word for word:
+Clef runs on your own Cloudflare account and Cloudflare bills it, at $0.24 per million input
+tokens for `clef` and $0.09 for `clef-flash` (2 October 2026). Clef writes no output tokens.
+Prices change and are Cloudflare's to set, so check the Workers AI pricing page rather than this
+paragraph. Nothing in the tool knows a price: `check --json` and `run.log` give you input tokens,
+and you do the sum. A Clef request counts every question in full, about 76 tokens each plus the
+rule's own text, on top of the piece, so its token count grows with the number of rules faster
+than the old judge's did.
+
+Measured with Clef on 2 October 2026: a 12 line hunk with its 25 lines around it and two rules
+was 528 input tokens, $0.00013. Ten new 4 line files, one hunk each, with the one rule of
+[`rules-errors.md`](../examples/tuning/rules-errors.md), were 3,213 input tokens over 10
+requests, $0.00077 for the whole change, so 77 cents per 1,000 changes of that size. The
+sample-wide totals below were measured with Jev and its tokenizer; they have not been re-run
+with Clef.
+
+Before Clef, TypeSafe's launch post for System One and Jev said, word for word:
 
 > Input tokens: $0.042 / MTok ($42 per billion tokens).
 
 > Output tokens: FREE (too cheap to meter).
 
 That is <https://typesafe.ai/blog/introducing-system-one-models-and-jev>, posted 15 September
-2026 and read on 19 September 2026. Prices change, so check the post rather than trusting
-this paragraph, and note that the price is theirs to set, not ours. Nothing in the tool
-knows a price: `check --json` and `run.log` give you input tokens, and you do the sum.
+2026 and read on 19 September 2026. It is kept here as the record behind the numbers below.
 
-At $0.042 per million input tokens, and output free, from our own measured runs. The first four
-rows were re-run on 20 September 2026, with the lines around each piece in them. The three
+At Jev's $0.042 per million input tokens, and output free, from our own measured runs. The first
+four rows were re-run on 20 September 2026, with the lines around each piece in them. The three
 sample rows were measured before that change, with the piece alone:
 
 | What was measured | Input tokens | Cost |
@@ -932,8 +979,9 @@ to 12 raised the input tokens by about 80 percent on our one piece test, and a s
 the same code is free because the answers are cached.
 
 Latency, from the same runs: the median change took 192 ms of Jev time on the default cut and
-203 ms cut into functions. The check itself adds the git snapshot, and in `functions` mode the
-parse, so a blocking hook feels like about a second either way.
+203 ms cut into functions. A Clef call took a median 578 ms one piece at a time in its own
+measurement (section 8), and a run keeps four in flight. The check itself adds the git snapshot,
+and in `functions` mode the parse, so a blocking hook feels like about a second either way.
 
 The OpenAI judge's cost and time are in section 8.
 
@@ -947,15 +995,17 @@ about a second.
 In `claude -p` (print mode) a background hook is killed when the process exits. Drop
 `asyncRewake` from the settings entry there and take the blocking form.
 
-**One person**: your Jev key lives in `~/.config/stop-rules/jev-key`, mode 0600. Nothing in
-the repository holds it.
+**One person**: your Cloudflare API token lives in `~/.config/stop-rules/cloudflare-token` and
+the account id beside it in `cloudflare-account`, mode 0600, or both come from
+`CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID`. Nothing in the repository holds them.
 
-**A team**: one person deploys the server, which holds the key, and everyone else stores a
+**A team**: one person deploys the server, which holds the token, and everyone else stores a
 team token. Set it with `endpoint` in `.stop-rules.json`, which is committed.
 
-Jev's rate limit is per account, so the whole team shares it, and so does every tool on your
-machine. About 16 requests in flight per account is fine. The tool's own caps are 4 in flight
-per run, 8 per machine, and 12 per server instance. The OpenAI judge has the same caps, counted
+Workers AI's rate limit is per Cloudflare account, so the whole team shares it, and so does
+every tool on your machine. Its limit for Clef has not been measured. The tool's own caps are 4
+in flight per run, 8 per machine, and 12 per server instance, set when the old judge's limit
+was measured at about 16 in flight per account, and a 429 halves a run's own cap. The OpenAI judge has the same caps, counted
 separately: `inFlight` per run, 8 per machine, 12 per server instance. Those were not measured
 against OpenAI's own limits, which depend on the account's usage tier. On serverless platforms the server cap is
 per instance, so a busy team on a platform that starts many instances can still push the
@@ -966,16 +1016,23 @@ account over its limit.
 
 These are not knobs. Each one was measured, and none of them is worth a setting.
 
-- **Four pieces per request.** Packing four moved scores by 0.03 on average against asking
-  one at a time. Eight per request was slightly worse at high bars.
+- **One piece per Clef request, at most 64 rules to a request.** Clef was measured that way,
+  and the 2,048 tokens of a piece it reads would otherwise be shared. 64 is the most questions
+  Workers AI takes in one request; a 65th is refused. (With Jev, packing four pieces moved
+  scores by 0.03 on average against asking one at a time, and eight was slightly worse at high
+  bars.)
+- **5,120 and 9,216 bytes.** Clef reads 2,048 tokens of a piece, and a token of diff was
+  measured at 2.5 to 4.4 bytes. Up to 5,120 bytes it is all but sure to read a piece whole, so
+  the lines around a piece ride along only up to there; over 9,216 bytes it cannot, so the
+  piece is split before it is sent. In between, the token count Workers AI reports decides.
 - **40 added lines per piece for code that is not a function.** Single statements are too
   small to judge alone: 1,439 one-unit pieces became 441 useful ones when neighbours were
   merged up to 40 lines. A function is always its own piece, whatever its size.
 - **30 added lines and 3 trailing context lines per piece in hunks mode.** That is the
   splitting the sample was measured with.
-- **25 unchanged lines around each change, for Jev.** The width that was measured. Narrower was
+- **25 unchanged lines around each change.** The width that was measured, with Jev. Narrower was
   not tried; wider was not tried either, because the whole file was, and it did not apply often
-  enough. See "What Jev sees" above for the table and for the two things that did not work.
+  enough. See "What the judge sees" above for the table and for the two things that did not work.
 - **Three rounds.** After three turns of the same findings the tool stops waking the agent
   and leaves them for you. An agent that has not fixed something in three tries is not going
   to.
@@ -987,8 +1044,10 @@ These are not knobs. Each one was measured, and none of them is worth a setting.
 
 ## 8. The judge: `judge`
 
-Which service scores the pieces. `{"kind": "jev"}` is the default and needs nothing set. The
-other is OpenAI's `gpt-6-luna` through the Responses API:
+Which service scores the pieces. Clef, Cloudflare's decision model on Workers AI, is the
+default: `{"kind": "clef", "model": "clef"}`, or no `judge` key at all. `"model": "clef-flash"`
+is the 9B model, cheaper and poorly calibrated for this question. The other judge is OpenAI's
+`gpt-6-luna` through the Responses API:
 
 ```json
 {
@@ -997,10 +1056,35 @@ other is OpenAI's `gpt-6-luna` through the Responses API:
 ```
 
 `init --judge openai` writes that, without `inFlight`. `--judge`, `--model` and `--effort` beat
-the file for one run, the same as every other flag. `--model` or `--effort` with the Jev judge is
-an error, not a flag that is quietly dropped. `form` is set in the file only.
+the file for one run, the same as every other flag. `--effort` with Clef, or a `--model` that is
+not `clef` or `clef-flash`, is an error, not a flag that is quietly dropped. `form` is set in the
+file only. `{"kind": "jev"}`, the judge before Clef, is an error now: there is no alias.
 
-How each is asked. Jev gets its claim sentence per (piece, rule), up to four pieces per call.
+How each is asked. Clef gets its claim sentence per (piece, rule), one piece per call, every rule
+of the piece a `noul` question in that call, at most 64 to a call. Workers AI answers each with a
+probability, inside `{ "result": { "answers": ..., "usage": { "input_tokens": ... } } }`.
+
+Clef reads only the first 2,048 tokens of the piece, the `state` of the request, drops the rest
+without saying so, and still answers 200. Measured on 2 October 2026: `usage.input_tokens` grows
+one for one with the piece up to 2,048 of its tokens and never past them, whatever the size, while
+the questions are counted in full on top; on 1 October a fact placed after 16,000 characters of
+filler was never seen. The catalog's 64k context is not what the piece gets. So no answer on a
+cut piece is used. A piece over 9,216 bytes is split in two before it is sent. After a call whose
+whole count reaches 2,048, the tool measures what the same questions cost about an empty piece,
+once per run, and takes it off; if what is left is 2,048, the answer is thrown away and the piece
+is split in two and asked again, down to one line. A piece that is still too big then is reported
+as not checked, "larger than Clef reads", never as clean. On 2 October 2026 a new file of 45
+dense lines of numbers, cut into two pieces of 30 and 15 lines, was asked 11 times: the two whole
+pieces, both cut, one measurement of the questions, two halves still cut, and six pieces of 7 or
+8 lines that Clef read whole. The run log says it each time:
+
+```
+Clef read only the first 2048 tokens of the state, asking again in two halves
+```
+
+Halving costs requests, and a break that spans the two halves can be missed. A piece that has to
+be halved is asked again on every run that sees it whole, because the cache is keyed on the
+piece, not on its halves.
 
 gpt-6-luna in the **review form**, the default, gets one call per change: a fixed system
 instruction to review the change against the team's rules and report every rule the added lines
@@ -1028,7 +1112,29 @@ the hook baseline holds. It is never read as a zero.
 
 ### What each judge measured
 
-Measured on 22 September 2026 on the 240 real agent written changes (804 pieces, the six starter
+**Clef against Jev.** Measured on 2 October 2026 on the same 240 real agent written changes, as
+the 804 pieces of the default cut, under the six starter rules, with 32 real breaks: one piece
+per call, each piece's diff on its own with no lines around it, and the claim sentence as it was
+before the code around each piece was named in it, at the default bar of 0.6 and at 0.5. The 0.5
+flags are counted against the first reviewer's rulings, under which Jev's run had 10 plainly
+false flags and an AUC of 0.977; the second reviewer's later rulings, in the table below,
+settled Jev at 20 and 0.978 at 0.5, and Clef's flags have not had that second look.
+
+| Judge | Caught of 32 at 0.6 | Plainly false flags at 0.6 | Caught of 32 at 0.5 | Plainly false flags at 0.5 | AUC | Median time per call | Price per million input tokens |
+|---|---|---|---|---|---|---|---|
+| Clef (`clef`, 27B) | 18 | 4 | 22 | 8 | 0.976 | 578 ms | $0.24 |
+| Jev, the judge it replaced | 11 | 1 | 20 | 10 | 0.977 | | |
+| Clef Flash (`clef-flash`, 9B) | | | 2 | | | | $0.09 |
+
+At the default bar Clef catches 7 more of the 32 than Jev did, for 3 more plainly false flags.
+`clef-flash` ranks too poorly at 0.5 to be worth its lower price for this question, which is why
+`clef` is the default. What ships also sends the 25 lines around each piece and names them in
+the claim, which was measured with Jev (the table at the top of this file) and not yet with Clef.
+The default bar stays 0.6: it was set on the six-project measurement in section 1, made with
+Jev, and on this sample it is where Clef keeps 18 of its 22 catches at half the plainly false
+flags.
+
+**The OpenAI judge against Jev.** Measured on 22 September 2026 on the 240 real agent written changes (804 pieces, the six starter
 rules, 32 real breaks after the latest adjudication; the 20 September tables above say 31, from
 before 16 more disputes were ruled on). At a bar of 0.5, the bar the comparison was run at, not
 the default 0.6.
@@ -1133,7 +1239,7 @@ diff in the scores form at effort low, cache deleted first, one run each:
 
 Past 8 nothing changes, because every stop-rules process on a machine shares 8 slots per judge,
 which is why 8 is the most the file accepts. The same diff on Jev took 1.05 s in 13 calls. On a
-429 the ceiling halves and climbs back one step after four answers in a row, the same as Jev.
+429 the ceiling halves and climbs back one step after four answers in a row, the same as Clef.
 
 ### `form`
 
@@ -1149,10 +1255,10 @@ those four, and a bar between two of them moves nothing until it crosses one.
 
 ### `maxCalls` on the OpenAI judge
 
-In the scores form the default is 240 instead of 60. Jev answers four pieces per call and the
-scores form one, so 240 calls cover the same 240 pieces either way, and switching judge never
-leaves a change half checked. The review form sends a whole change in one call, or a few for a
-change over 60,000 bytes, and keeps 60. A `maxCalls` you set yourself applies to either judge as it is.
+In the scores form the default is 240, the same as Clef's: both answer one piece per call, so
+240 calls cover 240 pieces either way, and switching judge never leaves a change half checked.
+The review form sends a whole change in one call, or a few for a change over 60,000 bytes, and
+has 60. A `maxCalls` you set yourself applies to either judge as it is.
 
 ### Money
 

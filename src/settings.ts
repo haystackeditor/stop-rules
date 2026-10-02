@@ -5,16 +5,20 @@
  *
  * Keys: `endpoint` (the team server), `cut` (hunks, functions or chunks), `threshold` (0 to 1),
  * `maxCalls` (whole number of requests to the judge per run) and `judge` (which service scores
- * the pieces: `{"kind": "jev"}`, the default, or `{"kind": "openai", "form": "review",
- * "model": "gpt-6-luna", "effort": "low", "inFlight": 4}`, where form is review or scores). Anything else in the file, a value of the wrong type, and a
- * value out of range are all errors that name the key.
+ * the pieces: `{"kind": "clef", "model": "clef"}`, the default, where model is clef or
+ * clef-flash, or `{"kind": "openai", "form": "review", "model": "gpt-6-luna", "effort": "low",
+ * "inFlight": 4}`, where form is review or scores). Anything else in the file, a value of the
+ * wrong type, and a value out of range are all errors that name the key.
  */
 
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
 import {
+  CLEF_MODELS,
+  DEFAULT_CLEF_MODEL,
   DEFAULT_FORM,
   FORMS,
+  type ClefModel,
   type Form,
   DEFAULT_EFFORT,
   DEFAULT_IN_FLIGHT,
@@ -40,11 +44,11 @@ export const SETTINGS_FILE = ".stop-rules.json";
 export const DEFAULT_CUT: CutMode = "hunks";
 
 /**
- * Which service scores the pieces. Jev is the default. The OpenAI judge asks one model through
- * the Responses API, one piece per call.
+ * Which service scores the pieces. Clef on Workers AI is the default. The OpenAI judge asks one
+ * model through the Responses API.
  */
 export type JudgeSetting =
-  | { kind: "jev" }
+  | { kind: "clef"; model?: ClefModel }
   | { kind: "openai"; model?: string; effort?: Effort; inFlight?: number; form?: Form };
 
 export interface Settings {
@@ -57,8 +61,12 @@ export interface Settings {
 }
 
 const KNOWN_KEYS = ["endpoint", "cut", "threshold", "maxCalls", "judge"] as const;
-const JEV_JUDGE_KEYS = ["kind"];
+const CLEF_JUDGE_KEYS = ["kind", "model"];
 const OPENAI_JUDGE_KEYS = ["kind", "form", "model", "effort", "inFlight"];
+
+function isClefModel(model: unknown): model is ClefModel {
+  return (CLEF_MODELS as readonly unknown[]).includes(model);
+}
 
 /** What the --judge, --model and --effort flags asked for. Absent when not given. */
 export interface JudgeFlags {
@@ -67,31 +75,35 @@ export interface JudgeFlags {
   effort?: Effort;
 }
 
-/** The judge a run uses, before the Jev model is read from the environment. */
+/** The judge a run uses, with every value filled in. */
 export type JudgeChoice =
-  | { kind: "jev" }
+  | { kind: "clef"; model: ClefModel }
   | { kind: "openai"; model: string; effort: Effort; inFlight: number; form: Form };
 
 /**
- * A flag beats the file, which beats the default. A model or an effort asked for while the
- * judge is Jev is a mistake, and says so, rather than being dropped.
+ * A flag beats the file, which beats the default. An effort asked for while the judge is Clef,
+ * or a model Clef does not have, is a mistake, and says so, rather than being dropped.
  */
 export function chooseJudge(
   file: JudgeSetting | undefined,
   flags: JudgeFlags,
 ): { ok: true; choice: JudgeChoice } | { ok: false; reason: string } {
-  const kind = flags.judge ?? file?.kind ?? "jev";
-  if (kind === "jev") {
-    const stray: string[] = [];
-    if (flags.model !== undefined) stray.push("--model");
-    if (flags.effort !== undefined) stray.push("--effort");
-    if (stray.length > 0) {
+  const kind = flags.judge ?? file?.kind ?? "clef";
+  if (kind === "clef") {
+    if (flags.effort !== undefined) {
       return {
         ok: false,
-        reason: `${stray.join(" and ")} ${stray.length === 1 ? "is" : "are"} for the openai judge, and this run uses jev. Add --judge openai, or set "judge" in ${SETTINGS_FILE}.`,
+        reason: `--effort is for the openai judge, and this run uses clef. Add --judge openai, or set "judge" in ${SETTINGS_FILE}.`,
       };
     }
-    return { ok: true, choice: { kind: "jev" } };
+    if (flags.model !== undefined && !isClefModel(flags.model)) {
+      return {
+        ok: false,
+        reason: `--model for the clef judge must be ${CLEF_MODELS.join(" or ")}, not ${flags.model}. For an OpenAI model add --judge openai.`,
+      };
+    }
+    const base = file?.kind === "clef" ? file : undefined;
+    return { ok: true, choice: { kind: "clef", model: flags.model ?? base?.model ?? DEFAULT_CLEF_MODEL } };
   }
   const base = file?.kind === "openai" ? file : undefined;
   return {
@@ -111,17 +123,17 @@ export type JudgeParse ={ ok: true; judge: JudgeSetting } | { ok: false; reason:
 /** Checks the `judge` value. Every key it may hold is listed, and anything else is an error. */
 export function parseJudge(file: string, raw: unknown): JudgeParse {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
-    return { ok: false, reason: `"judge" in ${file} must be an object, such as {"kind": "jev"}.` };
+    return { ok: false, reason: `"judge" in ${file} must be an object, such as {"kind": "clef"}.` };
   }
   const record = raw as Record<string, unknown>;
   const kind = record["kind"];
-  if (kind !== "jev" && kind !== "openai") {
+  if (kind !== "clef" && kind !== "openai") {
     return {
       ok: false,
-      reason: `"judge.kind" in ${file} must be "jev" or "openai", not ${JSON.stringify(kind)}.`,
+      reason: `"judge.kind" in ${file} must be "clef" or "openai", not ${JSON.stringify(kind)}.`,
     };
   }
-  const allowed = kind === "jev" ? JEV_JUDGE_KEYS : OPENAI_JUDGE_KEYS;
+  const allowed = kind === "clef" ? CLEF_JUDGE_KEYS : OPENAI_JUDGE_KEYS;
   for (const key of Object.keys(record)) {
     if (!allowed.includes(key)) {
       return {
@@ -130,7 +142,17 @@ export function parseJudge(file: string, raw: unknown): JudgeParse {
       };
     }
   }
-  if (kind === "jev") return { ok: true, judge: { kind: "jev" } };
+  if (kind === "clef") {
+    const model = record["model"];
+    if (model === undefined) return { ok: true, judge: { kind: "clef" } };
+    if (!isClefModel(model)) {
+      return {
+        ok: false,
+        reason: `"judge.model" in ${file} must be ${CLEF_MODELS.map((name) => `"${name}"`).join(" or ")} for the clef judge, not ${JSON.stringify(model)}.`,
+      };
+    }
+    return { ok: true, judge: { kind: "clef", model } };
+  }
 
   const judge: JudgeSetting = { kind: "openai" };
   const model = record["model"];

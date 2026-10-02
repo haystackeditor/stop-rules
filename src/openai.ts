@@ -1,6 +1,6 @@
 /**
  * OpenAI judge transport. One Responses API request per piece, with strict structured output.
- * Budget, retries, 429 handling and the failure classes are Jev's, from jev.ts, so a run
+ * Budget, retries, 429 handling and the failure classes are Clef's, from clef.ts, so a run
  * behaves the same whichever judge it asks. No Node-only imports, so it also runs on edge
  * runtimes.
  *
@@ -21,9 +21,9 @@ import {
   type FailureClass,
   type FetchLike,
   type SlotGate,
-} from "./jev.js";
+} from "./clef.js";
 import type { Effort } from "./judge.js";
-import type { JevView } from "./types.js";
+import type { JudgeView } from "./types.js";
 
 export const OPENAI_ENDPOINT = "https://api.openai.com/v1/responses";
 /** What a 401 from OpenAI reads as. Team mode translates it for the user. */
@@ -33,7 +33,7 @@ export const OPENAI_BILLING_EXHAUSTED =
   "the OpenAI account is out of credits or over its spending limit. Add credits at OpenAI, then run again.";
 
 /**
- * The system instruction, as measured. It is as close to the claim Jev is asked as a system
+ * The system instruction, as measured. It is as close to the claim Clef is asked as a system
  * instruction can be, and it names the answer's order because the answer carries no rule ids.
  */
 export const SYSTEM_INSTRUCTION =
@@ -65,10 +65,10 @@ export function rulesBlock(rules: readonly OpenAiRule[]): string {
 }
 
 /**
- * One piece exactly as the engine builds it for Jev: the file, the diff with the code around
+ * One piece exactly as the engine builds it for Clef: the file, the diff with the code around
  * it, and in `functions` mode the whole function after the change.
  */
-export function pieceBlock(view: JevView): string {
+export function pieceBlock(view: JudgeView): string {
   let text = `File: ${view.file}\n\nDiff:\n${view.diff}\n`;
   for (const unit of view.function ?? []) {
     text += `\nThe whole function ${unit.name} after the change, lines ${unit.fromLine}-${unit.toLine}:\n${unit.text}\n`;
@@ -77,7 +77,7 @@ export function pieceBlock(view: JevView): string {
 }
 
 /** The user message: the rules first, the piece last. */
-export function userInput(view: JevView, rules: readonly OpenAiRule[]): string {
+export function userInput(view: JudgeView, rules: readonly OpenAiRule[]): string {
   return `${rulesBlock(rules)}\n${pieceBlock(view)}`;
 }
 
@@ -535,7 +535,7 @@ export class OpenAiClient {
   }
 
   /**
-   * Runs nodes with bounded concurrency, the same way JevClient.askAll does. A node the model
+   * Runs nodes with bounded concurrency, the same way ClefClient.askAll does. A node the model
    * calls too long is halved and both halves are queued.
    */
   async askAll<T, A>(nodes: readonly OpenAiNode<T, A>[]): Promise<OpenAiNodeOutcome<T, A>[]> {

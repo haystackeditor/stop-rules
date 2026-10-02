@@ -1,4 +1,5 @@
-TYPESAFE_API_KEY=your-jev-api-key-from-typesafe
+STOP_RULES_CLOUDFLARE_ACCOUNT_ID=the-32-hex-character-cloudflare-account-id
+STOP_RULES_CLOUDFLARE_API_TOKEN=a-cloudflare-api-token-with-the-workers-ai-permission
 STOP_RULES_TOKEN=a-random-team-token-openssl-rand-hex-24
 # Only when your repos use the openai judge.
 OPENAI_API_KEY=your-openai-api-key

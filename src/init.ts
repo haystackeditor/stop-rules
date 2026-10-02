@@ -14,7 +14,7 @@ import {
 } from "./languages.js";
 import { resolveRepo } from "./repo.js";
 import { parseRules, STARTER_RULES } from "./rules.js";
-import { describeJudge, type Effort, type JudgeInfo, type JudgeKind } from "./judge.js";
+import { DEFAULT_CLEF_MODEL, describeJudge, judgeInfo, type Effort, type JudgeInfo, type JudgeKind } from "./judge.js";
 import {
   chooseJudge,
   DEFAULT_CUT,
@@ -72,7 +72,7 @@ export interface InitReport {
   cut: CutMode;
   /** Team mode when this repo sends its questions to a team server, local mode otherwise. */
   mode: "team" | "local";
-  /** Which judge this repo asks. The Jev model is read from the environment at run time. */
+  /** Which judge this repo asks. */
   judge: JudgeInfo;
   bundle: { path: string; written: boolean };
   grammars: InitGrammars;
@@ -116,7 +116,7 @@ function failure(repo: string, reason: string): InitReport {
     repo,
     cut: DEFAULT_CUT,
     mode: "local",
-    judge: { kind: "jev", model: "jev-latest" },
+    judge: { kind: "clef", model: DEFAULT_CLEF_MODEL },
     bundle: { path: BUNDLE_PATH, written: false },
     grammars: noGrammars(),
     rules: { path: ".stop-rules.md", created: false },
@@ -172,7 +172,7 @@ export async function init(options: InitOptions): Promise<InitReport> {
   if (!existingSettings.ok) return failure(root, existingSettings.reason);
   const cut = options.cut ?? existingSettings.loaded.settings.cut ?? DEFAULT_CUT;
 
-  // The judge flags ask for, else the one this repo already set, else Jev.
+  // The judge flags ask for, else the one this repo already set, else Clef.
   const judgeFlagsGiven =
     options.judge !== undefined || options.model !== undefined || options.effort !== undefined;
   const pickedJudge = chooseJudge(existingSettings.loaded.settings.judge, {
@@ -182,10 +182,7 @@ export async function init(options: InitOptions): Promise<InitReport> {
   });
   if (!pickedJudge.ok) return failure(root, pickedJudge.reason);
   const choice = pickedJudge.choice;
-  const judge: JudgeInfo =
-    choice.kind === "jev"
-      ? { kind: "jev", model: "jev-latest" }
-      : { kind: "openai", model: choice.model, effort: choice.effort, form: choice.form };
+  const judge: JudgeInfo = judgeInfo(choice);
 
   const report: InitReport = {
     ok: true,
@@ -203,7 +200,7 @@ export async function init(options: InitOptions): Promise<InitReport> {
     errors: [],
   };
 
-  // Team mode: write the endpoint into the repo, so no developer needs the Jev key.
+  // Team mode: write the endpoint into the repo, so no developer needs the judge's key.
   const wroteKeys: string[] = [];
   if (options.team !== undefined) {
     const written = await writeTeamConfig(root, options.team);
@@ -233,8 +230,8 @@ export async function init(options: InitOptions): Promise<InitReport> {
     // An inFlight the file already had is kept; the flags set kind, model and effort only.
     const existingJudge = existingSettings.loaded.settings.judge;
     const setting: JudgeSetting =
-      choice.kind === "jev"
-        ? { kind: "jev" }
+      choice.kind === "clef"
+        ? { kind: "clef", model: choice.model }
         : {
             kind: "openai",
             form: choice.form,
@@ -326,7 +323,7 @@ export async function init(options: InitOptions): Promise<InitReport> {
       ? 'Store the team token: printf %s "$TOKEN" | stop-rules login --token-stdin'
       : judge.kind === "openai"
         ? 'Give it your own OpenAI key: set OPENAI_API_KEY, or run printf %s "$KEY" | stop-rules login --openai-key-stdin'
-        : 'Give it your own Jev key from TypeSafe: set TYPESAFE_API_KEY, or run printf %s "$KEY" | stop-rules login --jev-key-stdin',
+        : 'Give it your Cloudflare account for Clef: set CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN (a token with the Workers AI permission), or run printf %s "$CLOUDFLARE_API_TOKEN" | stop-rules login --cloudflare-token-stdin --cloudflare-account <account id>',
   );
   report.todo.push(`Edit ${report.rules.path} so it says what your team actually cares about.`);
   // Nothing to parse means nothing was installed to parse it with, and the user is the only
@@ -480,7 +477,7 @@ export function renderInit(report: InitReport): string[] {
         : `  team server already set to ${report.team.endpoint} (from ${report.team.path})`,
     );
   }
-  const keyName = report.judge.kind === "openai" ? "OpenAI key" : "Jev key";
+  const keyName = report.judge.kind === "openai" ? "OpenAI key" : "Cloudflare API token";
   lines.push(`  judge: ${describeJudge(report.judge)}`);
   lines.push(
     report.mode === "team"

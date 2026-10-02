@@ -13,7 +13,7 @@
  * Every mode reads the file's new text out of the snapshot, because that is what the code
  * around each piece is built from, and a file it cannot read there is reported as not checked.
  * The one case with no file text at all is `score --diff`, where the caller passes no reader
- * and the output says that Jev saw the diff alone.
+ * and the output says that the judge saw the diff alone.
  */
 
 import { addedLines, chunkRange, type FileDiff, type Piece } from "./diff.js";

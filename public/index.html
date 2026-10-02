@@ -20,12 +20,12 @@
   <body>
     <h1>stop-rules team server</h1>
     <p>
-      This is a locked down proxy for Jev and the OpenAI judge. It holds the API keys so
+      This is a locked down proxy for Clef on Workers AI and the OpenAI judge. It holds the API keys so
       that nobody on the team has to, and it answers three routes:
     </p>
     <ul>
       <li><code>GET /health</code>, which says whether the server is configured</li>
-      <li><code>POST /v1/systemone</code>, Jev, which needs the team token</li>
+      <li><code>POST /v1/clef</code>, Clef, which needs the team token</li>
       <li><code>POST /v1/responses</code>, the OpenAI judge, which needs the team token</li>
     </ul>
     <p>

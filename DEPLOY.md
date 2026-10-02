@@ -1,15 +1,22 @@
 # Deploying the stop-rules team server
 
-One person deploys one small endpoint that holds the Jev API key. After that every
-developer's Stop hook is a thin client with no Jev key: it sends its questions to your
-endpoint with a team token. All the checking logic, and your `.stop-rules.md`, stay in your
-own repository.
+One person deploys one small endpoint that holds a Cloudflare API token for Clef on Workers
+AI. After that every developer's Stop hook is a thin client with no token of its own: it
+sends its questions to your endpoint with a team token. All the checking logic, and your
+`.stop-rules.md`, stay in your own repository.
 
 The server is a locked down proxy and nothing more. It answers `GET /health` and
-`POST /v1/systemone`, it requires the team token on the questions route, it caps the body
-at 1,000,000 bytes, it rejects anything that is not a set of `noul` questions, it sets the
-Jev model itself, and it relays the upstream status, body and `Retry-After` unchanged so
-the client's own rate limit backoff and request splitting keep working.
+`POST /v1/clef`, it requires the team token on the questions route, it caps the body at
+1,000,000 bytes, it rejects anything that is not a set of at most 64 `noul` questions for
+`clef` or `clef-flash`, it forwards only the model, the piece and the questions to
+`https://api.cloudflare.com/client/v4/accounts/<account id>/ai/run/@cf/cloudflare/<model>`
+with its own token, and it relays the upstream status, body and `Retry-After` unchanged so
+the client's own rate limit backoff, its check that Clef read the whole piece and its request
+splitting keep working. The model is the one the repository's `.stop-rules.json` asks for,
+because the client keys its cache on it; set `STOP_RULES_CLEF_MODEL` to pin the server to one
+model, and a repository asking for the other is refused with a message that says which to set.
+It calls Workers AI over the REST API on every platform, the Worker included, so one code path
+serves them all.
 
 For a repository whose judge is openai (see the README's "Which judge") it also answers
 `POST /v1/responses`, with the same team token check, the same body cap and the same
@@ -18,48 +25,57 @@ only the fields the client sends (`model`, `reasoning`, `instructions`, `input`,
 `max_output_tokens`, `prompt_cache_key`), with `"store": false`, to
 `https://api.openai.com/v1/responses` with its own `OPENAI_API_KEY`. The model and effort
 come from the repository's `.stop-rules.json`, because the client keys its cache on them.
-It keeps at most 12 calls open to OpenAI per instance, counted apart from Jev's 12, and waits
-up to 60 seconds for an answer instead of Jev's 30, because the model reasons first: the
+It keeps at most 12 calls open to OpenAI per instance, counted apart from Clef's 12, and waits
+up to 60 seconds for an answer instead of Clef's 30, because the model reasons first: the
 slowest of 804 calls at effort medium took 26 seconds.
 
-## The rate limit is per Jev account, so the server holds a line
+## The rate limit is per Cloudflare account, so the server holds a line
 
-One server instance keeps at most 12 calls open to Jev at a time. Past that it answers 429
+One server instance keeps at most 12 calls open to Clef at a time. Past that it answers 429
 with `Retry-After: 1`, and the client backs off through the same code path it uses for a 429
-from Jev itself, so nothing is lost.
+from Workers AI itself, so nothing is lost.
 
 Read that number honestly:
 
-- The measured Jev limit is per account, not per server: about 16 calls in flight is fine,
-  and 32 gets about half of them refused.
+- Workers AI's limit is per Cloudflare account, not per server, and its limit for Clef has not
+  been measured here. The 12 was set against the scoring service the tool used before Clef,
+  where about 16 calls in flight were fine and 32 got about half refused.
 - On a serverless platform (Cloudflare Workers, Vercel, Netlify, Lambda, Deno Deploy,
   Supabase) the cap is **per instance**. The platform can run many instances at once, and
   they do not know about each other, so a big team can still go past the account limit. The
   clients handle that as a 429 and slow down.
 - One container or VM is one instance, so there the cap is the whole team's.
 
-## Every deploy needs the same two secrets
+## Every deploy needs the same three values
 
 | Name | What it is |
 |---|---|
-| `TYPESAFE_API_KEY` | Your Jev API key from TypeSafe. It never leaves the server. |
+| `STOP_RULES_CLOUDFLARE_ACCOUNT_ID` | The Cloudflare account Clef runs on: 32 hex characters, shown on the account's home page in the dashboard. Not a secret. |
+| `STOP_RULES_CLOUDFLARE_API_TOKEN` | A Cloudflare API token for that account that can use Workers AI. It never leaves the server. |
 | `STOP_RULES_TOKEN` | The token your developers send. Make one with `openssl rand -hex 24`. |
 | `OPENAI_API_KEY` | Needed only when a repository's judge is openai. Your OpenAI API key. It never leaves the server. |
 
-A team that only uses the openai judge can leave `TYPESAFE_API_KEY` out: the server is ready as
-soon as the token and one judge's key are set, and each route answers 503 with the name of the
-key it is missing.
+Workers AI bills the account: $0.24 per million input tokens for `clef`, $0.09 for
+`clef-flash`. A team that only uses the openai judge can leave the two Cloudflare values out:
+the server is ready as soon as the token and one judge's values are set, and each route
+answers 503 with the names it is missing.
 
-Optional: `STOP_RULES_JEV_MODEL` (default `jev-latest`), `STOP_RULES_JEV_UPSTREAM`
-(default `https://api.typesafe.ai/v1/systemone`), `PORT` (default 8080, container targets
-only).
+Optional: `STOP_RULES_CLEF_MODEL` (`clef` or `clef-flash`; unset, each repository's own setting
+is used), `PORT` (default 8080, container targets only).
 
 Open `<endpoint>/health` in a browser after deploying. It reports which names are still
-missing, never their values, and which judge's route is ready:
+missing, never their values, any value that is set but cannot be used (a
+`STOP_RULES_CLEF_MODEL` that is not `clef` or `clef-flash`, which makes the Clef route answer
+503), and which judge's route is ready:
 
 ```
-{"ok":true,"service":"stop-rules","version":"0.1.0","configured":true,"missing":[],"judges":{"jev":true,"openai":true}}
+{"ok":true,"service":"stop-rules","version":"0.1.0","configured":true,"missing":[],"problems":[],"judges":{"clef":true,"openai":true}}
 ```
+
+It answers 200 while at least one judge can answer and 503, with `"ok":false`, while none can,
+so a platform's health check and `stop-rules login --check` fail on a server that would refuse
+every question. A platform that gates a deploy on its health check therefore needs the values
+set before the first deploy, which every button below asks for.
 
 ## Then point each repository at it
 
@@ -82,7 +98,7 @@ matters because an editor started from a dock does not inherit your shell export
 Status words are used exactly as follows:
 
 - **ran locally in the platform's own runtime**: the shipped entry file served real traffic
-  under that platform's runtime on this machine, including a real Jev call.
+  under that platform's runtime on this machine, including a real call to the judge.
 - **config validated only**: the platform's config file parses with a real parser and its
   keys match the platform's current documentation, but that platform's own tooling never
   ran here.
@@ -94,22 +110,30 @@ Status words are used exactly as follows:
 No button below has been clicked yet. The repository went public on 21 September 2026, so
 the buttons can now be tried; until one is, its row's status word is the whole claim.
 
+The statuses were earned by the server as it was before Clef, when the questions route was
+Jev's. The Clef route has since run for real twice, on 2 October 2026, against Workers AI on a
+real account: under Node with `stop-rules serve`, and under workerd with `wrangler dev` 4.136.3
+on the Worker entry, each with a client repository pointed at it (`login --check` passed, a
+change with an empty `catch` scored 0.985 on the swallowed errors rule and `check` exited 2, a
+clean change scored 0.041 and exited 0). No target has been redeployed since, so every other
+row is as it was for the old route.
+
 | Target | How | Prompts for | Endpoint afterwards | Status |
 |---|---|---|---|---|
-| Cloudflare Workers | Deploy button, or `npx wrangler deploy` | the secrets listed in `.dev.vars.example` | `https://stop-rules.<subdomain>.workers.dev` | **deployed for real** on 21 September 2026 with `npx wrangler deploy`, both secrets set, a client repo pointed at it, one real check answered through it (0.91 on the `fetch` example), a wrong token refused, then deleted; **deployed for real again** on 22 September 2026 with all three secrets, `OPENAI_API_KEY` included, and both judges answered through it (see below) |
-| Vercel | Deploy button | both secrets, from the `env` query parameter | `https://<app>.vercel.app/api` | config validated only, wrapper executed under Node |
-| Netlify | Deploy to Netlify button | both secrets, from `netlify.toml` | the site URL | config validated only, wrapper executed under Node |
-| Render | Deploy to Render button | both secrets, from `render.yaml` `sync: false` | the Render service URL | image ran locally, `render.yaml` config validated only |
-| Google Cloud Run | Run on Google Cloud button | both secrets, from `app.json` | the Cloud Run service URL | image ran locally, `app.json` config validated only |
-| Heroku | Deploy to Heroku button | both secrets, from `app.json` | `https://<app>-<hash>.herokuapp.com` | image ran locally, `app.json` and `heroku.yml` config validated only |
-| DigitalOcean App Platform | Deploy to DO button | both secrets, from `.do/deploy.template.yaml` | the App Platform URL | image ran locally, template config validated only |
-| AWS Lambda | CloudFormation Launch Stack, function inlined in the template | both secrets, as `NoEcho` parameters | the function URL, from the stack output | the generated inline function ran locally under Node 22 against Function URL events; template config validated only |
-| Deno Deploy | New app from the repo, entrypoint `deploy/deno/main.ts` | both secrets, in the dashboard | the app's URL | ran locally in the platform's own runtime (Deno 2.9.7) |
+| Cloudflare Workers | Deploy button, or `npx wrangler deploy` | the values listed in `.dev.vars.example` | `https://stop-rules.<subdomain>.workers.dev` | **deployed for real** on 21 and 22 September 2026 before Clef (see below); the Clef route **ran locally in the platform's own runtime**, `wrangler dev`, on 2 October 2026 |
+| Vercel | Deploy button | the three values, from the `env` query parameter | `https://<app>.vercel.app/api` | config validated only, wrapper executed under Node |
+| Netlify | Deploy to Netlify button | the three values, from `netlify.toml` | the site URL | config validated only, wrapper executed under Node |
+| Render | Deploy to Render button | the three values, from `render.yaml` `sync: false` | the Render service URL | image ran locally, `render.yaml` config validated only |
+| Google Cloud Run | Run on Google Cloud button | the three values, from `app.json` | the Cloud Run service URL | image ran locally, `app.json` config validated only |
+| Heroku | Deploy to Heroku button | the three values, from `app.json` | `https://<app>-<hash>.herokuapp.com` | image ran locally, `app.json` and `heroku.yml` config validated only |
+| DigitalOcean App Platform | Deploy to DO button | the three values, from `.do/deploy.template.yaml` | the App Platform URL | image ran locally, template config validated only |
+| AWS Lambda | CloudFormation Launch Stack, function inlined in the template | the three values, the token as a `NoEcho` parameter | the function URL, from the stack output | the generated inline function ran locally under Node 22 against Function URL events; template config validated only |
+| Deno Deploy | New app from the repo, entrypoint `deploy/deno/main.ts` | the three values, in the dashboard | the app's URL | ran locally in the platform's own runtime (Deno 2.9.7) |
 | Supabase Edge Functions | `supabase functions deploy stop-rules` | `supabase secrets set` | `https://<ref>.functions.supabase.co/stop-rules` | ran locally in Deno, which is the runtime Supabase uses; the Supabase CLI was not available here |
 | Fly.io | `fly launch` then `fly secrets set` | nothing, you set secrets by command | `https://<app>.fly.dev` | image ran locally, `fly.toml` config validated only |
-| Any Docker host, VM or laptop | `docker build` then `docker run`, or `npm start`, or `stop-rules serve` | env vars you pass | wherever you publish port 8080 | ran locally (image built and served real traffic) |
+| Any Docker host, VM or laptop | `docker build` then `docker run`, or `npm start`, or `stop-rules serve` | env vars you pass | wherever you publish port 8080 | ran locally (image built and served real traffic); the Clef route ran under `stop-rules serve` on 2 October 2026 |
 | Railway | `railway up`, or a template the owner publishes | env vars you set | the Railway service URL | docs-confirmed only |
-| Azure Container Apps | Deploy to Azure button, on a published image | both secrets, as `secureString` parameters | the container app FQDN | config validated only, and it needs a published image first |
+| Azure Container Apps | Deploy to Azure button, on a published image | the three values, the token as a `secureString` parameter | the container app FQDN | config validated only, and it needs a published image first |
 ### Cloudflare Workers
 
 ```markdown
@@ -117,10 +141,11 @@ the buttons can now be tried; until one is, its row's status word is the whole c
 ```
 
 Files: `wrangler.jsonc` (entry `src/server/cloudflare.ts`) and `.dev.vars.example`, which is
-what makes the button ask for the two secrets. By hand:
+what makes the button ask for the three values. By hand:
 
 ```bash
-npx wrangler secret put TYPESAFE_API_KEY
+npx wrangler secret put STOP_RULES_CLOUDFLARE_ACCOUNT_ID
+npx wrangler secret put STOP_RULES_CLOUDFLARE_API_TOKEN
 npx wrangler secret put STOP_RULES_TOKEN
 npx wrangler secret put OPENAI_API_KEY      # only for the openai judge
 npx wrangler deploy
@@ -130,27 +155,38 @@ Each `secret put` asks for the value. To keep a secret out of your terminal, giv
 from a file instead, for example `npx wrangler secret put OPENAI_API_KEY < openai-key-file`.
 On an account with no `stop-rules` Worker yet, the first `secret put` asks whether to create
 one; answer yes (run from a script, wrangler answers yes by itself). `/health` should then
-show `"judges":{"jev":true,"openai":true}`.
+show `"judges":{"clef":true,"openai":true}`. The Worker calls Workers AI through the REST API
+with the token, like every other target, not through an `ai` binding, so the token can belong
+to a different account from the one the Worker runs on. wrangler 4.84 cannot run this Worker
+locally: its runtime stops at compatibility date 2026-04-27 and `wrangler.jsonc` asks for
+2026-09-01. 4.136.3 runs it.
 
-Proven with the OpenAI judge on 22 September 2026, wrangler 4.136.3, using those four commands
-in that order with every value on stdin from a file: `/health` answered `"configured":true` and
-both judges ready right after `deploy`. A client repository built from `examples/demo/project`
-with `agent-change.diff` applied, set up with `init --team <endpoint> --judge openai` (plus
-`--agents claude-code`, since the demo project has no agent config for `init` to detect), then
-`login --token-stdin` and `login --check` (health pass, one real `gpt-6-luna` answer), ran
-`check` through the Worker in the review form: exit 2, the three findings, one call, no cache,
-3.3 seconds. `check --judge jev` through the same Worker: exit 2, the same three findings
-(0.95, 0.93, 0.88), 0.9 seconds. The client held no judge key, only the team token. Nothing in
-`wrangler.jsonc` or `.dev.vars.example` had to change for the OpenAI key.
+Ran for real with Clef on 2 October 2026 under `wrangler dev` 4.136.3, with the three values in
+a `.dev.vars` file that was deleted afterwards, and a throwaway client repository with two
+rules pointed at it: `login --check` passed (health pass, one real Clef answer), a change that
+added a `catch` returning `null` scored 0.985 on the swallowed errors rule and `check` exited 2,
+and a clean change scored 0.041 and exited 0. The Worker has not been redeployed with Clef.
 
-Measured on that deploy, 21 September 2026, with the worker's own log tailed: 8 teammates
-checking at the same moment each got their answer in 1 second, and the worker logged 8
-requests, all OK; 32 at the same moment each got theirs in 2 to 3 seconds, 32 requests
+Before Clef, on 22 September 2026, wrangler 4.136.3 deployed it for real with the OpenAI judge,
+using those commands in that order with every value on stdin from a file: `/health` answered
+`"configured":true` and both judges ready right after `deploy`. A client repository built from
+`examples/demo/project` with `agent-change.diff` applied, set up with
+`init --team <endpoint> --judge openai` (plus `--agents claude-code`, since the demo project has
+no agent config for `init` to detect), then `login --token-stdin` and `login --check` (health
+pass, one real `gpt-6-luna` answer), ran `check` through the Worker in the review form: exit 2,
+the three findings, one call, no cache, 3.3 seconds. The same check through the Worker with
+Jev, then the default judge: exit 2, the same three findings (0.95, 0.93, 0.88), 0.9 seconds.
+The client held no judge key, only the team token. Nothing in `wrangler.jsonc` or
+`.dev.vars.example` had to change for the OpenAI key.
+
+Measured on the 21 September 2026 deploy, with Jev and the worker's own log tailed: 8
+teammates checking at the same moment each got their answer in 1 second, and the worker logged
+8 requests, all OK; 32 at the same moment each got theirs in 2 to 3 seconds, 32 requests
 logged, all OK, and no client saw a 429 or a "not checked". Each teammate was a separate
-repository with its own token login and its own distinct rule text, so no two asked Jev the
-same question. What that run did not exercise: the server's own line of 12 open calls, since
+repository with its own token login and its own distinct rule text, so no two asked the same
+question. What that run did not exercise: the server's own line of 12 open calls, since
 Cloudflare spread 32 short requests without any instance reaching it, so the 429-and-retry
-path is still proven only by reading it.
+path is still proven only by reading it. None of this has been measured with Clef.
 
 Two things seen on the real deploy: `/health` reported both secrets missing for a few seconds
 after `secret put` returned, and was right after that; and `npx wrangler delete` refuses to run
@@ -166,12 +202,12 @@ is a real failure this was caught on, not a precaution.
 ### Vercel
 
 ```markdown
-[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/clone?repository-url=https%3A%2F%2Fgithub.com%2Fhaystackeditor%2Fstop-rules&env=TYPESAFE_API_KEY,STOP_RULES_TOKEN&envDescription=Your%20Jev%20API%20key%20and%20a%20team%20token)
+[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/clone?repository-url=https%3A%2F%2Fgithub.com%2Fhaystackeditor%2Fstop-rules&env=STOP_RULES_CLOUDFLARE_ACCOUNT_ID,STOP_RULES_CLOUDFLARE_API_TOKEN,STOP_RULES_TOKEN&envDescription=Your%20Cloudflare%20account%20id%2C%20a%20Workers%20AI%20API%20token%20and%20a%20team%20token)
 ```
 
 The endpoint to give `stop-rules team` is `https://<app>.vercel.app/api`. Vercel routes by
-file name, so `api/health.ts`, `api/v1/systemone.ts` and `api/v1/responses.ts` are the
-routes and no rewrite rule is involved. The button asks for the two secrets every deploy
+file name, so `api/health.ts`, `api/v1/clef.ts` and `api/v1/responses.ts` are the
+routes and no rewrite rule is involved. The button asks for the three values every deploy
 needs; for the openai judge, add `OPENAI_API_KEY` in the project's environment variables. `vercel.json` sets `buildCommand` to `npm run build:server`, which is the
 TypeScript compile on its own, and serves `public/`
 as the site.
@@ -185,10 +221,10 @@ it does not appear in the documentation pages that were read.
 [![Deploy to Netlify](https://www.netlify.com/img/deploy/button.svg)](https://app.netlify.com/start/deploy?repository=https://github.com/haystackeditor/stop-rules)
 ```
 
-`netlify.toml` builds with `npm run build:server`, publishes `public/`, and lists both secrets
-under `[template.environment]`, whose placeholder strings become the labels the button
+`netlify.toml` builds with `npm run build:server`, publishes `public/`, and lists the three
+values under `[template.environment]`, whose placeholder strings become the labels the button
 shows. `netlify/functions/stop-rules.mts` declares
-`config = { path: ["/health", "/v1/systemone", "/v1/responses"] }`, so those paths go to the
+`config = { path: ["/health", "/v1/clef", "/v1/responses"] }`, so those paths go to the
 function and the site root stays a static page. `OPENAI_API_KEY` is listed there too, and may
 be left empty unless a repository uses the openai judge. The endpoint to give `stop-rules team` is the site URL.
 
@@ -198,8 +234,8 @@ be left empty unless a repository uses the openai judge. The endpoint to give `s
 [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/haystackeditor/stop-rules)
 ```
 
-`render.yaml` declares a Docker web service with `healthCheckPath: /health` and both secrets
-as `sync: false`, which is what makes Render prompt for them while creating the blueprint.
+`render.yaml` declares a Docker web service with `healthCheckPath: /health` and the three
+values as `sync: false`, which is what makes Render prompt for them while creating the blueprint.
 It also sets `autoDeployTrigger: "off"`, so a button deploy does not redeploy itself on
 every push to this repository. Add `/tree/<branch>` to the `repo` parameter for a branch.
 
@@ -209,7 +245,7 @@ every push to this repository. Add `/tree/<branch>` to the `repo` parameter for 
 [![Run on Google Cloud](https://deploy.cloud.run/button.svg)](https://deploy.cloud.run/?git_repo=https://github.com/haystackeditor/stop-rules)
 ```
 
-The button builds the repository's `Dockerfile` and reads the root `app.json` for the two
+The button builds the repository's `Dockerfile` and reads the root `app.json` for the
 prompts. Add `&revision=BRANCH` for a branch other than the default. Afterwards the service
 URL is printed in Cloud Shell and shown in the Cloud Run console.
 
@@ -224,7 +260,7 @@ accepts Heroku's `description`, `keywords`, `logo`, `repository`, `website`, `st
 [![Deploy to Heroku](https://www.herokucdn.com/deploy/button.svg)](https://www.heroku.com/deploy?template=https://github.com/haystackeditor/stop-rules)
 ```
 
-Root `app.json` provides the two prompts and sets `"stack": "container"`, so Heroku builds
+Root `app.json` provides the prompts and sets `"stack": "container"`, so Heroku builds
 `heroku.yml`, which builds the same `Dockerfile`. Heroku sets `$PORT` itself. Buttons do not
 work on Heroku's Fir generation.
 
@@ -235,8 +271,8 @@ work on Heroku's Fir generation.
 ```
 
 `.do/deploy.template.yaml` keeps the app spec under a top level `spec:` key, which the
-button requires. The two env vars are declared with `type: SECRET` and **no** value, which
-is what makes App Platform prompt for them. The deploy button supports public repositories
+button requires. The env vars are declared with **no** value, which is what makes App
+Platform prompt for them, and the secrets among them with `type: SECRET`. The deploy button supports public repositories
 only.
 
 ### AWS Lambda
@@ -244,9 +280,10 @@ only.
 `deploy/aws/template.yaml` carries the whole proxy inline, so there is nothing to build,
 upload or host. It creates a Lambda function on `nodejs22.x`, a function URL with
 `AuthType: NONE`, and the two `lambda:InvokeFunctionUrl` and `lambda:InvokeFunction`
-permissions a public function URL now needs. Both secrets are `NoEcho` parameters, and so is
-`OpenAiApiKey`, which may be left empty unless a repository uses the openai judge. The
-function's timeout is 70 seconds, room for the server's 60 second wait on OpenAI.
+permissions a public function URL now needs. `CloudflareApiToken` and `StopRulesToken` are
+`NoEcho` parameters, and so is `OpenAiApiKey`, which may be left empty unless a repository uses
+the openai judge; `CloudflareAccountId` is a plain parameter that must be 32 hex characters.
+The function's timeout is 70 seconds, room for the server's 60 second wait on OpenAI.
 
 ```
 https://console.aws.amazon.com/cloudformation/home?region=us-east-1#/stacks/create/review?templateURL=<public https url to deploy/aws/template.yaml>&stackName=stop-rules
@@ -254,13 +291,15 @@ https://console.aws.amazon.com/cloudformation/home?region=us-east-1#/stacks/crea
 
 The stack output `Endpoint` is the URL to give `stop-rules team`. Secrets cannot be
 prefilled in that link: CloudFormation ignores `param_` values for `NoEcho` parameters on
-purpose, so the two boxes are filled in by hand in the console.
+purpose, so those boxes are filled in by hand in the console. The account id can be, as
+`&param_CloudflareAccountId=<id>`.
 
 The inline code is generated, never hand written:
 
 ```bash
 npm run compile        # compiles, bundles, and checks that the template below is current
 npm run build:aws      # rewrite deploy/aws/template.yaml after changing the server
+npm run compile        # again: the template inlines the compiled server, so check it once more
 ```
 
 Unconfirmed: whether the console accepts a `raw.githubusercontent.com` URL as
@@ -271,13 +310,13 @@ to publish the link.
 ### Deno Deploy
 
 Create an app from the repository and set the entrypoint to `deploy/deno/main.ts`. There is
-no build step: Deno runs the TypeScript directly. Set both secrets as environment variables
+no build step: Deno runs the TypeScript directly. Set the three values as environment variables
 in the dashboard. A `deno.json` is optional, so this repository does not ship one.
 
 ### Supabase Edge Functions
 
 ```bash
-supabase secrets set TYPESAFE_API_KEY=... STOP_RULES_TOKEN=...   # add OPENAI_API_KEY=... for the openai judge
+supabase secrets set STOP_RULES_CLOUDFLARE_ACCOUNT_ID=... STOP_RULES_CLOUDFLARE_API_TOKEN=... STOP_RULES_TOKEN=...   # add OPENAI_API_KEY=... for the openai judge
 supabase functions deploy stop-rules
 ```
 
@@ -290,7 +329,7 @@ function's own URL.
 
 ```bash
 fly launch                      # rewrites app and primary_region in fly.toml for you
-fly secrets set TYPESAFE_API_KEY=... STOP_RULES_TOKEN=...   # add OPENAI_API_KEY=... for the openai judge
+fly secrets set STOP_RULES_CLOUDFLARE_ACCOUNT_ID=... STOP_RULES_CLOUDFLARE_API_TOKEN=... STOP_RULES_TOKEN=...   # add OPENAI_API_KEY=... for the openai judge
 fly deploy
 ```
 
@@ -302,14 +341,16 @@ checks `/health`. Fly has no deploy button: its documented path is the CLI.
 ```bash
 docker build -t stop-rules .
 docker run -p 8080:8080 \
-  -e TYPESAFE_API_KEY=... -e STOP_RULES_TOKEN=... -e OPENAI_API_KEY=... stop-rules
+  -e STOP_RULES_CLOUDFLARE_ACCOUNT_ID=... -e STOP_RULES_CLOUDFLARE_API_TOKEN=... \
+  -e STOP_RULES_TOKEN=... -e OPENAI_API_KEY=... stop-rules
 ```
 
 Or with Node 20 or newer and no container:
 
 ```bash
 npm ci && npm run build:server
-TYPESAFE_API_KEY=... STOP_RULES_TOKEN=... OPENAI_API_KEY=... npm start        # or: stop-rules serve --port 8080
+STOP_RULES_CLOUDFLARE_ACCOUNT_ID=... STOP_RULES_CLOUDFLARE_API_TOKEN=... STOP_RULES_TOKEN=... \
+  OPENAI_API_KEY=... npm start        # or: stop-rules serve --port 8080
 ```
 
 The image is `node:22-alpine`, listens on `$PORT` (default 8080) and binds `0.0.0.0`.
@@ -324,7 +365,7 @@ action and this repository does not fake it. Until then:
 railway up                      # Railway builds the Dockerfile it finds at the root
 ```
 
-Then set both variables on the service. This repository ships no `railway.json`, because
+Then set the three variables on the service. This repository ships no `railway.json`, because
 Railway's config as code is deprecated and new services cannot opt into it.
 
 ### Azure Container Apps
@@ -337,8 +378,9 @@ repository's `Dockerfile` is an owner action. After that:
 [![Deploy to Azure](https://aka.ms/deploytoazurebutton)](https://portal.azure.com/#create/Microsoft.Template/uri/https%3A%2F%2Fraw.githubusercontent.com%2Fhaystackeditor%2Fstop-rules%2Fmain%2Fdeploy%2Fazure%2Fcontainer-app.json)
 ```
 
-The template takes both secrets as `secureString` parameters, stores them as container app
-secrets and passes them to the container by `secretRef`. It takes `openaiApiKey` the same way,
+The template takes the Cloudflare token and the team token as `secureString` parameters,
+stores them as container app secrets and passes them to the container by `secretRef`, and
+passes the account id, which is not a secret, as a plain value. It takes `openaiApiKey` the same way as the tokens,
 with an empty default for a team that does not use the openai judge. Unconfirmed: whether
 Container Apps accepts a secret whose value is empty, since this template was never deployed. The `endpoint` output is the URL to
 give `stop-rules team`. The CLI alternative that does build from source is
@@ -386,8 +428,9 @@ HTTP 200 when this file was written.
 
 ## What the server never does
 
-It never returns the Jev key, the OpenAI key or the team token, in a body, a header or a log
-line. Error messages are passed through a redaction step that replaces any of them with `[redacted]`
-before it can be returned. `GET /health` reports only the names of missing variables. The
+It never returns the Cloudflare API token, the OpenAI key or the team token, in a body, a
+header or a log line. Error messages are passed through a redaction step that replaces any of them with `[redacted]`
+before it can be returned. `GET /health` reports only the names of missing variables, and of
+a variable set to something unusable it names the variable and what it must be, never the value. The
 token comparison hashes both sides with SHA-256 and compares the digests byte by byte with
 no early exit.

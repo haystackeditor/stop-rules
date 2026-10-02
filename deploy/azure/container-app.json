@@ -20,9 +20,13 @@
       "defaultValue": "ghcr.io/haystackeditor/stop-rules:latest",
       "metadata": { "description": "Public image built from this repository's Dockerfile." }
     },
-    "typesafeApiKey": {
+    "cloudflareAccountId": {
+      "type": "string",
+      "metadata": { "description": "The Cloudflare account Clef runs on, 32 hex characters." }
+    },
+    "cloudflareApiToken": {
       "type": "secureString",
-      "metadata": { "description": "Your Jev API key from TypeSafe. It stays on the server." }
+      "metadata": { "description": "A Cloudflare API token for that account with the Workers AI permission. It stays on the server." }
     },
     "stopRulesToken": {
       "type": "secureString",
@@ -62,7 +66,7 @@
             "transport": "auto"
           },
           "secrets": [
-            { "name": "typesafe-api-key", "value": "[parameters('typesafeApiKey')]" },
+            { "name": "cloudflare-api-token", "value": "[parameters('cloudflareApiToken')]" },
             { "name": "stop-rules-token", "value": "[parameters('stopRulesToken')]" },
             { "name": "openai-api-key", "value": "[parameters('openaiApiKey')]" }
           ]
@@ -74,7 +78,8 @@
               "image": "[parameters('image')]",
               "resources": { "cpu": 0.5, "memory": "1Gi" },
               "env": [
-                { "name": "TYPESAFE_API_KEY", "secretRef": "typesafe-api-key" },
+                { "name": "STOP_RULES_CLOUDFLARE_ACCOUNT_ID", "value": "[parameters('cloudflareAccountId')]" },
+                { "name": "STOP_RULES_CLOUDFLARE_API_TOKEN", "secretRef": "cloudflare-api-token" },
                 { "name": "STOP_RULES_TOKEN", "secretRef": "stop-rules-token" },
                 { "name": "OPENAI_API_KEY", "secretRef": "openai-api-key" },
                 { "name": "PORT", "value": "8080" }
