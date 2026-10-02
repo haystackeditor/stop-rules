@@ -176,7 +176,7 @@ the same pieces for both, at the tool's default bar of 0.6 and at 0.5:
 | Jev, the scoring service the tool used before | 11 | 1 | 20 | 10 | 0.977 | |
 
 At the default bar Clef catches 7 more of the 32 than Jev did for 3 more plainly false flags.
-The 0.5 counts use the first reviewer's rulings, under which Jev had 10 plainly false flags and
+Both bars' counts use the first reviewer's rulings (the workbench's default `v1-first` labels), under which Jev had 10 plainly false flags at 0.5 and
 an AUC of 0.977; a second reviewer later settled Jev at 20 and 0.978 at 0.5 (the OpenAI table
 below), and Clef's flags have not had that second look. That run sent each piece's diff on its
 own with the older wording of the question; what ships also sends the 25 lines around each piece
