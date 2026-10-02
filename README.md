@@ -2,15 +2,19 @@
 
 `stop-rules` holds your coding agent to your team's written coding rules. When the agent
 finishes a turn, it cuts the code changed since the last check into pieces, one git diff hunk
-each, and asks [Jev](https://typesafe.ai) one yes or no question per piece and per rule, with 25
-lines of the surrounding file so the question can be answered. If a rule is likely broken, it
-hands that piece of code back to the agent so it fixes it before you see it. Jev is the default
-judge; OpenAI's `gpt-6-luna` is the other one, see [Which judge](#which-judge).
+each, and asks Clef, Cloudflare's decision model on
+[Workers AI](https://developers.cloudflare.com/workers-ai/), one yes or no question per piece and
+per rule, with 25 lines of the surrounding file so the question can be answered. If a rule is
+likely broken, it hands that piece of code back to the agent so it fixes it before you see it.
+Clef is the default judge; OpenAI's `gpt-6-luna` is the other one, see
+[Which judge](#which-judge).
 
 ![The stop-rules demo: a Claude Code window where the agent ends its turn, the Stop hook fires, and Jev and GPT-6 Luna check the same change side by side; Jev answers in 0.20 s, Luna in 2.64 s, the code goes back, the agent fixes it, and the second check is clean](examples/demo/stop-rules-demo.gif)
 
 [examples/demo/README.md](examples/demo/README.md) explains the demo, where every number on it
-comes from, and the commands that reproduce the checks.
+comes from, and the commands that reproduce the checks. It was recorded on 22 September 2026,
+when Jev, the scoring service Clef replaced, was the default judge; the flow is the same with
+Clef.
 
 Cutting by git diff hunk is the default, and it needs nothing installed. A team that would
 rather have one whole function per piece switches to tree-sitter with
@@ -43,13 +47,18 @@ Then:
 
 ```bash
 cd /path/to/your/repo
-printf %s "$JEV_KEY" | node .stop-rules/stop-rules.mjs login --jev-key-stdin
+printf %s "$CLOUDFLARE_API_TOKEN" | node .stop-rules/stop-rules.mjs login \
+  --cloudflare-token-stdin --cloudflare-account <your account id>
 node .stop-rules/stop-rules.mjs login --check
 ```
 
+If `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN` are already set in your shell, the names
+wrangler reads, skip the first `login`: they are used as they are.
+
 Edit `.stop-rules.md` so it says what your team cares about, then commit `.stop-rules.md`,
-the `.stop-rules/` folder and the agent config files. Your key is not in any of them: it
-lives in `~/.config/stop-rules/jev-key`, mode 0600.
+the `.stop-rules/` folder and the agent config files. Your token is not in any of them: it
+lives in `~/.config/stop-rules/cloudflare-token`, mode 0600, beside the account id in
+`cloudflare-account`.
 
 `.stop-rules/` holds the checker, one file. Commit it and teammates and cloud agents get the
 check with nothing to install.
@@ -62,10 +71,10 @@ breaks.
 
 ## Quick start, a team
 
-One person deploys a small server that holds the Jev key. Nobody else needs the key.
+One person deploys a small server that holds the Cloudflare API token. Nobody else needs it.
 
 1. Deploy the server. [DEPLOY.md](DEPLOY.md) has a row per cloud, fastest first, and the
-   two secrets every one of them needs.
+   values every one of them needs.
 2. Point the repo at it, once, and commit the file it writes:
 
    ```bash
@@ -81,19 +90,34 @@ One person deploys a small server that holds the Jev key. Nobody else needs the 
 
 Share the team token through your password manager, not in a repo or a chat.
 
-## You bring your own Jev key
+## You bring your own Cloudflare account
 
-Jev is TypeSafe's service. You need your own API key from them; we do not provide one and
-there is no offline mode. In team mode the key sits on your server, so developers only need
-the team token. A repo on the OpenAI judge needs an OpenAI key instead, in the same places.
+Clef runs on Workers AI in your own Cloudflare account, and Cloudflare bills it: $0.24 per
+million input tokens for `clef`, $0.09 for `clef-flash`, and Clef writes no output tokens. You
+need the account id, which the dashboard shows on the account's home page, and an API token
+for that account that can use Workers AI. We do not provide either and there is no offline
+mode. In team mode both sit on your server, so developers only need the team token. A repo on
+the OpenAI judge needs an OpenAI key instead, in the same places.
 
 ## Which judge
 
-Two services can score the pieces. **Jev** is the default: TypeSafe's scoring service, asked for
-a probability per piece and per rule, up to four pieces per call. The other is **OpenAI's
-`gpt-6-luna`** through the Responses API with strict JSON output. Everything else is the same
-with either judge: the cutting, the 25 lines around each change, the bar, the cache, the report,
-the hooks and team mode.
+Two services can score the pieces. **Clef** is the default: Cloudflare's decision model on
+Workers AI, asked for a probability per piece and per rule, one piece per call with every rule
+as a question, at most 64 to a call. It comes in two sizes: `clef` (27B, the default) and
+`clef-flash` (9B, cheaper, and poorly calibrated for this question: at a bar of 0.5 it caught 2
+of the 32 real breaks below). The other is **OpenAI's `gpt-6-luna`** through the Responses API
+with strict JSON output. Everything else is the same with either judge: the cutting, the 25
+lines around each change, the bar, the cache, the report, the hooks and team mode.
+
+Workers AI reads only the first 2,048 tokens of the piece a call sends Clef, about 5 to 9 KB of
+diff depending on the code, drops the rest without saying so, and still answers. stop-rules
+never uses such an answer. The 25 lines around a piece ride along only when the piece and the
+lines come to at most 5,120 bytes, which Clef is sure to read whole; otherwise the piece goes on
+its own and the run says so. A piece over 9,216 bytes is split in two before it is sent. After
+every call, the tool checks the token count Workers AI reports: when it shows that Clef stopped
+at 2,048 tokens of the piece, the answer is thrown away and the piece is split in two and asked
+again. A piece that cannot be split any further is reported as not checked, larger than Clef
+reads, never as clean.
 
 The OpenAI judge has two forms. The default is the **review form**: one call per change, with
 every piece of the change in it, each piece's diff and its 25 lines around it grouped under its
@@ -117,7 +141,7 @@ under "Findings rejected" in the report, is counted in `check --json` as
 `stats.rejectedFindings`, and the rest of the answer still counts. It never fails the run.
 
 The other is the **scores form**, `"form": "scores"`: one call per piece, one probability per
-rule, the same question Jev is asked. It is what the tool shipped first and it stays for anyone
+rule, the same question Clef is asked. It is what the tool shipped first and it stays for anyone
 who wants it.
 
 To switch a repo to OpenAI, run this and commit the `.stop-rules.json` it writes:
@@ -129,27 +153,41 @@ node .stop-rules/stop-rules.mjs login --check
 ```
 
 That puts `"judge": {"kind": "openai", "form": "review", "model": "gpt-6-luna", "effort": "low"}`
-in `.stop-rules.json`. `{"kind": "jev"}`, or no `judge` key at all, is Jev. `effort` is how long
-the model reasons before it answers: `none`, `low`, `medium` or `high`, and `low` is the default.
+in `.stop-rules.json`. `{"kind": "clef"}`, or no `judge` key at all, is Clef, and
+`{"kind": "clef", "model": "clef-flash"}` is the smaller Clef. `effort` is how long the OpenAI
+model reasons before it answers: `none`, `low`, `medium` or `high`, and `low` is the default.
 `--judge`, `--model` and `--effort` on any command beat the file for that run. The key comes from
 `OPENAI_API_KEY`, from `OPENAI_API_KEY_FILE`, or from the file `login --openai-key-stdin` writes
-next to the Jev key, mode 0600. In team mode the server holds it instead, as `OPENAI_API_KEY`
-(see [DEPLOY.md](DEPLOY.md)).
+next to the Cloudflare token, mode 0600. In team mode the server holds it instead, as
+`OPENAI_API_KEY` (see [DEPLOY.md](DEPLOY.md)).
 
 The judges never mix. The cache key holds the judge, the model, the effort and the form, so an
 answer from one is never read as an answer from another. Nothing switches judge on its own: a
 missing key, a rejected key, a model your key cannot use, or an answer that breaks the schema
 stops the run with one line, and the baseline stays where it was.
 
-What the trade looks like. Measured on 22 September 2026 on the same 240 real agent written
-changes (the six starter rules, 32 real breaks after the latest adjudication), at a bar of 0.5,
-the bar the comparison was run at, not the tool's default of 0.6. Time and money are per change,
-the way a stop hook sees one turn: the time is the median of the calls one change needed, and the
-money is what all 240 changes cost.
+Clef against the judge it replaced. Measured on 2 October 2026 on 240 real agent written
+changes cut into 804 pieces, the six starter rules and 32 real breaks, one piece per call, at a
+bar of 0.5: Clef caught 22 of the 32 with 8 plainly false flags, where Jev, the scoring service
+the tool used before, caught 20 with 10 on the same pieces. Both counts use the first reviewer's
+rulings, under which Jev had 10 plainly false flags and an AUC of 0.977; a second reviewer later
+settled Jev at 20 and 0.978 (the table below), and Clef's flags have not had that second look.
+The two rank pieces the same (AUC 0.976 against 0.977), and a Clef call took a median 578 ms.
+That run sent each piece's diff on its own with the older wording of the question; what ships
+also sends the 25 lines around each piece and names them in the question, which was measured
+with Jev (see "What the judge sees" below) and not yet with Clef. `clef-flash` caught 2 of the
+32 at 0.5.
+
+What the OpenAI trade looks like. Measured on 22 September 2026 on the same 240 changes (the six
+starter rules, 32 real breaks after the latest adjudication), at a bar of 0.5, the bar the
+comparison was run at, not the tool's default of 0.6, against Jev, which was the default judge
+then. Time and money are per change, the way a stop hook sees one turn: the time is the median of
+the calls one change needed, and the money is what all 240 changes cost. The flag counts in this
+table carry the second reviewer's rulings, so they are not comparable with the Clef figures above.
 
 | Judge | Real breaks caught, of 32 | Plainly false flags | Arguable flags | Flags not yet ruled on | AUC | Median time per change | Dollars, 240 changes |
 |---|---|---|---|---|---|---|---|
-| Jev | 20 | 20 | 6 | 0 | 0.978 | 193 ms | $0.027 |
+| Jev (replaced by Clef) | 20 | 20 | 6 | 0 | 0.978 | 193 ms | $0.027 |
 | gpt-6-luna, review form, effort low | 31 | 40 | 21 | 0 | 0.976 | 2,643 ms | $0.059 |
 | gpt-6-luna, review form, effort low, 25 lines around each piece | 31 | 39 | 17 | 0 | 0.977 | 3,243 ms | $0.095 |
 | gpt-6-luna, scores form, effort low | 29 | 62 | 16 | 0 | 0.952 | 6,406 ms one call after another, 3,081 ms with a change's calls at once | $0.147 |
@@ -169,7 +207,7 @@ each piece, which is what the tool sends. The review form at effort medium caugh
 On the demo turn in this repo's examples, measured with this build, five runs each with the
 answer cache deleted first, the whole `check` took a median 3.61 s on the broken turn with the
 review form, exit 2 all five times with the three right lines quoted, and 1.17 s on the repaired
-turn, exit 0 all five times. Jev took 0.57 s and 0.55 s. The knobs and what each one costs are in
+turn, exit 0 all five times. Jev, then the default, took 0.57 s and 0.55 s. The knobs and what each one costs are in
 [docs/TUNING.md](docs/TUNING.md#8-the-judge-judge).
 
 ## Which agents are supported
@@ -278,14 +316,17 @@ live in the hook: 27 of 34 real breaks caught (79%) with 10 false alarms, agains
   it against a server the test starts." Most of the wrong flags we saw were on test files the
   rule had not thought about.
 - If a rule is about a layer, name the folder. "Files under `lib/controllers/` must not
-  build SQL" gives Jev a fact it can see in the path. "Controllers must not build SQL" makes
+  build SQL" gives the judge a fact it can see in the path. "Controllers must not build SQL" makes
   it guess which files are controllers. Layer rules went from 8 false alarms to 3.
 - Turn a soft clause into a concrete ban. "The `Money` helpers do the arithmetic" caught 0 of
   3 real breaks. "Never add, sum, multiply or take a percentage of cents values with plain
   arithmetic outside `lib/money.rb`; call `Money.sum_cents`, `Money.percent_of` instead"
-  caught 3 of 3, and found 2 more nobody had noticed. Jev sees the ban, not the intent.
+  caught 3 of 3, and found 2 more nobody had noticed. The judge sees the ban, not the intent.
 
-### Which kinds of rule Jev can judge, measured
+### Which kinds of rule can be judged, measured
+
+Measured with Jev, the scoring service Clef replaced; the kinds of rule a piece can and cannot
+show are the same for any judge that sees only the piece.
 
 Six small projects were written for this, one each in Ruby, Python, Go, Rust, React and a
 near-empty TypeScript seed. Each had 8 team rules the agent never saw and 8 tasks, each task
@@ -318,13 +359,13 @@ thing cost $0.07 in Jev calls. Haiku broke a rule in 30 of its 48 sessions, Sonn
 - **Careful: a rule about which layer or folder a file is in.** Every break was caught, and
   there were more false alarms than catches. Every false alarm was a flag on a file outside
   the layer the rule restricts: a model, the composition root, a README. Name the folder the
-  rule applies to and Jev has the fact it needs.
+  rule applies to and the judge has the fact it needs.
 - **Careful: tests.** 12 of the 28 wrong or arguable flags were on test files where the rule
   said nothing about tests. Say what the rule means for tests.
 - **No evidence it works: a rule about a value's format** ("timestamps are ISO 8601 in UTC").
   0 of 3 caught. Three is a small number, but it is all we have.
 - **Does not work: a rule that needs the rest of the codebase**, because a piece and the code
-  around it is all Jev sees.
+  around it is all the judge sees.
 - **The honest headline.** Where the code already follows the rules and the task extends
   it, the agents mostly followed the rules by copying what they saw (Rust: 2 breaks in 16
   sessions). The tool earned its keep in two places: old code that already breaks the rules
@@ -347,23 +388,26 @@ thing cost $0.07 in Jev calls. Haiku broke a rule in 30 of its 48 sessions, Sonn
    `"cut": "chunks"` groups a file's hunks into pieces of up to 12,000 bytes, also with no
    parser. See [docs/TUNING.md](docs/TUNING.md) for what you gain and lose by switching.
 3. **The code around each piece.** A piece on its own is often too little to judge, so the
-   diff that goes to Jev carries 25 unchanged lines above the change and 25 below, read out of
-   the snapshot. In `"cut": "functions"` a piece that is one function carries that whole
-   function after the change instead, and a piece that is not a function is widened only into
-   lines no other piece of that file owns. This is only what Jev is shown: the report still
-   hands the agent the piece.
+   diff that goes to Clef carries 25 unchanged lines above the change and 25 below, read out of
+   the snapshot, as long as the whole comes to at most 5,120 bytes, which Clef is sure to read
+   whole. In `"cut": "functions"` a piece that is one function carries that whole function after
+   the change instead, and a piece that is not a function is widened only into lines no other
+   piece of that file owns. This is only what Clef is shown: the report still hands the agent
+   the piece.
 4. **One yes or no score per rule.** Every piece is asked about every rule: does the added
-   code break this rule. Jev answers each claim with a probability. At or above the cutoff
-   (0.6 by default) it is a finding. Up to four pieces ride in one request, and a request is
-   also bounded at 60,000 bytes, so a normal turn is one or two requests.
+   code break this rule. Clef answers each claim with a probability. At or above the cutoff
+   (0.6 by default) it is a finding. Each piece rides in a request of its own with every rule as
+   a question, up to 64 to a request, four requests at a time. A piece Clef cannot read whole is
+   split in two and asked again, as "Which judge" explains.
 5. **Tell the agent.** One entry per piece: the file, the line range, the name of the function
    when there is one, then every rule that piece broke with its score, and then the piece's
    diff once. The agent gets the code that broke the rule, not a line number to go and find.
 
-### What Jev sees
+### What the judge sees
 
-Measured on our harness on 20 September 2026, at the default bar of 0.5, over the same 240
-real agent written changes, blind labelled and adjudicated, which hold 31 real breaks:
+Measured on our harness on 20 September 2026 with Jev, the scoring service Clef replaced, at
+the then default bar of 0.5, over the same 240 real agent written changes, blind labelled and
+adjudicated, which hold 31 real breaks:
 
 | What Jev was shown | Real breaks caught, of 31 | Plainly false flags | Flags nobody has ruled on |
 |---|---|---|---|
@@ -379,12 +423,14 @@ clamp two import lines in a 19 line file scored 0.84 on the swallowed errors rul
 neighbour's fault; [docs/TUNING.md](docs/TUNING.md) has that example in full.
 On a second, smaller set of real agent sessions it caught 2 of the 3 real breaks against 1 for
 the piece alone, and it found a missing doc comment that the piece alone missed. The cost of
-the extra lines: 7 of 1,358 clean pairs were newly flagged, and input tokens go from about
-$0.11 to $0.21 per 1,000 changes at TypeSafe's published price.
+the extra lines: 7 of 1,358 clean pairs were newly flagged, and Jev's input tokens went from
+about $0.11 to $0.21 per 1,000 changes at its published price. With Clef the lines ride only
+when the piece and the lines fit in 5,120 bytes, so a big piece goes on its own; the run counts
+those pieces and the report says how many.
 
 Two things we tried and did not build, so nobody spends the time again:
 
-- **Asking Jev whether it needs more information.** It answered "not enough" to 98% of the
+- **Asking Jev, the judge at the time, whether it needs more information.** It answered "not enough" to 98% of the
   questions, and its answer had no relation to whether more context changed the score (AUC
   0.27). There is no signal there to act on.
 - **Widening only where that question asked for it.** 2 to 4 times the calls, and no gain over
@@ -424,11 +470,11 @@ rule is broken.
 
 It never nags twice: a finding the hook has already delivered in this repo is not delivered
 again. A second run over the same code costs nothing, because every answer is cached in the
-repo's git directory, keyed on the model, the exact claim and the exact text Jev was sent,
-which includes the lines around the change. Packing does not change that key, so re-packing
-never throws answers away. And every run has a hard
-ceiling on requests (60 by default, `--max-calls`), counted across retries and splits. When
-it runs out, the work left over is reported as "not checked".
+repo's git directory, keyed on the model, the exact claim and the exact text the judge was
+sent, which includes the lines around the change. Packing does not change that key, so
+re-packing never throws answers away. And every run has a hard ceiling on requests (240 by
+default, one piece per request, `--max-calls`), counted across retries and splits. When it runs
+out, the work left over is reported as "not checked".
 
 That cuts both ways, and it is worth being plain about. The hook tells the agent once. If
 the agent decides the rule does not apply and changes nothing, the next turn is silent while
@@ -487,10 +533,11 @@ adjudication, gives lower counts and the same shape; both runs, every bar from 0
 every cut mode are in [docs/TUNING.md](docs/TUNING.md). Run `stop-rules score` on your own code
 before you settle on a bar.
 
-### Not spamming Jev
+### Not spamming Workers AI
 
-Jev's rate limit is per account, so a whole team shares it and so does every tool on your
-machine. Three things keep this one polite:
+Workers AI's rate limit is per Cloudflare account, so a whole team on one account shares it and
+so does every tool on your machine. Its limit for Clef has not been measured here. Three things
+keep this one polite:
 
 - One run keeps at most 4 requests in flight. On the OpenAI judge that is `"inFlight"` in the
   judge setting, 4 by default, 1 to 8.
@@ -506,10 +553,12 @@ Small samples, and worth knowing before you trust it. The sample is 240 real age
 changes from 104 public repositories, labelled blind by reviewers. There are 32 real breaks in
 it, across the six starter rules.
 
-Every count in this section was measured with the piece alone, before Jev was given the code
-around it. The comparison that led to the change is in "What Jev sees" above: at the default
-bar the wide form caught two fewer real breaks and raised three fewer plainly false flags. So
-read what follows as the shape of the thing on the same sample, not as this build's score.
+Every count in this section was measured with Jev, the scoring service Clef replaced, on the
+piece alone, before it was given the code around it. The comparison that led to the change is
+in "What the judge sees" above: at the default bar the wide form caught two fewer real breaks
+and raised three fewer plainly false flags. Clef's own count on this sample is in
+"Which judge". So read what follows as the shape of the thing on the same sample, not as this
+build's score.
 
 - **At the defaults**, one hunk per piece at 0.5, over the 172 of those changes that mode was
   scored on and the 21 real breaks in them: 14 of 21 caught, and 16 flags the reviewers did not
@@ -530,16 +579,19 @@ hundredth or two and a borderline one moved from 0.45 to 0.80, so the counts nea
 move a little in another run.
 
 Either way it misses things: two thirds of the real breaks on the low count, a third on the
-high one. Scores also move between Jev model versions, so run `stop-rules score` on your own
+high one. Scores also move between judges and model versions, so run `stop-rules score` on your own
 code and see. Every number above, per rule and per bar, is in
 [docs/TUNING.md](docs/TUNING.md).
 
 ## What leaves your machine
 
-Sent to Jev, per request: up to four pieces of your diff, the path of the file each one came
-from, 25 unchanged lines of that file above and below each change (or, in `functions` mode, the
-whole function the change sits in), and the text of your rules. Nothing else: no repo name, no
-history, no file the diff does not touch. In team mode the same request goes to your own server, which adds the Jev key
+Sent to Cloudflare Workers AI for Clef, per request: one piece of your diff, the path of the
+file it came from, 25 unchanged lines of that file above and below each change when they fit
+(or, in `functions` mode, the whole function the change sits in), and the text of your rules.
+At most once per run, when a request comes near what Clef reads, the same rules are sent again
+with no code at all, which is how the tool measures what the rules cost and so tells whether
+Clef read the whole piece. Nothing else: no repo name, no history, no file the diff does not
+touch. In team mode the same request goes to your own server, which adds the Cloudflare token
 and forwards it.
 
 Sent to OpenAI, when the judge is openai, per request: in the review form, every piece of the
@@ -552,11 +604,11 @@ server first, which forwards only those fields with its own key.
 Kept on your machine and never committed, in `<git dir>/stop-rules/`: `state.json` (the
 baseline tree, which findings were delivered, per-session counters), `cache.json` (claim
 hashes and their scores), `run.log` (one JSON line per run, capped at 1 MB) and `lock`. The
-machine wide slots are small files in your cache folder (`$XDG_CACHE_HOME/stop-rules/slots`,
-or `~/Library/Caches/stop-rules/slots` on a Mac, and `openai-slots` beside it for the OpenAI
-judge), each holding a process id and a time. Your
-key or token lives in `~/.config/stop-rules/` with mode 0600. Neither is ever written into
-the repo, printed, or included in an error message.
+machine wide slots are small files in your cache folder (`$XDG_CACHE_HOME/stop-rules/clef-slots`,
+or `~/Library/Caches/stop-rules/clef-slots` on a Mac, and `openai-slots` beside it for the
+OpenAI judge), each holding a process id and a time. Your token, key or account id lives in
+`~/.config/stop-rules/` with mode 0600. None of them is ever written into the repo, and the
+token and keys are never printed or included in an error message.
 
 ## Commands
 
@@ -566,7 +618,8 @@ stop-rules check [--dir <repo>] [--base <rev>] [--json]
 stop-rules score [--dir <repo>] [--base <rev>] [--diff <file>] [--show-context] [--json]
 stop-rules hook [--dir <repo>] --agent <name>
 stop-rules team [--dir <repo>] <url>
-stop-rules login --jev-key-stdin | --openai-key-stdin | --token-stdin | --check [--dir <repo>]
+stop-rules login --cloudflare-token-stdin [--cloudflare-account <id>] | --cloudflare-account <id>
+                 | --openai-key-stdin | --token-stdin | --check [--dir <repo>]
 stop-rules serve [--port n]
 stop-rules baseline --reset [--dir <repo>]
 ```
@@ -574,8 +627,9 @@ stop-rules baseline --reset [--dir <repo>]
 - **init** installs into a repo. `--dir` picks the repo, `--agents` overrides detection,
   `--team` switches the repo to team mode, `--cut functions` adds the parser and the grammars
   for the languages the repo uses and writes `"cut": "functions"` into `.stop-rules.json`,
-  `--judge openai` (with `--model` and `--effort` if you want others than the defaults) writes
-  the judge into `.stop-rules.json`, `--json` prints the same facts for an agent to read.
+  `--judge openai` (with `--model` and `--effort` if you want others than the defaults), or
+  `--judge clef --model clef-flash`, writes the judge into `.stop-rules.json`, `--json` prints
+  the same facts for an agent to read.
 - **check** runs the same pipeline in a terminal, for a pre-commit hook or CI. `check`
   prints its report on stdout and exits 2 when a rule is broken. Exit 0 clean, 2 findings,
   1 could not run. With `--base <rev>` it diffs that revision against your working tree;
@@ -588,17 +642,19 @@ stop-rules baseline --reset [--dir <repo>]
   header names the judge and its model.
 - **hook** is what the agents call. `--agent` says whose protocol to speak.
 - **team** writes the endpoint into `.stop-rules.json`. Commit that file.
-- **login** stores your Jev key, your OpenAI key or your team token, read from stdin so it
-  never lands in shell history. `--check` calls your server's health route and makes one real
-  call to the judge this repo is set to.
+- **login** stores your Cloudflare API token and account id, your OpenAI key or your team
+  token. Secrets are read from stdin so they never land in shell history; the account id, which
+  is not a secret, is a flag value. `--check` calls your server's health route and makes one
+  real call to the judge this repo is set to.
 - **serve** runs the team server on a laptop or a plain VM.
 - **baseline --reset** forgets what was checked, so the next run starts from HEAD.
 
 Shared flags: `--dir <path>` (the repository to work on), `--rules <path>` (default
 `<repo root>/.stop-rules.md`), `--cut <mode>` (default hunks), `--threshold <0..1>`
-(default 0.6), `--max-calls <n>` (default 60, and 240 for the OpenAI scores form, which asks
-once per piece), `--judge jev|openai`, `--model <name>` and `--effort <level>` (the OpenAI judge
-only), `--help`, `--version`.
+(default 0.6), `--max-calls <n>` (default 240, one piece per call, and 60 for the OpenAI review
+form, which asks once per change), `--judge clef|openai`, `--model <name>` (`clef` or
+`clef-flash` for Clef, any model for OpenAI), `--effort <level>` (the OpenAI judge only),
+`--help`, `--version`.
 
 Which repository a command works on is one rule: `--dir` when you give it, and otherwise the
 repository that holds the folder you are in. The copy of stop-rules that `init` vendors into
@@ -616,15 +672,15 @@ committed and holds no secret. Every key is optional, and a flag beats the file.
   "endpoint": "https://stop-rules.your-team.example.com",
   "cut": "hunks",
   "threshold": 0.6,
-  "maxCalls": 60,
-  "judge": {"kind": "jev"}
+  "maxCalls": 240,
+  "judge": {"kind": "clef", "model": "clef"}
 }
 ```
 
 Those are the defaults for the knobs that have one, so a file like that changes nothing.
-`judge` is `{"kind": "jev"}` or `{"kind": "openai", "form": "review", "model": "gpt-6-luna",
-"effort": "low", "inFlight": 4}`, where `form` is `review` or `scores`; see
-[Which judge](#which-judge).
+`judge` is `{"kind": "clef", "model": "clef"}`, where `model` is `clef` or `clef-flash`, or
+`{"kind": "openai", "form": "review", "model": "gpt-6-luna", "effort": "low", "inFlight": 4}`,
+where `form` is `review` or `scores`; see [Which judge](#which-judge).
 `cut` is `hunks` (one diff hunk per piece, no parser, the default), `functions` (tree-sitter,
 one whole function per piece) or `chunks` (a file's hunks grouped into pieces of up to 12,000
 bytes, no parser). A key stop-rules does not know, a value of the wrong type or a value out of
@@ -632,37 +688,41 @@ range stops the run with one line naming the key.
 
 [docs/TUNING.md](docs/TUNING.md) goes through each knob: what it does, what happens when you
 turn it each way, real examples with the scores the live service gave them, what each setting
-caught and flagged on 240 real agent written changes, and what the tokens cost in money at
-TypeSafe's published price.
+caught and flagged on 240 real agent written changes, and what the tokens cost in money.
 
-Environment: `TYPESAFE_API_KEY` or `TYPESAFE_API_KEY_FILE` for your own Jev key,
-`OPENAI_API_KEY` or `OPENAI_API_KEY_FILE` for your own OpenAI key,
-`STOP_RULES_ENDPOINT` and `STOP_RULES_TOKEN` for team mode,
-`STOP_RULES_JEV_ENDPOINT` and `STOP_RULES_JEV_MODEL` to point somewhere else. A variable
-that is set but empty is an error, not a shrug.
+Environment: `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN` (or `CLOUDFLARE_API_TOKEN_FILE`)
+for Clef on your own Cloudflare account, `OPENAI_API_KEY` or `OPENAI_API_KEY_FILE` for your own
+OpenAI key, `STOP_RULES_ENDPOINT` and `STOP_RULES_TOKEN` for team mode. A variable that is set
+but empty is an error, not a shrug, and so is an account id that is not 32 hex characters.
 
 ## Limits, honestly
 
-- You need a Jev API key from TypeSafe, or an OpenAI key for the OpenAI judge.
+- You need a Cloudflare account with Workers AI and an API token for it, or an OpenAI key for
+  the OpenAI judge.
+- Clef reads only the first 2,048 tokens of each piece it is sent, about 5 to 9 KB of diff. A
+  bigger piece is split in halves until each half is read whole, which costs more calls, and a
+  rule whose break spans the two halves can then be missed. A piece that cannot be split any
+  further, such as one enormous line, is reported as not checked.
 - The OpenAI judge's answers can move between runs on a borderline piece. In the scores form,
   measured on an earlier version of the demo, asked eight times,
   cache cleared each time, about the fixed file in the demo, whose only doubtful line is a
   placeholder `https://api.example.com` URL, gpt-6-luna at effort low scored the stubs rule 0.95
   four times and 0.05 or less four times. At effort medium it scored it 0.88 to 0.95 six times
-  in six. Jev scored it 0.18.
+  in six. Jev, then the default judge, scored it 0.18.
 - Each piece is judged on its own, with 25 lines of the same file around it and nothing from
   any other file, so rules about cross-file architecture or consistency across a codebase are
   weak.
 - Those 25 lines are read out of the new file whether or not the same change wrote them, so a
-  line the change added just outside the piece is shown to Jev as if it had always been there.
+  line the change added just outside the piece is shown to the judge as if it had always been there.
   It is the code as it now stands, which is what the rule is about, but it is not a record of
   what changed. In `functions` mode the window of a piece that is not a function stops at the
   first line another piece owns, so there it never happens.
-- A piece that is bigger than 60,000 bytes on its own goes to Jev without those lines. The run
-  says which piece, in the report, in `check --json` and in `run.log`.
+- A piece that with those lines would come to more than 5,120 bytes goes to Clef without them
+  (more than 60,000 bytes of request, for the OpenAI judge). The run says which piece, in the
+  report, in `check --json` and in `run.log`.
 - A piece is one diff hunk, so the agent is handed the hunk the fault sits in and finds the
   exact line itself. A hunk can also start in the middle of a function, so what the agent is
-  handed can have no head, even though Jev saw the lines around it. `"cut": "functions"` hands
+  handed can have no head, even though the judge saw the lines around it. `"cut": "functions"` hands
   over the one function instead, and then a rule about how two functions fit together is not
   seen at all.
 - In `functions` mode a file in a language with no grammar here is cut by diff hunk, and a file
@@ -682,6 +742,16 @@ that is set but empty is an error, not a shrug.
 
 ## Changelog
 
+- **2 October 2026, Clef replaces Jev.** The default judge is now Clef, Cloudflare's decision
+  model on Workers AI, on your own Cloudflare account: `CLOUDFLARE_ACCOUNT_ID` and
+  `CLOUDFLARE_API_TOKEN`, or `login --cloudflare-token-stdin --cloudflare-account <id>`. Jev is
+  gone, with no fallback: `"judge": {"kind": "jev"}` is now an error, `--jev-key-stdin`,
+  `TYPESAFE_API_KEY` and the `STOP_RULES_JEV_*` variables are no longer read, and a stored
+  `jev-key` file is ignored. Clef takes one piece per call, so the default call ceiling is 240.
+  The team server's route is `POST /v1/clef` and it needs `STOP_RULES_CLOUDFLARE_ACCOUNT_ID` and
+  `STOP_RULES_CLOUDFLARE_API_TOKEN` in place of `TYPESAFE_API_KEY`; redeploy it and run
+  `stop-rules login --check` in a repo. Cached answers were keyed on Jev, so the first run asks
+  every piece once more.
 - **22 September 2026, a second judge.** `"judge": {"kind": "openai"}` in `.stop-rules.json`
   scores the pieces with OpenAI's `gpt-6-luna` instead of Jev, by default in the review form:
   one call per change, each finding quoting its line. Jev stays the default, and a
@@ -698,7 +768,7 @@ that is set but empty is an error, not a shrug.
   below every change, or the whole function in `functions` mode, and the claim sentence says so.
   Both go into the cache key, so the first run after this upgrade asks every piece once more and
   costs what a first run costs. Nothing you have to do. `score --show-context` prints what Jev
-  saw. The numbers behind it are in "What Jev sees" above.
+  saw. The numbers behind it are in "What the judge sees" above.
 
 ## Contributing
 
@@ -709,6 +779,7 @@ committed together with any source change:
 ```bash
 npm install
 npm run typecheck
+npm test
 npm run compile      # compiles, bundles, refreshes bin/, checks the tables and the AWS template
 npm run verify:bin   # fails if anything in bin/ is not a fresh copy
 ```
@@ -721,10 +792,15 @@ is.
 `src/server/handler.ts` has drifted from the version in `package.json`, when a node type
 named in `src/languages.ts` is not in that grammar, or when the language table above is not
 the one in the code. Run `npm run build:aws` after changing the server, so the committed
-CloudFormation template keeps matching the code.
+CloudFormation template keeps matching the code. `npm run build:aws` inlines the compiled
+server, so run it after `npm run compile`, then `compile` once more to check it.
 
-There are no tests on purpose. Changes are verified by running the thing, and the
-measurements that decided every default are under [docs/measurements/](docs/measurements/).
+`npm test` runs the one test suite there is, on a scripted fetch with no network: the Clef
+transport (Workers AI's answer shape, its errors, the check that Clef read the whole piece and
+the halving that follows), the engine's one piece per call, the judge settings, the Clef
+credentials and the team server's Clef route. Everything else is verified by running the thing,
+and the measurements that decided every default are under
+[docs/measurements/](docs/measurements/).
 
 ## License
 

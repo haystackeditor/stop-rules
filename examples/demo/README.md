@@ -19,6 +19,11 @@ is [`page/index.html`](page/index.html): open it in a browser for Pause, Restart
 loads Haystack's fonts from a `fonts/` folder next to it, which is not in this repository, so a
 clone shows the system fonts instead.
 
+The demo, the page and every number below were made on 22 September 2026, when Jev was the
+default judge. Jev has since been replaced by Clef, Cloudflare's decision model on Workers AI,
+and the tool no longer talks to Jev; the recording is kept as it was made. "Run it yourself"
+at the bottom runs the same turns with Clef, and says what Clef answered.
+
 ## Where each number on the page comes from
 
 Every number is read from the comparison's `summary.json`
@@ -203,7 +208,8 @@ bar the file states.
 
 ## Run it yourself
 
-You need Node 20 or newer, git, and a Jev key from TypeSafe. From the root of this clone:
+You need Node 20 or newer, git, and a Cloudflare account with an API token that can use
+Workers AI. From the root of this clone:
 
 ```bash
 demo=$(mktemp -d)
@@ -219,9 +225,15 @@ git -C "$demo" apply "$PWD/examples/demo/agent-fix.diff"
 (cd "$demo" && node .stop-rules/stop-rules.mjs check); echo "exit $?"   # clean, exit 0
 ```
 
-Set `TYPESAFE_API_KEY` or `TYPESAFE_API_KEY_FILE` first, or store the key once with
-`stop-rules login --jev-key-stdin`. Use `score` in place of `check` to see every rule's score,
-including the ones under the bar.
+Set `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN` (or `CLOUDFLARE_API_TOKEN_FILE`) first,
+or store them once with
+`printf %s "$CLOUDFLARE_API_TOKEN" | stop-rules login --cloudflare-token-stdin --cloudflare-account <account id>`.
+Use `score` in place of `check` to see every rule's score, including the ones under the bar.
+
+Run exactly that way with Clef on 2 October 2026, once each, cold: the broken turn scored 0.99 on
+the `fetch` rule, 0.97 on the stubs rule and 0.96 on the swallowed errors rule, and `check`
+exited 2 with the three findings; the repaired turn scored 0.16, 0.05 and 0.04 and `check`
+exited 0. One Clef call each.
 
 To time the end-to-end check the way the last row was timed, with the broken change applied:
 
@@ -233,7 +245,7 @@ for i in 0 1 2 3 4 5; do
 done
 ```
 
-Scores move a little between runs and between Jev versions, so yours will not be exactly these.
+Scores move a little between runs and between model versions, so yours will not be exactly these.
 
 ## Files
 

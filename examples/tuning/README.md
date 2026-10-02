@@ -46,16 +46,17 @@ node /path/to/stop-rules/bin/stop-rules.mjs score --cut functions
 
 Drop the flag to see the same file as one piece, which is what a default install does.
 
-Scores move between model versions. The ones in `docs/TUNING.md` were last run on 20 September
-2026, when the service reported `jev-1.13.0`, which is also the version that scored
-`helper.diff` and `layers.diff` the day before.
+Scores move between judges and model versions. The ones in `docs/TUNING.md` were last run on
+20 September 2026 with Jev, the judge Clef replaced, when it reported `jev-1.13.0`, which is
+also the version that scored `helper.diff` and `layers.diff` the day before. They have not been
+re-run with Clef, so run them yourself and expect different numbers.
 
-A `--diff` run is the one case where Jev sees no code around the change, because a diff file has
-no file content to read it from. The scratch repository runs at the bottom of this file do carry
-it: 25 unchanged lines each way, or the whole function in `functions` mode. Add `--show-context`
-to any `score` run to print what Jev was sent.
+A `--diff` run is the one case where the judge sees no code around the change, because a diff
+file has no file content to read it from. The scratch repository runs at the bottom of this file
+do carry it: 25 unchanged lines each way, or the whole function in `functions` mode. Add
+`--show-context` to any `score` run to print what the judge was sent.
 
 `layers.diff` is worth reading before you write a rule of that kind. Its last two files hold
 the same function twice, once under `handlers/` and once under `services/`, so the folder is
-the only thing that tells them apart. On this pair Jev used it; in the experiment behind that
+the only thing that tells them apart. On this pair Jev, the judge of the time, used it; in the experiment behind that
 section of `docs/TUNING.md`, on real handlers and services, it did not.

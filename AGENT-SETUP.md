@@ -4,8 +4,9 @@ You are a coding agent. This file tells you how to install `stop-rules` in the h
 repository, end to end, and how to prove it works before you say you are done.
 
 `stop-rules` runs after a coding agent finishes a turn. It cuts the code that changed into
-pieces, one git diff hunk each, asks Jev whether any piece breaks one of the team's rules, and
-hands the piece that broke it back to the agent so the agent fixes it.
+pieces, one git diff hunk each, asks Clef, Cloudflare's decision model on Workers AI, whether
+any piece breaks one of the team's rules, and hands the piece that broke it back to the agent so
+the agent fixes it.
 
 ## 1. Ask the human these questions, all at once, before you do anything
 
@@ -15,8 +16,11 @@ hands the piece that broke it back to the agent so the agent fixes it.
    Vercel, Netlify, Render, Google Cloud Run, Heroku, DigitalOcean App Platform, AWS
    Lambda, Deno Deploy, Supabase Edge Functions, Fly.io, Railway, Azure Container Apps, or
    any Docker host or plain VM.
-3. Do you have a Jev API key from TypeSafe? If they do not, stop here and tell them:
-   nothing works without one, and we do not provide keys.
+3. Which Cloudflare account should Clef run on, and do you have an API token for it that can
+   use Workers AI? Clef is billed to that account by Cloudflare. If they have no Cloudflare
+   account, stop here and tell them: nothing works without one (or an OpenAI key for the openai
+   judge), and we do not provide either. If `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN`
+   are already set in their shell, for wrangler, say so and ask whether to use those.
 
 Wait for the answers. Do not guess them.
 
@@ -92,9 +96,9 @@ measured totals behind each one, so read it before you answer questions about it
 |---|---|---|
 | `cut` | `hunks` | `hunks` uses no parser, is one file of 390 KB, covers every language, and hands the agent the git diff hunk the fault sits in. `functions` uses tree-sitter, hands the agent the one function at fault instead, and copies a few megabytes of grammar files into `.stop-rules/`. `chunks` installs the same one file as the default and uses bigger pieces, up to 12,000 bytes, which is the quietest of the three and hands over the most code. |
 | `threshold` | `0.6` | The bar a score must reach to count. Lower catches more and flags more. Measured on 96 agent sessions with well-worded rules: 0.5 caught 59 of 62 real breaks with 13 wrong flags, 0.6 caught 56 with 5, 0.7 caught 46 with 2. There is no single right number: it is how much the team minds a wrong flag against a missed break. Tell them that, show them those three rows, and say that `stop-rules score` on their own recent changes is how to see where their real problems and their noise land before settling on one. |
-| `maxCalls` | `60` | Requests to Jev in one run. When it runs out, the rest of the change is reported as not checked and picked up on the next run. |
-| `endpoint` | none, so each person uses their own Jev key | Team mode: questions go to your team's server, which holds the one key. |
-| `judge` | `{"kind": "jev"}` | Which service scores the pieces. The one-line switch is `node .stop-rules/stop-rules.mjs init --judge openai`, which writes `{"kind": "openai", "form": "review", "model": "gpt-6-luna", "effort": "low"}`: one call per change, and each finding hands the agent the offending line and a reason. Measured at bar 0.5 on 240 changes: Jev caught 20 of 32 real breaks with 10 plainly false flags, $0.027 for all 240 and 193 ms a change; gpt-6-luna in the review form at effort low caught 31 with 10, $0.059 and 2,643 ms a change. `"form": "scores"` is the older per-piece probability form. The README's "Which judge" has the whole table. |
+| `maxCalls` | `240` | Requests to the judge in one run. Clef takes one piece per request, so that covers 240 pieces. When it runs out, the rest of the change is reported as not checked and picked up on the next run. |
+| `endpoint` | none, so each person uses their own Cloudflare account and token | Team mode: questions go to your team's server, which holds the one token. |
+| `judge` | `{"kind": "clef", "model": "clef"}` | Which service scores the pieces. `"model": "clef-flash"` is the smaller Clef: cheaper, and it caught 2 of 32 real breaks at bar 0.5 where `clef` caught 22, so do not suggest it for quality. The other judge is OpenAI: `node .stop-rules/stop-rules.mjs init --judge openai` writes `{"kind": "openai", "form": "review", "model": "gpt-6-luna", "effort": "low"}`: one call per change, and each finding hands the agent the offending line and a reason. Measured at bar 0.5 on 240 changes, on the first reviewer's rulings: Clef caught 22 of 32 real breaks with 8 plainly false flags and a median 578 ms a call; gpt-6-luna in the review form at effort low caught 31 with 10, $0.059 for all 240 and 2,643 ms a change. `"form": "scores"` is the older per-piece probability form. The README's "Which judge" has the whole story, including the later rulings. |
 
 Say this about the cut, in plain words, because it is the one the human is most likely to want
 changed: the default is git diff hunks, and nothing is installed for it. Tree-sitter would buy
@@ -116,7 +120,7 @@ node /tmp/stop-rules/bin/stop-rules.mjs init --dir /path/to/repo --cut functions
 ```
 
 `threshold` and `maxCalls` you put in `.stop-rules.json` by hand, next to whatever `init`
-wrote. Then show them the scores on their own code, which costs a few Jev calls and no
+wrote. Then show them the scores on their own code, which costs a few Clef calls and no
 guesswork:
 
 ```bash
@@ -124,9 +128,10 @@ node .stop-rules/stop-rules.mjs score
 ```
 
 That prints every piece with every rule's score and applies no bar, so the human can see
-where their own code sits before they settle on one. Jev is shown each piece with 25 unchanged
-lines of the file above and below the change, or the whole function in `functions` mode, so if a
-score surprises the human, run `score --show-context` and read what Jev actually saw.
+where their own code sits before they settle on one. Clef is shown each piece with 25 unchanged
+lines of the file above and below the change when they fit in what it reads, or the whole
+function in `functions` mode, so if a score surprises the human, run `score --show-context` and
+read what Clef actually saw.
 
 ## 6. Write the rules from the team's own documents
 
@@ -141,12 +146,16 @@ way this checklist says, went from catching 3 in 5 real breaks to 4 in 5 on 48 s
 wording had never seen, with no more false alarms. The numbers are in
 [docs/TUNING.md](docs/TUNING.md).
 
-### What Jev sees, so you know what a rule can ask for
+### What Clef sees, so you know what a rule can ask for
 
-For each changed piece of code, Jev is given the file path, the changed lines with 25
-unchanged lines above and below them from the same file, and the rule. Nothing else: not the
-rest of the file, not other files, not the tests, not what the code used to do. A rule that
-needs anything outside that is a guess, and Jev will guess.
+For each changed piece of code, Clef is given the file path, the changed lines with 25
+unchanged lines above and below them from the same file when they fit in the 2,048 tokens of a
+piece it reads, and the rule. Nothing else: not the rest of the file, not other files, not the
+tests, not what the code used to do. A rule that needs anything outside that is a guess, and
+Clef will guess.
+
+The measurements below were made with Jev, the scoring service Clef replaced; what a piece can
+and cannot show is the same for any judge that sees only the piece.
 
 ### The checklist. Every rule passes all seven or gets rewritten
 
@@ -160,7 +169,7 @@ needs anything outside that is a guess, and Jev will guess.
    a test that catches the error it expects. Write the sentence: "A test under `test/` may
    call `fetch` against a server the test starts."
 3. **It names the folder, when the rule is about a layer.** "Controllers must not build SQL"
-   makes Jev guess which files are controllers, and it guessed wrong on a model, a README and
+   makes the judge guess which files are controllers, and it guessed wrong on a model, a README and
    the composition root. "Files under `lib/controllers/` must not build SQL; a model under
    `lib/models/` may" gives it the fact it can see in the path. Layer rules went from 6 false
    alarms to 1 this way.
@@ -175,7 +184,7 @@ needs anything outside that is a guess, and Jev will guess.
    every rewording, because the fact it needs is in another function.
 6. **A linter cannot do it.** Unused variables, missing doc comments, import order, naming
    of exported symbols: a linter does these for nothing, every time, with a line number.
-   Jev gave "every exported function has a doc comment" scores in the wrong order.
+   The judge gave "every exported function has a doc comment" scores in the wrong order.
 7. **It says what to do instead**, in the same sentence.
 
 ### Before and after, from the measurements
@@ -195,12 +204,12 @@ needs anything outside that is a guess, and Jev will guess.
   are written: 7 of 7 caught, 0 false alarms after rewording, against 9 false alarms before.
 - **"A value must have this format or go through this helper".** Works only when the helper
   is named and the plain alternative is banned: 0 of 3 before, 5 of 5 after.
-- **"Something must be present"** (a doc comment, a timeout). Mixed: 6 of 7 caught, but Jev
-  also flags code where the thing IS present unless the rule says what presence looks like.
+- **"Something must be present"** (a doc comment, a timeout). Mixed: 6 of 7 caught, but the
+  judge also flagged code where the thing IS present unless the rule says what presence looks like.
 - **Judgment calls** ("comments that only restate the code", "a fallback that hides a
   failure"). Real breaks get caught, and so do near misses; expect arguable flags. Keep them
   if the team wants them, and expect to reword them once after the first week.
-- **Rules that need another file.** Do not write them. Jev cannot see the other file.
+- **Rules that need another file.** Do not write them. Clef cannot see the other file.
 
 ### Also
 
@@ -223,11 +232,17 @@ In team mode, the human's team token:
 printf %s "$STOP_RULES_TOKEN" | node .stop-rules/stop-rules.mjs login --token-stdin
 ```
 
-In local mode, the human's own Jev key:
+In local mode, the human's own Cloudflare API token, and the id of the account it belongs to:
 
 ```bash
-printf %s "$JEV_KEY" | node .stop-rules/stop-rules.mjs login --jev-key-stdin
+printf %s "$CLOUDFLARE_API_TOKEN" | node .stop-rules/stop-rules.mjs login \
+  --cloudflare-token-stdin --cloudflare-account <account id>
 ```
+
+The account id is not a secret, which is why it is a flag value; it is 32 hex characters, and
+`login` refuses anything else. If `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN` are set in
+the environment the hook runs in, they are used as they are and nothing needs storing; an
+editor started from a dock does not inherit shell exports, so storing them is the safer default.
 
 Or, when the repo's judge is openai, their own OpenAI key:
 
@@ -243,11 +258,12 @@ Rules you must follow here:
 - If the human has not given you the secret, do not ask for it in chat. Give them the exact
   line to run themselves.
 - If the secret is already in a file, pipe the file and never name it in an argument:
-  `cat /path/to/key | node .stop-rules/stop-rules.mjs login --jev-key-stdin`. Do not write
-  `printf %s "$(cat /path/to/key)"`, which puts the secret in the process list.
+  `cat /path/to/token | node .stop-rules/stop-rules.mjs login --cloudflare-token-stdin`. Do not
+  write `printf %s "$(cat /path/to/token)"`, which puts the secret in the process list.
 
-The file it writes is `~/.config/stop-rules/token`, `~/.config/stop-rules/jev-key` or
-`~/.config/stop-rules/openai-key`, mode 0600, outside the repo.
+The files it writes are `~/.config/stop-rules/token`, `~/.config/stop-rules/cloudflare-token`,
+`~/.config/stop-rules/cloudflare-account` or `~/.config/stop-rules/openai-key`, mode 0600,
+outside the repo.
 
 ## 8. Only if the team server is not deployed yet
 
@@ -259,17 +275,22 @@ after the login is yours to run. Do not make the human click buttons or copy com
    (`npx wrangler login`) and wait. Do not ask for tokens or passwords.
 2. Make the team token with a random generator, never from your head:
    `openssl rand -hex 24 > /tmp/stop-rules-token` (mode 600, delete it at the end).
-3. Get the Jev key into a file the same way (step 7) if it is not in one already.
-4. Deploy and set the two secrets from files on stdin, so no secret ever appears in a
-   command line, a log or this conversation. Cloudflare, exactly as proven on 21 September
-   2026, from the stop-rules clone:
+3. Get the Cloudflare API token for Clef into a file the same way (step 7) if it is not in one
+   already, and the account id it belongs to into another.
+4. Deploy and set the values from files on stdin, so no secret ever appears in a command line,
+   a log or this conversation. Cloudflare, as proven on 21 and 22 September 2026 before Clef,
+   with the Clef values in place of the old judge's key, from the stop-rules clone:
 
 ```bash
 npx wrangler deploy                                   # prints the endpoint URL
-npx wrangler secret put TYPESAFE_API_KEY < /path/to/jev-key-file
+npx wrangler secret put STOP_RULES_CLOUDFLARE_ACCOUNT_ID < /path/to/account-id-file
+npx wrangler secret put STOP_RULES_CLOUDFLARE_API_TOKEN < /path/to/cloudflare-token-file
 npx wrangler secret put STOP_RULES_TOKEN < /tmp/stop-rules-token
 npx wrangler secret put OPENAI_API_KEY < /path/to/openai-key-file   # only for the openai judge
 ```
+
+   The Clef route was run under `wrangler dev` against real Workers AI on 2 October 2026; it
+   has not been deployed since the swap, so watch step 5 closely the first time.
 
 5. Wait for `<endpoint>/health` to answer `"configured":true`. It says the secrets are
    missing for a few seconds after they are set; poll every 3 seconds, and stop and tell the
@@ -281,12 +302,13 @@ npx wrangler secret put OPENAI_API_KEY < /path/to/openai-key-file   # only for t
    it in the team's password manager. Never commit it, never paste it into an issue, a chat
    or a log. Delete the file when they say they have it.
 
-For every other cloud, [DEPLOY.md](DEPLOY.md) has the same three steps (deploy, two secrets,
+For every other cloud, [DEPLOY.md](DEPLOY.md) has the same three steps (deploy, the values,
 health) in that platform's own commands, and a deploy button for a human who is setting it
-up without an agent. Two secrets, always the same two: `TYPESAFE_API_KEY` (their Jev key,
-which stays on the server) and `STOP_RULES_TOKEN` (the team token every developer's hook
-sends). A team on the openai judge adds a third, `OPENAI_API_KEY`, and `/health` then shows
-`"judges": {"jev": ..., "openai": true}`.
+up without an agent. Three values, always the same three: `STOP_RULES_CLOUDFLARE_ACCOUNT_ID`
+(the account Clef runs on), `STOP_RULES_CLOUDFLARE_API_TOKEN` (a token for it that can use
+Workers AI, which stays on the server) and `STOP_RULES_TOKEN` (the team token every developer's
+hook sends). A team on the openai judge adds `OPENAI_API_KEY`, and `/health` then shows
+`"judges": {"clef": ..., "openai": true}`.
 
 If you ever need to take the server down, `npx wrangler delete` needs a real terminal; run
 it through `script -q /dev/null npx wrangler delete --force` from a script, and check that
@@ -323,7 +345,7 @@ rm throwaway-stop-rules-check.ts
 node .stop-rules/stop-rules.mjs check
 ```
 
-Step 1 prints `jev: pass`. Step 3 prints one entry for the piece at fault, which is the diff
+Step 1 prints `clef: pass`. Step 3 prints one entry for the piece at fault, which is the diff
 hunk by default and the named function in `functions` mode, with the rules it breaks and its
 diff, and exits 2. Step 5 prints "no rule violations" and exits 0.
 
@@ -378,7 +400,7 @@ Commit:
 
 Never commit, and never print:
 
-- The Jev API key.
+- The Cloudflare API token.
 - The team token.
 - Anything from `~/.config/stop-rules/`.
 
@@ -398,17 +420,19 @@ Never commit, and never print:
   or change the code. There is no accept or ignore list.
 - In team mode: how a teammate joins. They pull, then run the one `login --token-stdin`
   line with the token from the password manager.
-- In local mode: every teammate needs their own Jev key, or the team should move to team
-  mode.
+- In local mode: every teammate needs a Cloudflare API token that can use Workers AI on an
+  account, or the team should move to team mode.
 - That they can run `node .stop-rules/stop-rules.mjs check` by hand any time, and in CI.
 
 ## 12. Troubleshooting: what the real messages mean
 
 | Message | What to do |
 |---|---|
-| `no Jev API key and no team endpoint. Set TYPESAFE_API_KEY, or store a key with stop-rules login --jev-key-stdin, or point this repo at your team server with stop-rules team <url>` | Nothing is configured yet. Do step 7. |
-| `the Jev account is out of credits. Add credits at TypeSafe, then run again.` | The account behind the key has no credits. The check did not run and the same change is checked again next time. The human adds credits at TypeSafe. |
-| `Jev rejected the API key.` | The key is wrong or revoked. Store the right one. |
+| `no Cloudflare account id or API token for Clef, and no team endpoint. Set CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN, or store them with ...` | Nothing is configured yet. Do step 7. A message that names only the account id or only the token means the other one is already there. |
+| `CLOUDFLARE_ACCOUNT_ID does not hold a Cloudflare account id, which is 32 hex characters. ...` | Something else, often the token, is in the account variable or file. Put the account id there. |
+| `the Cloudflare account has no Workers AI allowance left. ...` | Cloudflare refused to run Clef for the account: a 402, or Workers AI's daily allowance error (code 4006) on the free plan. The check did not run and the same change is checked again next time. The human upgrades the account or waits for the allowance. |
+| `Workers AI rejected the Cloudflare account id or API token. The token needs the Workers AI permission on that account.` | Workers AI answered 401 or 403: the token is wrong, revoked, cannot use Workers AI, or belongs to another account. A wrong account id gets the same answer. Store the right pair. |
+| `<file> lines 1-90: larger than Clef reads (2048 tokens of state) and cannot be split further` | That one piece was too big for Clef even after splitting, so it was not checked. It is listed under "Not checked"; nothing is wrong with the setup. |
 | `no OpenAI API key and no team endpoint, and this repo's judge is openai. ...` | The repo is on the openai judge and this machine has no OpenAI key. Do step 7 with `--openai-key-stdin`. |
 | `OpenAI rejected the API key.` | The OpenAI key is wrong or revoked. Store the right one. |
 | `OpenAI will not run <model> at effort <effort> for this key (404): ...` | The key's project cannot use that model. The human picks another model or grants the project access. Nothing switches model on its own. |
@@ -416,7 +440,7 @@ Never commit, and never print:
 | `the team token is missing or wrong; run stop-rules login` | The server said 401. Get the current token from the human and store it again. |
 | `no team token for <url>. Store one with: printf %s "$TOKEN" \| stop-rules login --token-stdin` | Team mode is configured but this machine has no token. |
 | `<repo>/.stop-rules.json sets "x", which stop-rules does not know. The settings are endpoint, cut, threshold, maxCalls, judge.` | A typo in the settings file. Fix that one key. The same shape of message names a wrong type, a value out of range, a `cut` that is not functions, hunks or chunks, or a `judge.effort` that is not none, low, medium or high. |
-| `TYPESAFE_API_KEY is set but empty. Unset it or put your key in it.` | An empty variable beats a stored key, so it has to be one or the other. Same for any other variable set to nothing. |
+| `CLOUDFLARE_API_TOKEN is set but empty. Unset it or put your key in it.` | An empty variable beats a stored token, so it has to be one or the other. Same for any other variable set to nothing. |
 | `no rules file at <path>. Run "stop-rules init" to create one.` | `.stop-rules.md` is missing. Run `init` in that repo. |
 | `no rules found in <path>. Each top-level list item is one rule.` | The rules file has no top-level bullets. Rules are `- ` items at column 0. |
 | `<dir> is not inside a git repository.` | `--dir` pointed somewhere that is not a repo. |
@@ -428,12 +452,12 @@ Never commit, and never print:
 | `<path>/cache.json is not a stop-rules cache. Delete it and run again.` | Delete that one file. Answers are re-fetched. |
 | `the <agent> hook input has no <field>` | The agent sent a payload without a field its own docs promise. Check you are on a current version of that agent, and report it. |
 | `in <config file>, "hooks" is not an object. Nothing was changed: fix the file and run init again.` | That config file has a hand written value where a list or an object belongs. Fix the file; `init` never overwrites it. |
-| `could not reach Jev for any piece of this diff.` | Network or server problem. Nothing was marked as checked, so the next run tries the same code again. |
+| `could not reach Clef for any piece of this diff.` | Network or server problem. Nothing was marked as checked, so the next run tries the same code again. |
 | `still N violations after 3 rounds, leaving them for the user` | The agent has had three tries at the same findings. They are for the human now. |
 | `stop-rules: nothing changed since the last check.` | Nothing changed since the last check. Not an error. |
 | `stop-rules: 1 file changed and none of it could be checked.` | Something did change and none of it was judged, so this is not a clean result. The reasons follow on the "Not checked" lines, usually a missing grammar or a file that will not parse. In `hook` mode the same case exits 1 with that reason instead of staying quiet. |
 | `stop-rules: no rule violations in the 3 pieces that were checked, and 2 not checked, listed below.` | Part of the change was judged and part was not. The part that was judged broke no rule. |
-| `Jev is busy on this machine, this change will be checked on the next run` | Eight Jev calls from other stop-rules runs on this machine were in flight for a minute. Nothing was marked as checked, so the next turn checks the same code. Nothing to fix. |
+| `Clef is busy on this machine, this change will be checked on the next run` | Eight Clef calls from other stop-rules runs on this machine were in flight for a minute. Nothing was marked as checked, so the next turn checks the same code. Nothing to fix. |
 | `no grammar installed for .go, run stop-rules init again to add it` | Only in `functions` mode. This repo gained a language after `init` ran, or the grammars were never copied. Run `init` again in the repo; it copies the missing grammar and leaves everything else alone. The tool never switches to hunks by itself, so this keeps being reported until the grammar is there or the setting changes. |
 | `<file> lines 10-40: could not be parsed as TypeScript` | The file does not parse, so it was not cut into pieces and not checked. Usually the file really is broken: open it. |
 | `the tree-sitter runtime is missing at <path>` | The `.stop-rules/` folder is half there, most likely because only the bundle was committed. Run `init` again in the repo. |
